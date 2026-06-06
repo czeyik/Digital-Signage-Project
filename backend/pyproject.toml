@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["config*", "signage*"]
+
+[project]
+name = "duducar-signage-backend"
+version = "0.1.0"
+description = "DUDU Car in-car digital signage dashboard and device API"
+requires-python = ">=3.10"
+dependencies = [
+  "Django==5.2.8",
+  "djangorestframework==3.17.1",
+  "argon2-cffi==25.1.0",
+  "psycopg[binary]==3.2.13",
+  "Pillow==12.0.0",
+  "boto3==1.42.4",
+  "django-storages[s3]==1.14.6",
+  "gunicorn==23.0.0",
+  "whitenoise==6.11.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==9.0.1",
+  "pytest-django==4.11.1",
+  "ruff==0.14.8",
+]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py"]
+addopts = "-q"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+extend-exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "S", "DJ"]
+ignore = ["DJ001", "DJ008", "DJ012"]
+
+[tool.ruff.lint.per-file-ignores]
+"signage/services.py" = ["S603", "S607"]
+"signage/tests/*.py" = ["S101"]

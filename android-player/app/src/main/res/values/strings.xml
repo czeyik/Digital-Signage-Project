@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">DUDU Signage</string>
+    <string name="admin_description">Controls the approved DUDU signage kiosk.</string>
+    <string name="maintenance">This display is temporarily unavailable.</string>
+    <string name="fallback">DUDU Car</string>
+</resources>
+

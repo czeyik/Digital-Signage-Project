@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="form-card"><h1>{{ title }}</h1><form method="post" enctype="multipart/form-data" class="stack">{% csrf_token %}{{ form.as_p }}<button class="primary" type="submit">Save</button></form></section>
+{% endblock %}
+
