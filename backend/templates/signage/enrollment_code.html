@@ -1,0 +1,5 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="auth-card"><p class="eyebrow">Shown once</p><h1>{{ device }}</h1><p>Enter this code on the approved Android device within 15 minutes.</p><div class="enrollment-code">{{ code }}</div><p>Do not photograph or share this code.</p><a href="{% url 'device-list' %}">Back to devices</a></section>
+{% endblock %}
+

@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <ImageView
+        android:id="@+id/image"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="#000000"
+        android:contentDescription="@null"
+        android:scaleType="fitCenter"
+        android:visibility="gone" />
+
+    <VideoView
+        android:id="@+id/video"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/status"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:padding="48dp"
+        android:text="@string/fallback"
+        android:textColor="#D7F64A"
+        android:textSize="42sp"
+        android:textStyle="bold" />
+
+    <LinearLayout
+        android:id="@+id/enrollment"
+        android:layout_width="520dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="#F7F8F4"
+        android:orientation="vertical"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Enroll this approved display"
+            android:textColor="#10271E"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/enrollmentCode"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:digits="0123456789"
+            android:hint="6-digit one-time code"
+            android:inputType="number"
+            android:maxLength="6" />
+
+        <Button
+            android:id="@+id/enrollButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:text="Enroll" />
+
+        <TextView
+            android:id="@+id/enrollmentError"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textColor="#A42A2A" />
+    </LinearLayout>
+</FrameLayout>
+

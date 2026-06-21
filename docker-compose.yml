@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: signage
+      POSTGRES_USER: signage
+      POSTGRES_PASSWORD: local-development-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signage"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  backend:
+    build: ./backend
+    command: python manage.py runserver 0.0.0.0:8000
+    environment:
+      DJANGO_DEBUG: "true"
+      DJANGO_SECRET_KEY: local-development-secret-change-me
+      DATABASE_URL: postgresql://signage:local-development-only@db:5432/signage
+      DB_SSLMODE: disable
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  postgres-data:

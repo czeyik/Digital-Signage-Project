@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Sign in | DUDU Signage{% endblock %}
+{% block content %}
+<section class="auth-card">
+  <p class="eyebrow">Secure marketing dashboard</p>
+  <h1>Sign in</h1>
+  <p>Use your company <code>@duducar.co</code> account.</p>
+  <form method="post" class="stack">
+    {% csrf_token %}
+    {{ form.non_field_errors }}
+    <label>Email {{ form.username }}</label>
+    <label>Password {{ form.password }}</label>
+    <button class="primary" type="submit">Sign in</button>
+  </form>
+  <a href="{% url 'password_reset' %}">Forgot password?</a>
+</section>
+{% endblock %}
+

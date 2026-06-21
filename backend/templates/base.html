@@ -1,0 +1,37 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>{% block title %}DUDU Signage{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'signage/app.css' %}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{% url 'dashboard' %}">DUDU Signage</a>
+    {% if user.is_authenticated %}
+      <nav aria-label="Main navigation">
+        <a href="{% url 'dashboard' %}">Fleet</a>
+        <a href="{% url 'media-list' %}">Media</a>
+        <a href="{% url 'playlist-list' %}">Playlists</a>
+        <a href="{% url 'device-list' %}">Devices</a>
+        <a href="{% url 'playback-csv' %}">Export CSV</a>
+        {% if user.is_staff %}<a href="/admin/">Administration</a>{% endif %}
+      </nav>
+      <form method="post" action="{% url 'logout' %}">
+        {% csrf_token %}
+        <button class="link-button" type="submit">Sign out</button>
+      </form>
+    {% endif %}
+  </header>
+  <main class="page">
+    {% for message in messages %}
+      <div class="message {{ message.tags }}">{{ message }}</div>
+    {% endfor %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
+
