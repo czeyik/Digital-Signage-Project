@@ -1,53 +1,188 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-heading">
-  <div><p class="eyebrow">Pilot operations</p><h1>Fleet overview</h1></div>
-  <span class="disclaimer">Proof of play is commercially useful, not independently audited or tamper-proof.</span>
-</div>
-<section class="metric-grid">
-  <article><strong>{{ device_count }}</strong><span>Total devices</span></article>
-  <article><strong>{{ active_count }}</strong><span>Active</span></article>
-  <article class="{% if offline_count %}danger{% endif %}"><strong>{{ offline_count }}</strong><span>Offline over 60 min</span></article>
-  <article class="{% if unresolved_alert_count %}warning{% endif %}"><strong>{{ unresolved_alert_count }}</strong><span>Open alerts</span></article>
-  <article><strong>{{ ready_media_count }}</strong><span>Ready media</span></article>
-</section>
-<section class="panel">
-  <div class="panel-heading">
-    <h2>Proof of play: last 7 days</h2>
-    <a href="{% url 'playback-csv' %}">Download CSV</a>
-  </div>
-  <div class="chart-legend">
-    <span><i class="completed"></i>Completed</span>
-    <span><i class="interrupted"></i>Interrupted</span>
-    <span><i class="failed"></i>Failed</span>
-  </div>
-  <div class="playback-chart">
-    {% for row in playback_chart %}
-    <div class="chart-day">
-      <span>{{ row.day|date:"D" }}</span>
-      <meter class="completed" min="0" max="{{ chart_max }}" value="{{ row.completed }}" title="{{ row.completed }} completed"></meter>
-      <meter class="interrupted" min="0" max="{{ chart_max }}" value="{{ row.interrupted }}" title="{{ row.interrupted }} interrupted"></meter>
-      <meter class="failed" min="0" max="{{ chart_max }}" value="{{ row.failed }}" title="{{ row.failed }} failed"></meter>
-      <small>{{ row.completed }}/{{ row.interrupted }}/{{ row.failed }}</small>
+<div class="dashboard-shell">
+  <section class="dashboard-hero">
+    <div>
+      <p class="eyebrow">Pilot operations</p>
+      <h1>Fleet overview</h1>
+      <p class="supporting-text">Proof of play is commercially useful evidence, not independently audited or tamper-proof.</p>
     </div>
-    {% endfor %}
-  </div>
-</section>
-<section class="panel">
-  <div class="panel-heading"><h2>Unresolved alerts</h2></div>
-  {% if unresolved_alerts %}
-  <table><thead><tr><th>Severity</th><th>Device</th><th>Alert</th><th>Opened</th><th></th></tr></thead>
-    <tbody>{% for alert in unresolved_alerts %}<tr>
-      <td><span class="badge {{ alert.severity }}">{{ alert.get_severity_display }}</span></td>
-      <td>{{ alert.device|default:"Fleet" }}</td><td>{{ alert.message }}</td><td>{{ alert.created_at }}</td>
-      <td><form method="post" action="{% url 'acknowledge-alert' alert.id %}">{% csrf_token %}<button>Acknowledge</button></form></td>
-    </tr>{% endfor %}</tbody>
-  </table>
-  {% else %}<p class="empty">No unresolved alerts.</p>{% endif %}
-</section>
-<section class="panel">
-  <div class="panel-heading"><h2>Devices</h2><a href="{% url 'device-list' %}">Manage fleet</a></div>
-  <table><thead><tr><th>Device</th><th>Status</th><th>Last seen</th><th>Last sync</th><th>App</th></tr></thead>
-  <tbody>{% for device in devices %}<tr><td>{{ device.label }}</td><td>{{ device.get_status_display }}</td><td>{{ device.last_seen_at|default:"Never" }}</td><td>{{ device.last_sync_at|default:"Never" }}</td><td>{{ device.app_version|default:"-" }}</td></tr>{% empty %}<tr><td colspan="5">No devices registered.</td></tr>{% endfor %}</tbody></table>
-</section>
+    <div class="hero-actions">
+      <a class="button primary" href="{% url 'media-upload' %}">Upload media</a>
+      <a class="button" href="{% url 'playlist-create' %}">Create playlist</a>
+      <a class="button" href="{% url 'device-list' %}">Devices</a>
+    </div>
+  </section>
+
+  <section class="kpi-grid" aria-label="Fleet summary">
+    <article class="kpi-card">
+      <span>Total devices</span>
+      <strong>{{ device_count }}</strong>
+    </article>
+    <article class="kpi-card">
+      <span>Active devices</span>
+      <strong>{{ active_count }}</strong>
+    </article>
+    <article class="kpi-card {% if offline_count %}is-danger{% endif %}">
+      <span>Offline over 60 min</span>
+      <strong>{{ offline_count }}</strong>
+    </article>
+    <article class="kpi-card {% if unresolved_alert_count %}is-warning{% endif %}">
+      <span>Open alerts</span>
+      <strong>{{ unresolved_alert_count }}</strong>
+    </article>
+    <article class="kpi-card">
+      <span>Ready media</span>
+      <strong>{{ ready_media_count }}</strong>
+    </article>
+  </section>
+
+  <section class="dashboard-columns">
+    <article class="dashboard-card">
+      <header class="card-header">
+        <div>
+          <p class="eyebrow">Now playing</p>
+          <h2>Active playlist</h2>
+        </div>
+        <a href="{% url 'playlist-list' %}">View all</a>
+      </header>
+      {% if active_playlist %}
+        <div class="playlist-card">
+          <div>
+            <strong>{{ active_playlist.name }} v{{ active_playlist.version }}</strong>
+            <span>{{ active_playlist.items.count }} entries</span>
+          </div>
+          {% if active_playlist.is_urgent %}<span class="badge warning">Urgent</span>{% endif %}
+        </div>
+        <dl class="facts-list">
+          <div><dt>Starts</dt><dd>{{ active_playlist.starts_at }}</dd></div>
+          <div><dt>Ends</dt><dd>{{ active_playlist.ends_at }}</dd></div>
+        </dl>
+      {% else %}
+        <div class="empty-state">
+          <strong>No active playlist</strong>
+          <span>Fallback media is active.</span>
+        </div>
+      {% endif %}
+    </article>
+
+    <article class="dashboard-card">
+      <header class="card-header">
+        <div>
+          <p class="eyebrow">Today</p>
+          <h2>Playback results</h2>
+        </div>
+        <a href="{% url 'playback-csv' %}">Export CSV</a>
+      </header>
+      <div class="result-grid">
+        <div class="result-tile completed">
+          <strong>{{ today_completed_count }}</strong>
+          <span>Completed</span>
+        </div>
+        <div class="result-tile interrupted">
+          <strong>{{ today_interrupted_count }}</strong>
+          <span>Interrupted</span>
+        </div>
+        <div class="result-tile failed">
+          <strong>{{ today_failed_count }}</strong>
+          <span>Failed</span>
+        </div>
+      </div>
+    </article>
+  </section>
+
+  <section class="dashboard-card">
+    <header class="card-header">
+      <div>
+        <p class="eyebrow">Evidence</p>
+        <h2>Proof of play: last 7 days</h2>
+      </div>
+      <div class="chart-legend">
+        <span><i class="completed"></i>Completed</span>
+        <span><i class="interrupted"></i>Interrupted</span>
+        <span><i class="failed"></i>Failed</span>
+      </div>
+    </header>
+    <div class="chart-wrap">
+      <div class="playback-chart">
+        {% for row in playback_chart %}
+        <div class="chart-day">
+          <span>{{ row.day|date:"D" }}</span>
+          <meter class="completed" min="0" max="{{ chart_max }}" value="{{ row.completed }}" title="{{ row.completed }} completed"></meter>
+          <meter class="interrupted" min="0" max="{{ chart_max }}" value="{{ row.interrupted }}" title="{{ row.interrupted }} interrupted"></meter>
+          <meter class="failed" min="0" max="{{ chart_max }}" value="{{ row.failed }}" title="{{ row.failed }} failed"></meter>
+          <small>{{ row.completed }}/{{ row.interrupted }}/{{ row.failed }}</small>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="dashboard-columns">
+    <article class="dashboard-card">
+      <header class="card-header">
+        <div>
+          <p class="eyebrow">Attention</p>
+          <h2>Unresolved alerts</h2>
+        </div>
+        <a href="{% url 'alert-list' %}">View all</a>
+      </header>
+      {% if unresolved_alerts %}
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>Severity</th><th>Device</th><th>Alert</th><th></th></tr></thead>
+            <tbody>
+              {% for alert in unresolved_alerts %}
+              <tr>
+                <td><span class="badge {{ alert.severity }}">{{ alert.get_severity_display }}</span></td>
+                <td>{{ alert.device|default:"Fleet" }}</td>
+                <td>{{ alert.message }}</td>
+                <td>
+                  <form method="post" action="{% url 'acknowledge-alert' alert.id %}">
+                    {% csrf_token %}
+                    <button>Acknowledge</button>
+                  </form>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <div class="empty-state">
+          <strong>No unresolved alerts</strong>
+          <span>All clear.</span>
+        </div>
+      {% endif %}
+    </article>
+
+    <article class="dashboard-card">
+      <header class="card-header">
+        <div>
+          <p class="eyebrow">Kiosks</p>
+          <h2>Device activity</h2>
+        </div>
+        <a href="{% url 'device-list' %}">Manage fleet</a>
+      </header>
+      <div class="table-wrap">
+        <table class="data-table">
+          <thead><tr><th>Device</th><th>Status</th><th>Last seen</th><th>Sync</th><th>App</th></tr></thead>
+          <tbody>
+            {% for device in devices %}
+            <tr>
+              <td>{{ device.label }}</td>
+              <td>{{ device.get_status_display }}</td>
+              <td>{{ device.last_seen_at|default:"Never" }}</td>
+              <td>{{ device.last_sync_at|default:"Never" }}</td>
+              <td>{{ device.app_version|default:"-" }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="5">No devices registered.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </article>
+  </section>
+</div>
 {% endblock %}

@@ -117,9 +117,10 @@ class SecureLoginView(LoginView):
 @login_required
 def dashboard(request):
     now = timezone.now()
+    today = timezone.localdate()
     offline_before = now - timedelta(minutes=60)
     devices = Device.objects.all()
-    chart_start = timezone.localdate() - timedelta(days=6)
+    chart_start = today - timedelta(days=6)
     chart_rows = (
         PlaybackEvent.objects.filter(started_at__date__gte=chart_start)
         .annotate(day=TruncDate("started_at"))
@@ -147,6 +148,17 @@ def dashboard(request):
         ),
         default=1,
     )
+    active_playlist = (
+        Playlist.objects.filter(
+            status=Playlist.Status.PUBLISHED,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        )
+        .prefetch_related("items")
+        .order_by("-starts_at", "-version")
+        .first()
+    )
+    today_events = PlaybackEvent.objects.filter(started_at__date=today)
     context = {
         "device_count": devices.count(),
         "active_count": devices.filter(status=Device.Status.ACTIVE).count(),
@@ -162,6 +174,16 @@ def dashboard(request):
         "ready_media_count": MediaAsset.objects.filter(
             status=MediaAsset.Status.READY
         ).count(),
+        "today_completed_count": today_events.filter(
+            status=PlaybackEvent.Status.COMPLETED
+        ).count(),
+        "today_interrupted_count": today_events.filter(
+            status=PlaybackEvent.Status.INTERRUPTED
+        ).count(),
+        "today_failed_count": today_events.filter(
+            status=PlaybackEvent.Status.FAILED
+        ).count(),
+        "active_playlist": active_playlist,
         "published_playlist": Playlist.objects.filter(status=Playlist.Status.PUBLISHED)
         .order_by("-published_at")
         .first(),
