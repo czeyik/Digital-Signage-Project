@@ -2,6 +2,10 @@
 
 Complete this checklist for the exact model and firmware before purchasing the
 10 pilot units. Record model, firmware, test date, tester, and evidence.
+Create a `HardwareQualification` record in the dashboard administration area
+for each tested model/firmware. Do not mark `approved_for_pilot` until every
+required and failure test has passed and the evidence reference points to the
+supporting photos, logs, and notes.
 
 ## Required
 
@@ -40,4 +44,3 @@ Complete this checklist for the exact model and firmware before purchasing the
 Do not leave displays inside parked vehicles. Operations must define removal,
 storage, inspection, damaged-battery isolation, and incident procedures before
 the pilot begins.
-

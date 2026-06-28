@@ -179,8 +179,10 @@ offline time as proof of driver misconduct.
 - Never embed a shared long-lived API key in the application.
 - Use short-lived device credentials and authenticated, encrypted
   communication.
-- Require marketing to enter device, car, and driver details before creating a
-  one-time enrollment code.
+- Require an authorized dashboard user to confirm device, car, and driver
+  assignment details before creating a one-time enrollment code. Only the
+  account owner may enter or view driver names; marketing workflows may use
+  internal driver IDs and vehicle registrations after the assignment exists.
 - Enrollment codes expire after 15 minutes, work exactly once, and become
   invalid immediately after successful use.
 - Reject enrollment on rooted devices or when required device-integrity checks
@@ -294,6 +296,59 @@ are neither independently audited nor tamper-proof.
   document remediation of known high-severity vulnerabilities.
 - Use daily automated backups retained for 30 days and test restoration before
   relying on them.
+
+## Agent Guidance: Logout handling
+
+- **What to check:** The web dashboard uses Django's built-in `LogoutView` at [backend/config/urls.py](backend/config/urls.py#L16). The dashboard login is implemented by `SecureLoginView` in [backend/signage/views.py](backend/signage/views.py#L38). Agents should prefer linking to these files rather than copying logic.
+- **Testing:** Verify that visiting `/logout/` invalidates the user's session cookie, prevents access to protected views (e.g., the dashboard), and redirects appropriately. Add an automated test that logs in, calls `/logout/`, then asserts a subsequent request to a `@login_required` view returns 302/redirect to login.
+- **Caution:** Do not confuse dashboard session logout with device authentication. Device credentials and short-lived device tokens (used by the Android player) are separate and must not be revoked by dashboard logout flows unless the change is explicitly required and audited.
+- **Audit & security:** Confirm login and failed-login events are recorded in `AuditEvent` (see `backend/signage/views.py`) and consider whether a logout audit event is needed for your change. Follow existing security rules in this file when modifying auth behavior.
+
+
+## Agent Guidance: Local Tooling And Verification
+
+Backend verification expects the repository virtual environment and these local
+executables:
+
+- Python dependencies from `backend/pyproject.toml`, including the `dev`
+  extras.
+- `ffmpeg` and `ffprobe` for video decoding and normalization checks.
+- `clamscan` from ClamAV for production-equivalent malware scanning.
+
+Use these backend checks before completing backend or shared behavior changes:
+
+- `cd backend && ../.venv/bin/ruff check .`
+- `cd backend && ../.venv/bin/python manage.py check`
+- `cd backend && ../.venv/bin/python manage.py makemigrations --check --dry-run`
+- `cd backend && env PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 DJANGO_SETTINGS_MODULE=config.settings ../.venv/bin/pytest -p pytest_django.plugin`
+- `cd backend && ../.venv/bin/python manage.py check_deployment_readiness --environment development`
+
+Run production readiness checks against production-like environment variables
+before launch:
+
+- `cd backend && python manage.py check_deployment_readiness --environment production`
+
+Android verification requires JDK 17 and Android SDK 36. If those are not
+installed on the host, use the checked-in Docker build environment:
+
+- `docker build -f android-player/Dockerfile.build -t duducar-android-build android-player`
+- `docker run --rm -v "$PWD/android-player:/workspace" -w /workspace duducar-android-build ./gradlew :app:compileDebugKotlin --no-daemon`
+
+If Docker is unavailable, install JDK 17 and Android SDK command-line tools with
+platform 36 and build tools 35 or newer, then run:
+
+- `cd android-player && ./gradlew :app:compileDebugKotlin --no-daemon`
+
+Backup verification should be exercised before relying on backups:
+
+- `cd backend && python manage.py create_pilot_backup --output-dir /secure/signage-backups`
+- `cd backend && python manage.py verify_pilot_backup /secure/signage-backups/<archive>.tar.gz`
+
+Hardware qualification is not complete until a `HardwareQualification` record is
+created for the exact model and firmware, every required test is marked passed,
+and the evidence reference points to photos, logs, and notes. Do not treat
+emulator or phone testing as release acceptance for the 10-inch pilot hardware.
+
 
 ## Privacy And Retention
 

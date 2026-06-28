@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="page-heading"><div><p class="eyebrow">Operations</p><h1>Alerts</h1></div></div>
+<section class="panel">
+  <table>
+    <thead><tr><th>Severity</th><th>Device</th><th>Code</th><th>Message</th><th>Opened</th><th>Acknowledged</th><th></th></tr></thead>
+    <tbody>
+      {% for alert in alerts %}
+      <tr>
+        <td><span class="badge {{ alert.severity }}">{{ alert.get_severity_display }}</span></td>
+        <td>{{ alert.device|default:"Fleet" }}</td>
+        <td>{{ alert.code }}</td>
+        <td>{{ alert.message }}</td>
+        <td>{{ alert.created_at }}</td>
+        <td>{{ alert.acknowledged_at|default:"Open" }}</td>
+        <td>{% if not alert.acknowledged_at %}<form method="post" action="{% url 'acknowledge-alert' alert.id %}">{% csrf_token %}<button>Acknowledge</button></form>{% endif %}</td>
+      </tr>
+      {% empty %}<tr><td colspan="7">No alerts.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

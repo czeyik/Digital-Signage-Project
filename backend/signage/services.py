@@ -1,6 +1,6 @@
 import hashlib
 import json
-import mimetypes
+import secrets
 import shutil
 import subprocess
 from pathlib import Path
@@ -11,10 +11,26 @@ from django.core.files import File
 from django.db import transaction
 from django.utils import timezone
 
-from .models import AuditEvent, Device, MediaAsset, PlatformSettings, Playlist
+from .models import (
+    Alert,
+    AuditEvent,
+    Device,
+    MediaAsset,
+    PlatformSettings,
+    Playlist,
+    token_hash,
+)
 
 ALLOWED_IMAGE_MIME = {"image/jpeg", "image/png"}
 ALLOWED_VIDEO_MIME = {"video/mp4"}
+IMAGE_EXTENSION_MIME = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+}
+VIDEO_EXTENSION_MIME = {".mp4": "video/mp4"}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+JPEG_SIGNATURE = b"\xff\xd8\xff"
 
 
 def audit(actor, action, target, metadata=None):
@@ -27,53 +43,168 @@ def audit(actor, action, target, metadata=None):
     )
 
 
+def open_alert(device, code, severity, message):
+    return Alert.objects.get_or_create(
+        device=device,
+        code=code,
+        acknowledged_at__isnull=True,
+        defaults={"severity": severity, "message": message},
+    )
+
+
+@transaction.atomic
+def issue_kiosk_pin(device, actor):
+    raw_pin = f"{secrets.randbelow(1_000_000):06d}"
+    locked = Device.objects.select_for_update().get(pk=device.pk)
+    locked.kiosk_pin_hash = token_hash(raw_pin)
+    locked.kiosk_pin_reset_at = timezone.now()
+    locked.save(update_fields=["kiosk_pin_hash", "kiosk_pin_reset_at", "updated_at"])
+    audit(actor, "device.kiosk_pin.reset", locked)
+    return raw_pin
+
+
+def media_has_current_or_future_references(asset):
+    return asset.playlist_items.filter(
+        playlist__status__in=[Playlist.Status.DRAFT, Playlist.Status.PUBLISHED],
+        playlist__ends_at__gte=timezone.now(),
+    ).exists()
+
+
+@transaction.atomic
+def delete_media_binary(asset, actor):
+    locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+    if media_has_current_or_future_references(locked):
+        raise ValidationError(
+            "Media is referenced by a draft, current, or future playlist."
+        )
+    for field_name in ("source_file", "normalized_file"):
+        file_field = getattr(locked, field_name)
+        if file_field:
+            file_field.delete(save=False)
+            setattr(locked, field_name, "")
+    locked.status = MediaAsset.Status.ARCHIVED
+    locked.archived_at = timezone.now()
+    locked.save(
+        update_fields=[
+            "source_file",
+            "normalized_file",
+            "status",
+            "archived_at",
+            "updated_at",
+        ]
+    )
+    audit(actor, "media.delete_binary", locked)
+    return locked
+
+
+def extension_mime(path):
+    return {**IMAGE_EXTENSION_MIME, **VIDEO_EXTENSION_MIME}.get(path.suffix.lower())
+
+
+def sniff_image_mime(path):
+    expected = extension_mime(path)
+    if expected not in ALLOWED_IMAGE_MIME:
+        raise ValidationError("Only JPEG and PNG image filenames are accepted.")
+    with path.open("rb") as handle:
+        header = handle.read(16)
+    if header.startswith(JPEG_SIGNATURE):
+        detected = "image/jpeg"
+    elif header.startswith(PNG_SIGNATURE):
+        detected = "image/png"
+    else:
+        raise ValidationError("Image content is not a valid JPEG or PNG file.")
+    if detected != expected:
+        raise ValidationError("Image filename extension does not match its content.")
+    from PIL import Image
+
+    with Image.open(path) as image:
+        if image.format not in {"JPEG", "PNG"}:
+            raise ValidationError("Image decoder did not confirm JPEG or PNG content.")
+        image.verify()
+    return detected
+
+
+def sniff_video_mime(path):
+    expected = extension_mime(path)
+    if expected not in ALLOWED_VIDEO_MIME:
+        raise ValidationError("Only MP4 video filenames are accepted.")
+    with path.open("rb") as handle:
+        header = handle.read(12)
+    if len(header) < 12 or header[4:8] != b"ftyp":
+        raise ValidationError("Video content is not an MP4 container.")
+    return "video/mp4"
+
+
+def run_ffprobe(path):
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration,format_name:stream=codec_type,codec_name,width,height",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(probe.stdout)
+
+
+def validate_normalized_video(path):
+    details = run_ffprobe(path)
+    streams = details.get("streams", [])
+    video_streams = [
+        stream for stream in streams if stream.get("codec_type") == "video"
+    ]
+    audio_streams = [
+        stream for stream in streams if stream.get("codec_type") == "audio"
+    ]
+    if len(video_streams) != 1:
+        raise ValidationError(
+            "Normalized output must contain exactly one video stream."
+        )
+    if audio_streams:
+        raise ValidationError("Normalized output must not contain audio.")
+    video = video_streams[0]
+    if video.get("codec_name") != "h264":
+        raise ValidationError("Normalized output must use H.264 video.")
+    if int(video.get("width", 0)) > 1920 or int(video.get("height", 0)) > 1080:
+        raise ValidationError("Normalized output exceeds 1920x1080.")
+
+
 def inspect_media(asset, require_malware_scanner=True):
     source = Path(asset.source_file.path)
     asset.status = MediaAsset.Status.PROCESSING
     asset.save(update_fields=["status", "updated_at"])
     try:
-        detected = mimetypes.guess_type(source.name)[0]
         if asset.kind == MediaAsset.Kind.IMAGE:
-            if detected not in ALLOWED_IMAGE_MIME:
-                raise ValidationError("Only JPEG and PNG images are accepted.")
+            detected = sniff_image_mime(source)
             if source.stat().st_size > settings.MEDIA_MAX_IMAGE_BYTES:
                 raise ValidationError("Image exceeds the 10 MB limit.")
             from PIL import Image
 
             with Image.open(source) as image:
-                image.verify()
-            with Image.open(source) as image:
                 asset.width, asset.height = image.size
             output = source
             asset.duration_ms = 10_000
         else:
-            if detected not in ALLOWED_VIDEO_MIME:
-                raise ValidationError("Only MP4 video is accepted.")
+            detected = sniff_video_mime(source)
             if source.stat().st_size > settings.MEDIA_MAX_VIDEO_BYTES:
                 raise ValidationError("Video exceeds the 50 MB limit.")
-            probe = subprocess.run(
-                [
-                    "ffprobe",
-                    "-v",
-                    "error",
-                    "-show_entries",
-                    "format=duration:stream=width,height",
-                    "-of",
-                    "json",
-                    str(source),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            details = json.loads(probe.stdout)
+            details = run_ffprobe(source)
             duration_ms = round(float(details["format"]["duration"]) * 1000)
             if duration_ms > 15_000:
                 raise ValidationError("Video exceeds the 15-second limit.")
             video_stream = next(
                 stream
                 for stream in details.get("streams", [])
-                if "width" in stream and "height" in stream
+                if stream.get("codec_type") == "video"
+                and "width" in stream
+                and "height" in stream
             )
             asset.width = video_stream["width"]
             asset.height = video_stream["height"]
@@ -102,6 +233,7 @@ def inspect_media(asset, require_malware_scanner=True):
                 check=True,
                 capture_output=True,
             )
+            validate_normalized_video(output)
 
         scanner = shutil.which("clamscan")
         if require_malware_scanner and not scanner:

@@ -285,6 +285,24 @@ class MainActivity : Activity() {
 
     private fun finishLoop(manifest: JSONObject) {
         if (loopResults.isEmpty()) return
+        val items = manifest.getJSONArray("items")
+        val recordedItems = loopResults.map { it.playlistItemId }.toMutableSet()
+        for (index in 0 until items.length()) {
+            val item = items.getJSONObject(index)
+            val entryId = item.getString("entry_id")
+            if (!recordedItems.contains(entryId)) {
+                loopResults += PlaybackResult(
+                    id = UUID.randomUUID().toString(),
+                    playlistItemId = entryId,
+                    startedAt = serverClock.now().toString(),
+                    endedAt = serverClock.now().toString(),
+                    durationMs = 0,
+                    status = "interrupted",
+                    failureReason = "loop_interrupted_before_entry",
+                )
+                recordedItems.add(entryId)
+            }
+        }
         val events = JSONArray()
         loopResults.forEach { result ->
             events.put(

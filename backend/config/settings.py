@@ -10,6 +10,7 @@ def env_bool(name, default=False):
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "development-only-unsafe-secret")
 DEBUG = env_bool("DJANGO_DEBUG", True)
+DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "development")
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
@@ -158,6 +159,8 @@ REQUIRED_APP_VERSION = os.getenv("REQUIRED_APP_VERSION", "0.1.0")
 DEVICE_OVERHEAT_CELSIUS = float(os.getenv("DEVICE_OVERHEAT_CELSIUS", "45"))
 MEDIA_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MEDIA_MAX_VIDEO_BYTES = 50 * 1024 * 1024
+PILOT_BACKUP_ROOT = os.getenv("PILOT_BACKUP_ROOT", str(BASE_DIR / "backups"))
+PILOT_BACKUP_RETENTION_DAYS = int(os.getenv("PILOT_BACKUP_RETENTION_DAYS", "30"))
 
 EMAIL_BACKEND = os.getenv(
     "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"

@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from signage.api import active_playlist
 from signage.models import (
+    Alert,
     Device,
     DeviceAccessToken,
     DeviceAssignment,
@@ -111,3 +112,73 @@ def test_future_playlist_is_not_selected_early():
     )
     assert active_playlist() is None
     assert future.pk is not None
+
+
+@pytest.mark.django_db
+def test_playback_batch_requires_every_playlist_entry(client, provisioned_device):
+    _, _, _, access = provisioned_device
+    owner = User.objects.get(email="owner@duducar.co")
+    media = [
+        MediaAsset.objects.create(
+            business_name="Example",
+            title=f"Poster {number}",
+            kind=MediaAsset.Kind.IMAGE,
+            status=MediaAsset.Status.READY,
+            source_file=SimpleUploadedFile(f"poster-{number}.png", b"source"),
+            normalized_file=SimpleUploadedFile(f"poster-ready-{number}.png", b"ready"),
+            duration_ms=10_000,
+            uploaded_by=owner,
+        )
+        for number in (1, 2)
+    ]
+    playlist = Playlist.objects.create(
+        name="Two item pilot",
+        version=1,
+        starts_at=timezone.now() - timedelta(hours=1),
+        ends_at=timezone.now() + timedelta(days=6),
+        created_by=owner,
+    )
+    item = PlaylistItem.objects.create(playlist=playlist, media=media[0], position=1)
+    PlaylistItem.objects.create(playlist=playlist, media=media[1], position=2)
+    playlist.status = Playlist.Status.PUBLISHED
+    playlist.published_at = timezone.now()
+    playlist.save(update_fields=["status", "published_at"])
+    now = timezone.now().isoformat()
+
+    response = client.post(
+        reverse("playback-batch"),
+        {
+            "id": str(uuid.uuid4()),
+            "playlist_id": str(playlist.id),
+            "loop_started_at": now,
+            "loop_ended_at": now,
+            "captured_offline": False,
+            "events": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "playlist_item_id": str(item.id),
+                    "started_at": now,
+                    "ended_at": now,
+                    "duration_ms": 10_000,
+                    "status": "completed",
+                }
+            ],
+        },
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access}",
+    )
+
+    assert response.status_code == 400
+    assert "every playlist entry" in response.json()["error"]["detail"][0]
+
+
+@pytest.mark.django_db
+def test_invalid_device_refresh_creates_security_alert(client):
+    response = client.post(
+        reverse("device-token"),
+        {"refresh_token": "invalid-token"},
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+    assert Alert.objects.filter(code="repeated_device_authentication").exists()

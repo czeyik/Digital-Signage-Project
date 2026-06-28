@@ -9,6 +9,7 @@ from .models import (
     DeviceHeartbeat,
     Driver,
     EnrollmentCode,
+    HardwareQualification,
     MediaAsset,
     PlatformSettings,
     PlaybackBatch,
@@ -155,6 +156,35 @@ class PlatformSettingsAdmin(admin.ModelAdmin):
 
     def has_add_permission(self, request):
         return request.user.is_owner and not PlatformSettings.objects.exists()
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_owner
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(HardwareQualification)
+class HardwareQualificationAdmin(admin.ModelAdmin):
+    list_display = (
+        "model_name",
+        "firmware_version",
+        "android_version",
+        "test_date",
+        "approved_for_pilot",
+    )
+    list_filter = ("approved_for_pilot", "android_version")
+    search_fields = ("model_name", "firmware_version", "evidence_reference")
+    readonly_fields = ("approved_at",)
+
+    def has_module_permission(self, request):
+        return request.user.is_owner
+
+    def has_view_permission(self, request, obj=None):
+        return request.user.is_owner
+
+    def has_add_permission(self, request):
+        return request.user.is_owner
 
     def has_change_permission(self, request, obj=None):
         return request.user.is_owner

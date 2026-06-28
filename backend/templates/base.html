@@ -17,7 +17,12 @@
         <a href="{% url 'media-list' %}">Media</a>
         <a href="{% url 'playlist-list' %}">Playlists</a>
         <a href="{% url 'device-list' %}">Devices</a>
+        <a href="{% url 'alert-list' %}">Alerts</a>
         <a href="{% url 'playback-csv' %}">Export CSV</a>
+        {% if user.is_owner %}
+          <a href="{% url 'user-list' %}">Users</a>
+          <a href="{% url 'settings-edit' %}">Settings</a>
+        {% endif %}
         {% if user.is_staff %}<a href="/admin/">Administration</a>{% endif %}
       </nav>
       <form method="post" action="{% url 'logout' %}">
@@ -34,4 +39,3 @@
   </main>
 </body>
 </html>
-

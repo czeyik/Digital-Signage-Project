@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="form-card">
+  <p class="eyebrow">One-time secret</p>
+  <h1>Kiosk PIN for {{ device }}</h1>
+  <p>Show this to the account owner now. It cannot be viewed again after leaving this page.</p>
+  <div class="enrollment-code">{{ pin }}</div>
+  <p><a href="{% url 'device-list' %}">Back to devices</a></p>
+</section>
+{% endblock %}

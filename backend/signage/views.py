@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.contrib import messages
+from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView
 from django.core.exceptions import PermissionDenied, ValidationError
@@ -13,9 +14,16 @@ from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_http_methods, require_POST
 
-from .forms import MediaUploadForm, PlaylistForm
+from .forms import (
+    DashboardUserForm,
+    DeviceProvisioningForm,
+    DeviceReassignmentForm,
+    MediaUploadForm,
+    PlatformSettingsForm,
+    PlaylistForm,
+)
 from .models import (
     Alert,
     AuditEvent,
@@ -23,16 +31,29 @@ from .models import (
     EnrollmentCode,
     LoginThrottle,
     MediaAsset,
+    PlatformSettings,
     PlaybackEvent,
     Playlist,
     PlaylistItem,
 )
-from .services import audit, disable_device, publish_playlist, reactivate_device
+from .services import (
+    audit,
+    delete_media_binary,
+    disable_device,
+    issue_kiosk_pin,
+    open_alert,
+    publish_playlist,
+    reactivate_device,
+)
 
 
 def owner_required(user):
     if not user.is_owner:
         raise PermissionDenied
+
+
+def require_owner(request):
+    owner_required(request.user)
 
 
 class SecureLoginView(LoginView):
@@ -74,6 +95,13 @@ class SecureLoginView(LoginView):
             ).hexdigest(),
             metadata={"attempt": throttle.failures},
         )
+        if throttle.failures >= 5:
+            open_alert(
+                None,
+                "suspicious_login_lockout",
+                Alert.Severity.WARNING,
+                "Repeated failed dashboard sign-in attempts triggered a lockout.",
+            )
         # Replace Django's field-specific message with a generic response.
         form.errors.clear()
         form.add_error(None, "Invalid email or password.")
@@ -151,6 +179,19 @@ def media_list(request):
         "signage/media_list.html",
         {"assets": MediaAsset.objects.order_by("-created_at")},
     )
+
+
+@login_required
+@require_POST
+def media_delete(request, media_id):
+    asset = get_object_or_404(MediaAsset, pk=media_id)
+    try:
+        delete_media_binary(asset, request.user)
+    except ValidationError as exc:
+        messages.error(request, "; ".join(exc.messages))
+    else:
+        messages.success(request, "Media binaries removed and metadata archived.")
+    return redirect("media-list")
 
 
 @login_required
@@ -288,6 +329,44 @@ def device_list(request):
 
 
 @login_required
+@require_http_methods(["GET", "POST"])
+def device_create(request):
+    require_owner(request)
+    form = DeviceProvisioningForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        device = form.save()
+        audit(request.user, "device.provision", device)
+        messages.success(request, "Device, driver, and vehicle assignment created.")
+        return redirect("device-list")
+    return render(
+        request,
+        "signage/form.html",
+        {"form": form, "title": "Add device and assignment"},
+    )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def device_reassign(request, device_id):
+    require_owner(request)
+    device = get_object_or_404(Device, pk=device_id)
+    form = DeviceReassignmentForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        form.save(device)
+        audit(request.user, "device.reassign", device)
+        messages.success(
+            request,
+            "Device reassigned. Assignment history was preserved.",
+        )
+        return redirect("device-list")
+    return render(
+        request,
+        "signage/form.html",
+        {"form": form, "title": f"Reassign {device.label}"},
+    )
+
+
+@login_required
 @require_POST
 def issue_enrollment(request, device_id):
     device = get_object_or_404(Device, pk=device_id)
@@ -304,6 +383,20 @@ def issue_enrollment(request, device_id):
         "code": raw_code,
     }
     return redirect("enrollment-code")
+
+
+@login_required
+@require_POST
+def device_pin_reset(request, device_id):
+    require_owner(request)
+    device = get_object_or_404(Device, pk=device_id)
+    raw_pin = issue_kiosk_pin(device, request.user)
+    request.session["one_time_kiosk_pin"] = {
+        "device": device.label,
+        "pin": raw_pin,
+    }
+    messages.success(request, "Kiosk administrator PIN reset.")
+    return redirect("kiosk-pin")
 
 
 @login_required
@@ -336,6 +429,15 @@ def enrollment_code(request):
 
 
 @login_required
+def kiosk_pin(request):
+    require_owner(request)
+    pin = request.session.pop("one_time_kiosk_pin", None)
+    if not pin:
+        return redirect("device-list")
+    return render(request, "signage/kiosk_pin.html", pin)
+
+
+@login_required
 @require_POST
 def acknowledge_alert(request, alert_id):
     alert = get_object_or_404(Alert, pk=alert_id, acknowledged_at__isnull=True)
@@ -344,6 +446,70 @@ def acknowledge_alert(request, alert_id):
     alert.save(update_fields=["acknowledged_at", "acknowledged_by", "updated_at"])
     audit(request.user, "alert.acknowledge", alert)
     return redirect("dashboard")
+
+
+@login_required
+def alert_list(request):
+    return render(
+        request,
+        "signage/alert_list.html",
+        {
+            "alerts": Alert.objects.select_related(
+                "device", "acknowledged_by"
+            ).order_by("acknowledged_at", "-created_at")[:200]
+        },
+    )
+
+
+@login_required
+def settings_edit(request):
+    require_owner(request)
+    settings_object = PlatformSettings.load()
+    form = PlatformSettingsForm(request.POST or None, instance=settings_object)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        audit(request.user, "settings.update", settings_object)
+        messages.success(request, "Pilot limits updated.")
+        return redirect("settings-edit")
+    return render(
+        request,
+        "signage/form.html",
+        {"form": form, "title": "Pilot limits"},
+    )
+
+
+@login_required
+def user_list(request):
+    require_owner(request)
+    return render(
+        request,
+        "signage/user_list.html",
+        {"users": get_user_model().objects.order_by("email")},
+    )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def user_edit(request, user_id=None):
+    require_owner(request)
+    model = get_user_model()
+    user_object = get_object_or_404(model, pk=user_id) if user_id else model()
+    form = DashboardUserForm(request.POST or None, instance=user_object)
+    if request.method == "POST" and form.is_valid():
+        saved = form.save()
+        audit(
+            request.user,
+            "user.update" if user_id else "user.create",
+            saved,
+            {"role": saved.role, "active": saved.is_active},
+        )
+        messages.success(request, "Dashboard user saved.")
+        return redirect("user-list")
+    return render(
+        request,
+        "signage/form.html",
+        {"form": form, "title": "Dashboard user"},
+    )
 
 
 @login_required

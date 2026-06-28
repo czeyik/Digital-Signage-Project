@@ -48,6 +48,89 @@ class PlatformSettings(TimeStampedModel):
         return "Pilot limits"
 
 
+class HardwareQualification(TimeStampedModel):
+    model_name = models.CharField(max_length=160)
+    firmware_version = models.CharField(max_length=100)
+    android_version = models.CharField(max_length=32)
+    tested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    test_date = models.DateField()
+    evidence_reference = models.CharField(
+        max_length=255,
+        help_text="Internal path or ticket containing photos, logs, and test notes.",
+    )
+    device_owner_lock_task_passed = models.BooleanField(default=False)
+    boot_on_power_passed = models.BooleanField(default=False)
+    screen_state_passed = models.BooleanField(default=False)
+    power_loss_path_passed = models.BooleanField(default=False)
+    playback_12h_passed = models.BooleanField(default=False)
+    image_aspect_passed = models.BooleanField(default=False)
+    cache_capacity_passed = models.BooleanField(default=False)
+    network_reconnect_passed = models.BooleanField(default=False)
+    interrupted_download_passed = models.BooleanField(default=False)
+    thermal_passed = models.BooleanField(default=False)
+    mounting_power_safety_passed = models.BooleanField(default=False)
+    kiosk_escape_resistance_passed = models.BooleanField(default=False)
+    device_time_change_passed = models.BooleanField(default=False)
+    remote_disable_reboot_passed = models.BooleanField(default=False)
+    factory_reset_revocation_passed = models.BooleanField(default=False)
+    approved_for_pilot = models.BooleanField(default=False)
+    approved_at = models.DateTimeField(null=True, blank=True)
+
+    REQUIRED_PASS_FIELDS = (
+        "device_owner_lock_task_passed",
+        "boot_on_power_passed",
+        "screen_state_passed",
+        "power_loss_path_passed",
+        "playback_12h_passed",
+        "image_aspect_passed",
+        "cache_capacity_passed",
+        "network_reconnect_passed",
+        "interrupted_download_passed",
+        "thermal_passed",
+        "mounting_power_safety_passed",
+        "kiosk_escape_resistance_passed",
+        "device_time_change_passed",
+        "remote_disable_reboot_passed",
+        "factory_reset_revocation_passed",
+    )
+
+    class Meta:
+        ordering = ["-test_date", "model_name"]
+
+    def clean(self):
+        if not self.approved_for_pilot:
+            return
+        missing = [
+            self._meta.get_field(field_name).verbose_name
+            for field_name in self.REQUIRED_PASS_FIELDS
+            if not getattr(self, field_name)
+        ]
+        if missing:
+            raise ValidationError(
+                {
+                    "approved_for_pilot": (
+                        "All hardware qualification tests must pass before approval: "
+                        + ", ".join(missing)
+                    )
+                }
+            )
+        if not self.evidence_reference:
+            raise ValidationError(
+                {"evidence_reference": "Approval requires an evidence reference."}
+            )
+
+    def save(self, *args, **kwargs):
+        if self.approved_for_pilot and self.approved_at is None:
+            self.approved_at = timezone.now()
+        if not self.approved_for_pilot:
+            self.approved_at = None
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.model_name} / {self.firmware_version}"
+
+
 class LoginThrottle(TimeStampedModel):
     key_hash = models.CharField(max_length=64, primary_key=True)
     failures = models.PositiveSmallIntegerField(default=0)
@@ -324,6 +407,8 @@ class Device(TimeStampedModel):
         Playlist, null=True, blank=True, on_delete=models.PROTECT
     )
     disabled_at = models.DateTimeField(null=True, blank=True)
+    kiosk_pin_hash = models.CharField(max_length=64, blank=True)
+    kiosk_pin_reset_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
         return self.label

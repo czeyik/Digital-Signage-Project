@@ -1,6 +1,40 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="page-heading"><div><p class="eyebrow">Kiosk fleet</p><h1>Devices</h1></div><a class="button" href="/admin/signage/device/add/">Add device and assignment</a></div>
-<section class="panel"><table><thead><tr><th>Device</th><th>Status</th><th>Current assignment</th><th>Last seen</th><th>Enrollment</th></tr></thead>
-<tbody>{% for device in devices %}<tr><td>{{ device.label }}</td><td>{{ device.get_status_display }}</td><td>{% for assignment in device.assignments.all %}{% if not assignment.unassigned_at %}{{ assignment.vehicle.registration }} / {{ assignment.driver.internal_id }}{% endif %}{% empty %}Unassigned{% endfor %}</td><td>{{ device.last_seen_at|default:"Never" }}</td><td><form method="post" action="{% url 'issue-enrollment' device.id %}">{% csrf_token %}<button>Generate one-time code</button></form>{% if device.status == "disabled" %}<form method="post" action="{% url 'device-reactivate' device.id %}">{% csrf_token %}<button>Reactivate</button></form>{% else %}<form method="post" action="{% url 'device-disable' device.id %}">{% csrf_token %}<button class="danger-button">Disable playback</button></form>{% endif %}</td></tr>{% empty %}<tr><td colspan="5">No devices.</td></tr>{% endfor %}</tbody></table></section>
+<div class="page-heading">
+  <div><p class="eyebrow">Kiosk fleet</p><h1>Devices</h1></div>
+  {% if user.is_owner %}
+  <a class="button primary" href="{% url 'device-create' %}">Add device and assignment</a>
+  {% endif %}
+</div>
+<section class="panel">
+  <table>
+    <thead><tr><th>Device</th><th>Status</th><th>Current assignment</th><th>Last seen</th><th>Operations</th></tr></thead>
+    <tbody>
+      {% for device in devices %}
+      <tr>
+        <td>{{ device.label }}</td>
+        <td>{{ device.get_status_display }}</td>
+        <td>
+          {% for assignment in device.assignments.all %}
+            {% if not assignment.unassigned_at %}{{ assignment.vehicle.registration }} / {{ assignment.driver.internal_id }}{% endif %}
+          {% empty %}Unassigned{% endfor %}
+        </td>
+        <td>{{ device.last_seen_at|default:"Never" }}</td>
+        <td class="action-stack">
+          {% if user.is_owner %}
+          <a class="button" href="{% url 'device-reassign' device.id %}">Reassign</a>
+          <form method="post" action="{% url 'device-pin-reset' device.id %}">{% csrf_token %}<button>Reset kiosk PIN</button></form>
+          {% endif %}
+          <form method="post" action="{% url 'issue-enrollment' device.id %}">{% csrf_token %}<button>Generate one-time code</button></form>
+          {% if device.status == "disabled" %}
+          <form method="post" action="{% url 'device-reactivate' device.id %}">{% csrf_token %}<button>Reactivate</button></form>
+          {% else %}
+          <form method="post" action="{% url 'device-disable' device.id %}">{% csrf_token %}<button class="danger-button">Disable playback</button></form>
+          {% endif %}
+        </td>
+      </tr>
+      {% empty %}<tr><td colspan="5">No devices.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</section>
 {% endblock %}

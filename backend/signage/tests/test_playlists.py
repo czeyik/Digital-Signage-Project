@@ -7,7 +7,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from signage.models import MediaAsset, Playlist, PlaylistItem, User
-from signage.services import publish_playlist
+from signage.services import delete_media_binary, publish_playlist
 
 
 def next_monday_noon():
@@ -122,3 +122,61 @@ def test_draft_playlist_can_be_reordered_from_dashboard(client):
         second.id,
         first.id,
     ]
+
+
+@pytest.mark.django_db
+def test_media_binary_deletion_is_blocked_when_referenced_by_future_playlist():
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("poster.png", b"source"),
+        normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+    starts_at = next_monday_noon()
+    playlist = Playlist.objects.create(
+        name="Future week",
+        version=1,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    PlaylistItem.objects.create(playlist=playlist, media=media, position=1)
+
+    with pytest.raises(ValidationError):
+        delete_media_binary(media, owner)
+
+
+@pytest.mark.django_db
+def test_unreferenced_media_binary_deletion_preserves_metadata():
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("poster.png", b"source"),
+        normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+
+    delete_media_binary(media, owner)
+
+    media.refresh_from_db()
+    assert media.status == MediaAsset.Status.ARCHIVED
+    assert media.business_name == "Example"
+    assert not media.source_file
+    assert not media.normalized_file

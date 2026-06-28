@@ -27,15 +27,21 @@ from .models import (
     Playlist,
     token_hash,
 )
+from .services import open_alert
 
 
 def exception_handler(exc, context):
     response = drf_exception_handler(exc, context)
     if response is not None:
+        detail = (
+            response.data.get("detail", response.data)
+            if isinstance(response.data, dict)
+            else response.data
+        )
         response.data = {
             "error": {
                 "code": getattr(exc, "default_code", "request_error"),
-                "detail": response.data.get("detail", response.data),
+                "detail": detail,
             }
         }
     return response
@@ -141,6 +147,12 @@ def token_refresh(request):
         .first()
     )
     if not credential:
+        open_alert(
+            None,
+            "repeated_device_authentication",
+            Alert.Severity.WARNING,
+            "A device token refresh request used an invalid credential.",
+        )
         raise exceptions.AuthenticationFailed("Invalid device credential.")
     access, raw = DeviceAccessToken.issue(credential)
     return Response(
@@ -374,6 +386,13 @@ def playback_batch(request):
     if not raw_events or len(raw_events) > PlatformSettings.load().playlist_max_entries:
         raise serializers.ValidationError("A batch must contain valid playlist events.")
     normalized = [validate_event(event, playlist_items) for event in raw_events]
+    submitted_items = [event["playlist_item_id"] for event in normalized]
+    if len(submitted_items) != len(set(submitted_items)):
+        raise serializers.ValidationError("A batch cannot contain duplicate entries.")
+    if set(submitted_items) != set(playlist_items):
+        raise serializers.ValidationError(
+            "A batch must contain exactly one result for every playlist entry."
+        )
     loop_started_at = parse_required_datetime(
         request.data.get("loop_started_at"), "loop_started_at"
     )

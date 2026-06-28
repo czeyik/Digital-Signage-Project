@@ -9,6 +9,7 @@ from signage.models import (
     EnrollmentCode,
     User,
     Vehicle,
+    token_hash,
 )
 
 
@@ -97,3 +98,97 @@ def test_reenrollment_revokes_previous_device_credential(client):
     assert credentials.count() == 2
     assert credentials.first().revoked_at is not None
     assert credentials.last().revoked_at is None
+
+
+@pytest.mark.django_db
+def test_dashboard_can_provision_device_with_assignment(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("device-create"),
+        {
+            "device_label": "PILOT-03",
+            "driver_internal_id": "D003",
+            "driver_name": "Example Driver",
+            "vehicle_registration": "WXY9012",
+        },
+    )
+
+    assert response.status_code == 302
+    device = Device.objects.get(label="PILOT-03")
+    assignment = device.assignments.get(unassigned_at__isnull=True)
+    assert assignment.driver.internal_id == "D003"
+    assert assignment.vehicle.registration == "WXY9012"
+
+
+@pytest.mark.django_db
+def test_marketing_cannot_open_driver_name_device_provisioning(client):
+    user = User.objects.create_user(
+        "marketing@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    client.force_login(user)
+
+    response = client.get(reverse("device-create"))
+
+    assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_reassignment_preserves_assignment_history(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="PILOT-04")
+    driver = Driver.objects.create(internal_id="D004", name="Old Driver")
+    vehicle = Vehicle.objects.create(registration="OLD1234")
+    old_assignment = DeviceAssignment.objects.create(
+        device=device, driver=driver, vehicle=vehicle
+    )
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("device-reassign", args=[device.id]),
+        {
+            "driver_internal_id": "D005",
+            "driver_name": "New Driver",
+            "vehicle_registration": "NEW1234",
+        },
+    )
+
+    assert response.status_code == 302
+    old_assignment.refresh_from_db()
+    assert old_assignment.unassigned_at is not None
+    active_assignment = device.assignments.filter(unassigned_at__isnull=True).get()
+    assert active_assignment.driver.internal_id == "D005"
+
+
+@pytest.mark.django_db
+def test_owner_pin_reset_shows_once_and_stores_only_hash(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="PILOT-05")
+    client.force_login(owner)
+
+    response = client.post(reverse("device-pin-reset", args=[device.id]))
+
+    assert response.status_code == 302
+    device.refresh_from_db()
+    page = client.get(reverse("kiosk-pin"))
+    assert page.status_code == 200
+    pin = page.context["pin"]
+    assert len(pin) == 6
+    assert device.kiosk_pin_hash == token_hash(pin)
+    assert pin not in device.kiosk_pin_hash
+    assert client.get(reverse("kiosk-pin")).status_code == 302

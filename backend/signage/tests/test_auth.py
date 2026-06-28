@@ -2,7 +2,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.urls import reverse
 
-from signage.models import Driver, User
+from signage.models import Alert, Driver, User
 
 
 @pytest.mark.django_db
@@ -79,3 +79,41 @@ def test_login_lockout_is_shared_database_state(client):
     )
     assert blocked.status_code == 200
     assert b"Too many sign-in attempts" in blocked.content
+    assert Alert.objects.filter(code="suspicious_login_lockout").exists()
+
+
+@pytest.mark.django_db
+def test_owner_can_create_dashboard_user(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("user-create"),
+        {
+            "email": "new-user@duducar.co",
+            "role": User.Role.MARKETING,
+            "is_active": "on",
+            "password": "Another-long-password-123",
+        },
+    )
+
+    assert response.status_code == 302
+    assert User.objects.filter(email="new-user@duducar.co").exists()
+
+
+@pytest.mark.django_db
+def test_marketing_cannot_manage_dashboard_users(client):
+    user = User.objects.create_user(
+        "marketing@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    client.force_login(user)
+
+    response = client.get(reverse("user-list"))
+
+    assert response.status_code == 403
