@@ -3,6 +3,7 @@ import json
 import secrets
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from django.conf import settings
@@ -176,89 +177,115 @@ def validate_normalized_video(path):
         raise ValidationError("Normalized output exceeds 1920x1080.")
 
 
+def copy_source_to_temporary_file(asset, directory):
+    source_name = Path(asset.source_file.name).name
+    suffix = Path(source_name).suffix.lower()
+    source_path = Path(directory) / f"source{suffix}"
+    asset.source_file.open("rb")
+    try:
+        with source_path.open("wb") as output:
+            for chunk in asset.source_file.chunks():
+                output.write(chunk)
+    finally:
+        asset.source_file.close()
+    return source_path
+
+
+def normalized_media_name(asset, source_path):
+    if asset.kind == MediaAsset.Kind.VIDEO:
+        return f"{asset.id}-normalized.mp4"
+    return f"{asset.id}{source_path.suffix.lower()}"
+
+
 def inspect_media(asset, require_malware_scanner=True):
-    source = Path(asset.source_file.path)
     asset.status = MediaAsset.Status.PROCESSING
     asset.save(update_fields=["status", "updated_at"])
     try:
-        if asset.kind == MediaAsset.Kind.IMAGE:
-            detected = sniff_image_mime(source)
-            if source.stat().st_size > settings.MEDIA_MAX_IMAGE_BYTES:
-                raise ValidationError("Image exceeds the 10 MB limit.")
-            from PIL import Image
+        with tempfile.TemporaryDirectory() as temporary:
+            source = copy_source_to_temporary_file(asset, temporary)
+            if asset.kind == MediaAsset.Kind.IMAGE:
+                detected = sniff_image_mime(source)
+                if source.stat().st_size > settings.MEDIA_MAX_IMAGE_BYTES:
+                    raise ValidationError("Image exceeds the 10 MB limit.")
+                from PIL import Image
 
-            with Image.open(source) as image:
-                asset.width, asset.height = image.size
-            output = source
-            asset.duration_ms = 10_000
-        else:
-            detected = sniff_video_mime(source)
-            if source.stat().st_size > settings.MEDIA_MAX_VIDEO_BYTES:
-                raise ValidationError("Video exceeds the 50 MB limit.")
-            details = run_ffprobe(source)
-            duration_ms = round(float(details["format"]["duration"]) * 1000)
-            if duration_ms > 15_000:
-                raise ValidationError("Video exceeds the 15-second limit.")
-            video_stream = next(
-                stream
-                for stream in details.get("streams", [])
-                if stream.get("codec_type") == "video"
-                and "width" in stream
-                and "height" in stream
-            )
-            asset.width = video_stream["width"]
-            asset.height = video_stream["height"]
-            asset.duration_ms = duration_ms
-            output = source.with_name(f"{source.stem}-normalized.mp4")
-            subprocess.run(
-                [
-                    "ffmpeg",
-                    "-y",
-                    "-i",
-                    str(source),
-                    "-an",
-                    "-vf",
-                    (
-                        "scale=1920:1080:force_original_aspect_ratio=decrease,"
-                        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black"
-                    ),
-                    "-c:v",
-                    "libx264",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-movflags",
-                    "+faststart",
-                    str(output),
-                ],
-                check=True,
-                capture_output=True,
-            )
-            validate_normalized_video(output)
+                with Image.open(source) as image:
+                    asset.width, asset.height = image.size
+                output = source
+                asset.duration_ms = 10_000
+            else:
+                detected = sniff_video_mime(source)
+                if source.stat().st_size > settings.MEDIA_MAX_VIDEO_BYTES:
+                    raise ValidationError("Video exceeds the 50 MB limit.")
+                details = run_ffprobe(source)
+                duration_ms = round(float(details["format"]["duration"]) * 1000)
+                if duration_ms > 15_000:
+                    raise ValidationError("Video exceeds the 15-second limit.")
+                video_stream = next(
+                    stream
+                    for stream in details.get("streams", [])
+                    if stream.get("codec_type") == "video"
+                    and "width" in stream
+                    and "height" in stream
+                )
+                asset.width = video_stream["width"]
+                asset.height = video_stream["height"]
+                asset.duration_ms = duration_ms
+                output = source.with_name(f"{source.stem}-normalized.mp4")
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(source),
+                        "-an",
+                        "-vf",
+                        (
+                            "scale=1920:1080:force_original_aspect_ratio=decrease,"
+                            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black"
+                        ),
+                        "-c:v",
+                        "libx264",
+                        "-pix_fmt",
+                        "yuv420p",
+                        "-movflags",
+                        "+faststart",
+                        str(output),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                validate_normalized_video(output)
 
-        scanner = shutil.which("clamscan")
-        if require_malware_scanner and not scanner:
-            raise ValidationError("Malware scanner is unavailable.")
-        if scanner:
-            subprocess.run(
-                [scanner, "--no-summary", str(source)],
-                check=True,
-                capture_output=True,
+            scanner = shutil.which("clamscan")
+            if require_malware_scanner and not scanner:
+                raise ValidationError("Malware scanner is unavailable.")
+            if scanner:
+                subprocess.run(
+                    [scanner, "--no-summary", str(source)],
+                    check=True,
+                    capture_output=True,
+                )
+            digest = hashlib.sha256()
+            with output.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if asset.normalized_file:
+                asset.normalized_file.delete(save=False)
+            with output.open("rb") as handle:
+                asset.normalized_file.save(
+                    normalized_media_name(asset, source), File(handle), save=False
+                )
+            asset.sha256 = digest.hexdigest()
+            asset.file_size = output.stat().st_size
+            asset.mime_type = (
+                "video/mp4" if asset.kind == MediaAsset.Kind.VIDEO else detected
             )
-        digest = hashlib.sha256()
-        with output.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        with output.open("rb") as handle:
-            asset.normalized_file.save(output.name, File(handle), save=False)
-        asset.sha256 = digest.hexdigest()
-        asset.file_size = output.stat().st_size
-        asset.mime_type = (
-            "video/mp4" if asset.kind == MediaAsset.Kind.VIDEO else detected
-        )
-        asset.status = MediaAsset.Status.READY
-        asset.rejection_reason = ""
+            asset.status = MediaAsset.Status.READY
+            asset.rejection_reason = ""
     except (
         ValidationError,
+        OSError,
         subprocess.SubprocessError,
         ValueError,
         StopIteration,

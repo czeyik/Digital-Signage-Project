@@ -15,8 +15,8 @@ system.
 
 - `backend/`: Django dashboard, REST API, scheduled maintenance commands, media
   metadata, reporting, and audit history.
-- `android-player/`: Android 12+ kiosk player with Room-backed offline state,
-  WorkManager synchronization, and Media3 playback.
+- `android-player/`: Android 12+ kiosk player with SQLite-backed offline
+  state, scheduled heartbeat/synchronization, and platform image/video playback.
 - PostgreSQL: users, assignments, immutable playlists, telemetry, alerts, and
   proof-of-play.
 - Private object storage: quarantined uploads and validated media objects.

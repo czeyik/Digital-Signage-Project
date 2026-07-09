@@ -68,8 +68,19 @@ class Command(BaseCommand):
             errors.append("Secure cookies must be enabled in production.")
         if not settings.SECURE_SSL_REDIRECT:
             errors.append("SECURE_SSL_REDIRECT must be enabled in production.")
+        if not getattr(settings, "SECURE_PROXY_SSL_HEADER", None):
+            errors.append(
+                "SECURE_PROXY_SSL_HEADER must trust the TLS proxy in production."
+            )
         if settings.EMAIL_BACKEND.endswith("console.EmailBackend"):
-            warnings.append("Production email backend is still console-only.")
+            errors.append("Production email backend cannot be console-only.")
+        if settings.EMAIL_BACKEND.endswith("smtp.EmailBackend"):
+            if not settings.EMAIL_HOST:
+                errors.append("EMAIL_HOST must be set for production SMTP email.")
+            if not settings.DEFAULT_FROM_EMAIL:
+                errors.append("DEFAULT_FROM_EMAIL must be set for production email.")
+        if settings.EMAIL_USE_TLS and settings.EMAIL_USE_SSL:
+            errors.append("Email cannot enable both TLS and SSL.")
 
     def _check_development_settings(self, warnings):
         production_hosts = {
