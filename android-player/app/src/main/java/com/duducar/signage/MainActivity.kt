@@ -201,7 +201,10 @@ class MainActivity : Activity() {
         val manifest = activeManifest ?: return showStatus(getString(R.string.fallback))
         val items = manifest.getJSONArray("items")
         if (items.length() == 0) return showStatus(getString(R.string.fallback))
-        if (loopStartedAt == null) loopStartedAt = serverClock.now()
+        if (loopStartedAt == null) {
+            loopStartedAt = serverClock.now()
+            store.putState("loop_started_at", loopStartedAt?.toString() ?: "")
+        }
         if (currentIndex >= items.length()) {
             finishLoop(manifest)
             activeManifest = cache.activateStaged() ?: activeManifest
@@ -264,7 +267,7 @@ class MainActivity : Activity() {
         val items = manifest.getJSONArray("items")
         if (currentIndex >= items.length()) return
         val item = items.getJSONObject(currentIndex)
-        loopResults += PlaybackResult(
+        val result = PlaybackResult(
             id = currentResultId ?: UUID.randomUUID().toString(),
             playlistItemId = item.getString("entry_id"),
             startedAt = (currentStartedAt ?: serverClock.now()).toString(),
@@ -273,6 +276,8 @@ class MainActivity : Activity() {
             status = status,
             failureReason = reason,
         )
+        loopResults += result
+        persistLoopResults()
         store.putState("current_playback", "")
     }
 
@@ -285,13 +290,35 @@ class MainActivity : Activity() {
 
     private fun finishLoop(manifest: JSONObject) {
         if (loopResults.isEmpty()) return
+        enqueueLoopBatch(
+            manifest = manifest,
+            sourceResults = loopResults,
+            startedAt = loopStartedAt ?: serverClock.now(),
+            endedAt = serverClock.now(),
+            capturedOffline = !isOnline(),
+        )
+        loopResults.clear()
+        store.putState("loop_results", "")
+        loopStartedAt = serverClock.now()
+        store.putState("loop_started_at", loopStartedAt?.toString() ?: "")
+        executor.execute { flushPendingBatches() }
+    }
+
+    private fun enqueueLoopBatch(
+        manifest: JSONObject,
+        sourceResults: List<PlaybackResult>,
+        startedAt: Instant,
+        endedAt: Instant,
+        capturedOffline: Boolean,
+    ) {
         val items = manifest.getJSONArray("items")
-        val recordedItems = loopResults.map { it.playlistItemId }.toMutableSet()
+        val completeResults = sourceResults.toMutableList()
+        val recordedItems = completeResults.map { it.playlistItemId }.toMutableSet()
         for (index in 0 until items.length()) {
             val item = items.getJSONObject(index)
             val entryId = item.getString("entry_id")
             if (!recordedItems.contains(entryId)) {
-                loopResults += PlaybackResult(
+                completeResults += PlaybackResult(
                     id = UUID.randomUUID().toString(),
                     playlistItemId = entryId,
                     startedAt = serverClock.now().toString(),
@@ -304,33 +331,57 @@ class MainActivity : Activity() {
             }
         }
         val events = JSONArray()
-        loopResults.forEach { result ->
-            events.put(
-                JSONObject()
-                    .put("id", result.id)
-                    .put("playlist_item_id", result.playlistItemId)
-                    .put("started_at", result.startedAt)
-                    .put("ended_at", result.endedAt)
-                    .put("duration_ms", result.durationMs)
-                    .put("status", result.status)
-                    .put("failure_reason", result.failureReason),
-            )
+        completeResults.forEach { result ->
+            events.put(playbackResultToJson(result))
         }
         store.enqueueBatch(
             JSONObject()
                 .put("id", UUID.randomUUID().toString())
                 .put("playlist_id", manifest.getString("id"))
-                .put(
-                    "loop_started_at",
-                    (loopStartedAt ?: serverClock.now()).toString(),
-                )
-                .put("loop_ended_at", serverClock.now().toString())
-                .put("captured_offline", !isOnline())
+                .put("loop_started_at", startedAt.toString())
+                .put("loop_ended_at", endedAt.toString())
+                .put("captured_offline", capturedOffline)
                 .put("events", events),
         )
-        loopResults.clear()
-        loopStartedAt = serverClock.now()
-        executor.execute { flushPendingBatches() }
+    }
+
+    private fun playbackResultToJson(result: PlaybackResult): JSONObject =
+        JSONObject()
+            .put("id", result.id)
+            .put("playlist_item_id", result.playlistItemId)
+            .put("started_at", result.startedAt)
+            .put("ended_at", result.endedAt ?: JSONObject.NULL)
+            .put("duration_ms", result.durationMs)
+            .put("status", result.status)
+            .put("failure_reason", result.failureReason)
+
+    private fun persistLoopResults() {
+        val events = JSONArray()
+        loopResults.forEach { result -> events.put(playbackResultToJson(result)) }
+        store.putState("loop_results", events.toString())
+    }
+
+    private fun persistedLoopResults(): MutableList<PlaybackResult> {
+        val raw = store.state("loop_results")
+        if (raw.isNullOrBlank()) return mutableListOf()
+        val events = JSONArray(raw)
+        val results = mutableListOf<PlaybackResult>()
+        for (index in 0 until events.length()) {
+            val event = events.getJSONObject(index)
+            val endedAt = event.optString("ended_at").takeIf {
+                it.isNotBlank() && it != "null"
+            }
+            results += PlaybackResult(
+                id = event.getString("id"),
+                playlistItemId = event.getString("playlist_item_id"),
+                startedAt = event.getString("started_at"),
+                endedAt = endedAt,
+                durationMs = event.optLong("duration_ms", 0),
+                status = event.getString("status"),
+                failureReason = event.optString("failure_reason", ""),
+            )
+        }
+        return results
     }
 
     private fun flushPendingBatches() {
@@ -437,34 +488,45 @@ class MainActivity : Activity() {
         val raw = store.state("current_playback")
         if (raw.isNullOrBlank()) return
         try {
+            val manifest = activeManifest ?: return
             val previous = JSONObject(raw)
             val endedAt = serverClock.now()
             val startedAt = Instant.parse(previous.getString("started_at"))
-            val event = JSONObject()
-                .put("id", previous.getString("result_id"))
-                .put("playlist_item_id", previous.getString("playlist_item_id"))
-                .put("started_at", startedAt.toString())
-                .put("ended_at", endedAt.toString())
-                .put(
-                    "duration_ms",
-                    java.time.Duration.between(startedAt, endedAt).toMillis().coerceAtLeast(0),
+            loopResults.clear()
+            loopResults.addAll(persistedLoopResults())
+            val interruptedItem = previous.getString("playlist_item_id")
+            if (loopResults.none { it.playlistItemId == interruptedItem }) {
+                loopResults += PlaybackResult(
+                    id = previous.getString("result_id"),
+                    playlistItemId = interruptedItem,
+                    startedAt = startedAt.toString(),
+                    endedAt = endedAt.toString(),
+                    durationMs = java.time.Duration.between(startedAt, endedAt)
+                        .toMillis()
+                        .coerceAtLeast(0),
+                    status = "interrupted",
+                    failureReason = "app_restart_or_power_loss",
                 )
-                .put("status", "interrupted")
-                .put("failure_reason", "app_restart_or_power_loss")
-            store.enqueueBatch(
-                JSONObject()
-                    .put("id", UUID.randomUUID().toString())
-                    .put("playlist_id", previous.getString("playlist_id"))
-                    .put("loop_started_at", startedAt.toString())
-                    .put("loop_ended_at", endedAt.toString())
-                    .put("captured_offline", true)
-                    .put("events", JSONArray().put(event)),
+            }
+            val restoredLoopStartedAt = store.state("loop_started_at")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { Instant.parse(it) }
+                ?: startedAt
+            enqueueLoopBatch(
+                manifest = manifest,
+                sourceResults = loopResults,
+                startedAt = restoredLoopStartedAt,
+                endedAt = endedAt,
+                capturedOffline = true,
             )
+            loopResults.clear()
             currentIndex = previous.optInt("item_index", 0)
         } catch (_: Exception) {
             currentIndex = 0
         } finally {
             store.putState("current_playback", "")
+            store.putState("loop_results", "")
+            loopStartedAt = null
         }
     }
 

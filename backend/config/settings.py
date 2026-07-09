@@ -130,6 +130,9 @@ SESSION_IDLE_TIMEOUT_SECONDS = 30 * 60
 PASSWORD_RESET_TIMEOUT = 15 * 60
 CSRF_COOKIE_SECURE = not DEBUG
 SECURE_SSL_REDIRECT = env_bool("DJANGO_SECURE_SSL_REDIRECT", not DEBUG)
+if env_bool("DJANGO_TRUST_X_FORWARDED_PROTO", not DEBUG):
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+USE_X_FORWARDED_HOST = env_bool("DJANGO_USE_X_FORWARDED_HOST", False)
 SECURE_HSTS_SECONDS = 0 if DEBUG else 31_536_000
 SECURE_HSTS_INCLUDE_SUBDOMAINS = not DEBUG
 SECURE_HSTS_PRELOAD = not DEBUG
@@ -162,10 +165,22 @@ MEDIA_MAX_VIDEO_BYTES = 50 * 1024 * 1024
 PILOT_BACKUP_ROOT = os.getenv("PILOT_BACKUP_ROOT", str(BASE_DIR / "backups"))
 PILOT_BACKUP_RETENTION_DAYS = int(os.getenv("PILOT_BACKUP_RETENTION_DAYS", "30"))
 
-EMAIL_BACKEND = os.getenv(
-    "EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend"
-)
+EMAIL_BACKEND = os.getenv("EMAIL_BACKEND")
+if not EMAIL_BACKEND:
+    EMAIL_BACKEND = (
+        "django.core.mail.backends.smtp.EmailBackend"
+        if os.getenv("EMAIL_HOST")
+        else "django.core.mail.backends.console.EmailBackend"
+    )
 DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "no-reply@duducar.co")
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", True)
+EMAIL_USE_SSL = env_bool("EMAIL_USE_SSL", False)
+EMAIL_TIMEOUT = int(os.getenv("EMAIL_TIMEOUT", "10"))
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
