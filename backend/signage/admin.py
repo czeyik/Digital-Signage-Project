@@ -13,6 +13,7 @@ from .models import (
     MediaAsset,
     PlatformSettings,
     PlaybackBatch,
+    PlaybackCorrection,
     PlaybackEvent,
     Playlist,
     PlaylistItem,
@@ -85,7 +86,14 @@ class AssignmentInline(admin.TabularInline):
 
 @admin.register(Device)
 class DeviceAdmin(admin.ModelAdmin):
-    list_display = ("label", "status", "last_seen_at", "last_sync_at", "app_version")
+    list_display = (
+        "label",
+        "status",
+        "hardware_qualification",
+        "last_seen_at",
+        "last_sync_at",
+        "app_version",
+    )
     list_filter = ("status",)
     search_fields = ("label",)
     inlines = [AssignmentInline]
@@ -220,3 +228,11 @@ class AuditEventAdmin(ImmutableAdmin):
 
 for model in (EnrollmentCode, DeviceHeartbeat, PlaybackBatch, PlaybackEvent):
     admin.site.register(model, ImmutableAdmin)
+
+
+@admin.register(PlaybackCorrection)
+class PlaybackCorrectionAdmin(ImmutableAdmin):
+    readonly_fields = ("created_at",)
+
+    def has_add_permission(self, request):
+        return request.user.is_owner

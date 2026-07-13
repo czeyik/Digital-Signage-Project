@@ -9,6 +9,7 @@ from .models import (
     Device,
     DeviceAssignment,
     Driver,
+    HardwareQualification,
     MediaAsset,
     PlatformSettings,
     Playlist,
@@ -95,9 +96,25 @@ class DashboardUserForm(forms.ModelForm):
 
 class DeviceProvisioningForm(forms.Form):
     device_label = forms.CharField(max_length=100)
+    hardware_qualification = forms.ModelChoiceField(
+        queryset=HardwareQualification.objects.none(),
+        required=False,
+        help_text=(
+            "Required before production enrollment; select the approved exact model "
+            "and firmware qualification."
+        ),
+    )
     driver_internal_id = forms.CharField(max_length=64)
     driver_name = forms.CharField(max_length=160)
     vehicle_registration = forms.CharField(max_length=32)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["hardware_qualification"].queryset = (
+            HardwareQualification.objects.filter(approved_for_pilot=True).order_by(
+                "model_name", "firmware_version"
+            )
+        )
 
     @transaction.atomic
     def save(self):
@@ -111,7 +128,10 @@ class DeviceProvisioningForm(forms.Form):
         vehicle, _ = Vehicle.objects.get_or_create(
             registration=self.cleaned_data["vehicle_registration"]
         )
-        device = Device.objects.create(label=self.cleaned_data["device_label"])
+        device = Device.objects.create(
+            label=self.cleaned_data["device_label"],
+            hardware_qualification=self.cleaned_data["hardware_qualification"],
+        )
         DeviceAssignment.objects.create(device=device, driver=driver, vehicle=vehicle)
         return device
 

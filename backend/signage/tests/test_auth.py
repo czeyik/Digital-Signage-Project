@@ -2,7 +2,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.urls import reverse
 
-from signage.models import Alert, Driver, User
+from signage.models import Alert, AuditEvent, Driver, User
 
 
 @pytest.mark.django_db
@@ -117,3 +117,32 @@ def test_marketing_cannot_manage_dashboard_users(client):
     response = client.get(reverse("user-list"))
 
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_logout_invalidates_dashboard_session_and_is_audited(client):
+    user = User.objects.create_user(
+        "marketing@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    client.force_login(user)
+
+    response = client.post(reverse("logout"))
+    protected = client.get(reverse("dashboard"))
+
+    assert response.status_code == 302
+    assert protected.status_code == 302
+    assert reverse("login") in protected.url
+    assert AuditEvent.objects.filter(actor=user, action="auth.logout").exists()
+
+
+@pytest.mark.django_db
+def test_health_endpoints_and_security_headers(client):
+    live = client.get(reverse("health-live"))
+    ready = client.get(reverse("health-ready"))
+
+    assert live.status_code == 200
+    assert ready.status_code == 200
+    assert live["Content-Security-Policy"].startswith("default-src 'self'")
+    assert "geolocation=()" in live["Permissions-Policy"]

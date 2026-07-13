@@ -40,6 +40,7 @@ MIDDLEWARE = [
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "signage.middleware.SessionIdleTimeoutMiddleware",
+    "signage.middleware.ProductionSecurityHeadersMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -77,6 +78,19 @@ if os.getenv("DATABASE_URL"):
             "PORT": database.port or 5432,
             "CONN_MAX_AGE": 60,
             "OPTIONS": {"sslmode": os.getenv("DB_SSLMODE", "prefer")},
+        }
+    }
+elif os.getenv("DB_HOST"):
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.getenv("DB_NAME", "signage"),
+            "USER": os.getenv("DB_USER", "signage"),
+            "PASSWORD": os.getenv("DB_PASSWORD", ""),
+            "HOST": os.environ["DB_HOST"],
+            "PORT": int(os.getenv("DB_PORT", "5432")),
+            "CONN_MAX_AGE": 60,
+            "OPTIONS": {"sslmode": os.getenv("DB_SSLMODE", "require")},
         }
     }
 else:
@@ -158,12 +172,29 @@ REST_FRAMEWORK = {
 
 DEVICE_ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 ENROLLMENT_CODE_TTL_SECONDS = 15 * 60
+ENROLLMENT_CHALLENGE_TTL_SECONDS = 5 * 60
 REQUIRED_APP_VERSION = os.getenv("REQUIRED_APP_VERSION", "0.1.0")
 DEVICE_OVERHEAT_CELSIUS = float(os.getenv("DEVICE_OVERHEAT_CELSIUS", "45"))
+DEVICE_MEDIA_CACHE_BYTES = int(os.getenv("DEVICE_MEDIA_CACHE_BYTES", str(10 * 1024**3)))
+DEVICE_EVENT_QUEUE_BYTES = int(
+    os.getenv("DEVICE_EVENT_QUEUE_BYTES", str(500 * 1024**2))
+)
+DEVICE_MIN_FREE_BYTES = int(os.getenv("DEVICE_MIN_FREE_BYTES", str(2 * 1024**3)))
+PLAY_INTEGRITY_PROJECT_NUMBER = os.getenv("PLAY_INTEGRITY_PROJECT_NUMBER", "")
+PLAY_INTEGRITY_PACKAGE_NAME = os.getenv(
+    "PLAY_INTEGRITY_PACKAGE_NAME", "com.duducar.signage"
+)
+PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON = os.getenv(
+    "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", ""
+)
+PLAY_INTEGRITY_MAX_TOKEN_AGE_SECONDS = int(
+    os.getenv("PLAY_INTEGRITY_MAX_TOKEN_AGE_SECONDS", "120")
+)
 MEDIA_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MEDIA_MAX_VIDEO_BYTES = 50 * 1024 * 1024
 PILOT_BACKUP_ROOT = os.getenv("PILOT_BACKUP_ROOT", str(BASE_DIR / "backups"))
 PILOT_BACKUP_RETENTION_DAYS = int(os.getenv("PILOT_BACKUP_RETENTION_DAYS", "30"))
+PILOT_BACKUP_S3_BUCKET = os.getenv("PILOT_BACKUP_S3_BUCKET", "")
 
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND")
 if not EMAIL_BACKEND:

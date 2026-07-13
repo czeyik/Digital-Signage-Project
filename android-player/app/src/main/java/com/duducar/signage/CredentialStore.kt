@@ -26,6 +26,17 @@ class CredentialStore(context: Context) {
             .apply()
     }
 
+    fun saveKioskPinVerifier(verifier: String) {
+        if (verifier.isNotBlank()) {
+            preferences.edit().putString("kiosk_pin_verifier", verifier).apply()
+        }
+    }
+
+    fun verifyKioskPin(pin: String): Boolean {
+        val verifier = preferences.getString("kiosk_pin_verifier", "") ?: ""
+        return PinVerifier.verify(pin, verifier)
+    }
+
     fun refreshToken(): String? {
         val ciphertext = preferences.getString("refresh_ciphertext", null) ?: return null
         val iv = preferences.getString("refresh_iv", null) ?: return null
@@ -55,4 +66,3 @@ class CredentialStore(context: Context) {
         }
     }
 }
-

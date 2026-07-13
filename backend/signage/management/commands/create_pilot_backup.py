@@ -24,6 +24,7 @@ class Command(BaseCommand):
             default=settings.PILOT_BACKUP_RETENTION_DAYS,
         )
         parser.add_argument("--skip-media", action="store_true")
+        parser.add_argument("--s3-bucket", default=settings.PILOT_BACKUP_S3_BUCKET)
 
     def handle(self, *args, **options):
         output_dir = Path(options["output_dir"]).expanduser().resolve()
@@ -67,6 +68,18 @@ class Command(BaseCommand):
         self._prune_old_backups(output_dir, options["retain_days"])
         if not archive_path.exists():
             raise CommandError("Backup archive was not created.")
+        call_command("verify_pilot_backup", str(archive_path), verbosity=0)
+        if options["s3_bucket"]:
+            import boto3
+
+            key = f"application-backups/{archive_path.name}"
+            boto3.client("s3").upload_file(str(archive_path), options["s3_bucket"], key)
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"Uploaded encrypted application backup to s3://"
+                    f"{options['s3_bucket']}/{key}"
+                )
+            )
         self.stdout.write(self.style.SUCCESS(f"Created backup {archive_path}"))
 
     def _prune_old_backups(self, output_dir, retain_days):

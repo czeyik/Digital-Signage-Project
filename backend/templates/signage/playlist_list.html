@@ -4,5 +4,5 @@
 <section class="panel"><table><thead><tr><th>Name</th><th>Version</th><th>Window</th><th>Entries</th><th>Status</th><th>Action</th></tr></thead>
 <tbody>{% for playlist in playlists %}<tr><td><a href="{% url 'playlist-detail' playlist.id %}">{{ playlist.name }}</a></td><td>{{ playlist.version }}</td><td>{{ playlist.starts_at }}<br>{{ playlist.ends_at }}</td><td>{{ playlist.items.count }}</td><td>{{ playlist.get_status_display }}{% if playlist.is_urgent %} / urgent{% endif %}</td><td>{% if playlist.status == "draft" %}
 <form method="post" action="{% url 'playlist-publish' playlist.id %}">{% csrf_token %}<button name="urgent" value="false">Publish</button><button class="danger-button" name="urgent" value="true">Urgent publish</button></form>
-{% else %}Immutable{% endif %}</td></tr>{% empty %}<tr><td colspan="6">No playlists.</td></tr>{% endfor %}</tbody></table></section>
+{% else %}<form method="post" action="{% url 'playlist-clone' playlist.id %}">{% csrf_token %}<button type="submit">Create corrected version</button></form>{% endif %}</td></tr>{% empty %}<tr><td colspan="6">No playlists.</td></tr>{% endfor %}</tbody></table></section>
 {% endblock %}

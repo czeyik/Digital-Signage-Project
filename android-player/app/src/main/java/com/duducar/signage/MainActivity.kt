@@ -20,7 +20,10 @@ import android.net.NetworkCapabilities
 import com.duducar.signage.databinding.ActivityMainBinding
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Duration
 import java.time.Instant
+import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.util.UUID
 import java.util.concurrent.Executors
 
@@ -30,6 +33,8 @@ class MainActivity : Activity() {
     private lateinit var cache: CacheManager
     private lateinit var store: PlayerStore
     private lateinit var serverClock: ServerClock
+    private lateinit var integrity: IntegrityClient
+    private lateinit var credentials: CredentialStore
     private val executor = Executors.newSingleThreadExecutor()
     private val playbackHandler = Handler(Looper.getMainLooper())
     private val operationsHandler = Handler(Looper.getMainLooper())
@@ -64,13 +69,35 @@ class MainActivity : Activity() {
         hideSystemUi()
         enterLockTaskIfManaged()
 
-        val credentials = CredentialStore(this)
+        credentials = CredentialStore(this)
         api = ApiClient(credentials)
         cache = CacheManager(this)
         store = PlayerStore(this)
         serverClock = ServerClock(this)
+        integrity = IntegrityClient(this)
         activeManifest = cache.activeManifest()
         recoverInterruptedPlayback()
+        binding.root.setOnLongClickListener {
+            val mode = store.state("device_mode")
+            if (mode == "maintenance" || mode == "fallback") {
+                binding.adminUnlock.visibility = View.VISIBLE
+            }
+            true
+        }
+        binding.adminUnlockButton.setOnClickListener {
+            if (credentials.verifyKioskPin(binding.adminPin.text.toString())) {
+                try {
+                    stopLockTask()
+                } catch (_: SecurityException) {
+                    // The device may already be outside lock-task mode.
+                }
+                window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
+                binding.adminUnlock.visibility = View.GONE
+                showStatus("Administrator mode unlocked")
+            } else {
+                binding.adminError.text = "Invalid administrator PIN."
+            }
+        }
 
         registerReceiver(
             powerReceiver,
@@ -120,7 +147,15 @@ class MainActivity : Activity() {
                         contentResolver,
                         Settings.Secure.ANDROID_ID,
                     )
-                    val response = api.enroll(code, androidId)
+                    val challenge = api.enrollmentChallenge(code, androidId)
+                    val integrityToken = integrity.token(
+                        BuildConfig.PLAY_INTEGRITY_PROJECT_NUMBER,
+                        challenge.getString("request_hash"),
+                    )
+                    val response = api.enroll(
+                        challenge.getString("challenge_id"),
+                        integrityToken,
+                    )
                     serverClock.update(response.getString("server_time"))
                     runOnUiThread {
                         binding.enrollment.visibility = View.GONE
@@ -151,17 +186,20 @@ class MainActivity : Activity() {
                 serverClock.update(response.getString("server_time"))
                 when (response.getString("mode")) {
                     "maintenance" -> runOnUiThread {
+                        markSuccessfulSync()
                         store.putState("device_mode", "maintenance")
                         showStatus(getString(R.string.maintenance))
                     }
                     "fallback" -> runOnUiThread {
+                        markSuccessfulSync()
                         store.putState("device_mode", "fallback")
-                        showStatus(getString(R.string.fallback))
+                        showFallback()
                     }
                     "play" -> {
                         val manifest = response.getJSONObject("playlist")
                         if (cache.prepare(manifest)) {
                             runOnUiThread {
+                                markSuccessfulSync()
                                 store.putState("device_mode", "play")
                                 val sameManifest =
                                     activeManifest?.optString("id") == manifest.optString("id") &&
@@ -180,6 +218,19 @@ class MainActivity : Activity() {
                                     playCurrent()
                                 }
                             }
+                        } else {
+                            store.enqueueOperationalEvent(
+                                JSONObject()
+                                    .put("kind", "replacement_failed")
+                                    .put("recorded_at", serverClock.now().toString())
+                                    .put(
+                                        "details",
+                                        JSONObject().put(
+                                            "playlist_id",
+                                            manifest.getString("id"),
+                                        ),
+                                    ),
+                            )
                         }
                     }
                 }
@@ -190,7 +241,7 @@ class MainActivity : Activity() {
                         return@runOnUiThread
                     }
                     activeManifest = cache.activeManifest()
-                    if (activeManifest != null) playCurrent() else showStatus(getString(R.string.fallback))
+                    if (activeManifest != null) playCurrent() else showFallback()
                 }
             }
         }
@@ -198,9 +249,9 @@ class MainActivity : Activity() {
 
     private fun playCurrent() {
         if (!hasExternalPower()) return
-        val manifest = activeManifest ?: return showStatus(getString(R.string.fallback))
+        val manifest = activeManifest ?: return showFallback()
         val items = manifest.getJSONArray("items")
-        if (items.length() == 0) return showStatus(getString(R.string.fallback))
+        if (items.length() == 0) return showFallback()
         if (loopStartedAt == null) {
             loopStartedAt = serverClock.now()
             store.putState("loop_started_at", loopStartedAt?.toString() ?: "")
@@ -211,7 +262,7 @@ class MainActivity : Activity() {
             currentIndex = 0
         }
         val item = activeManifest!!.getJSONArray("items").getJSONObject(currentIndex)
-        val file = cache.mediaFile(item.getString("media_id"))
+        val file = cache.validatedMediaFile(item)
         currentStartedAt = serverClock.now()
         currentResultId = UUID.randomUUID().toString()
         store.putState(
@@ -225,14 +276,20 @@ class MainActivity : Activity() {
                 .toString(),
         )
         binding.status.visibility = View.GONE
-        if (!file.exists()) {
+        if (file == null) {
             recordCurrent("failed", "missing_file", 0)
             advance()
             return
         }
         if (item.getString("kind") == "image") {
             binding.video.visibility = View.GONE
-            binding.image.setImageBitmap(BitmapFactory.decodeFile(file.path))
+            val bitmap = BitmapFactory.decodeFile(file.path)
+            if (bitmap == null) {
+                recordCurrent("failed", "decode_failure", 0)
+                advance()
+                return
+            }
+            binding.image.setImageBitmap(bitmap)
             binding.image.visibility = View.VISIBLE
             playbackHandler.postDelayed({
                 recordCurrent("completed", "", item.getLong("duration_ms"))
@@ -279,6 +336,7 @@ class MainActivity : Activity() {
         loopResults += result
         persistLoopResults()
         store.putState("current_playback", "")
+        store.putState("last_playback_at", result.endedAt ?: result.startedAt)
     }
 
     private fun interruptCurrent(reason: String) {
@@ -342,6 +400,15 @@ class MainActivity : Activity() {
                 .put("loop_ended_at", endedAt.toString())
                 .put("captured_offline", capturedOffline)
                 .put("events", events),
+            maxBytes = manifest.optLong(
+                "event_queue_bytes",
+                500L * 1024 * 1024,
+            ),
+            minimumFreeBytes = manifest.optLong(
+                "minimum_free_bytes",
+                2L * 1024 * 1024 * 1024,
+            ),
+            recordedAt = serverClock.now().toString(),
         )
     }
 
@@ -385,6 +452,14 @@ class MainActivity : Activity() {
     }
 
     private fun flushPendingBatches() {
+        store.pendingOperationalEvents().forEach { (id, payload) ->
+            try {
+                api.uploadOperationalEvent(payload)
+                store.acknowledgeOperationalEvent(id)
+            } catch (_: Exception) {
+                return
+            }
+        }
         store.pendingBatches().forEach { (id, payload) ->
             try {
                 api.uploadBatch(payload)
@@ -416,6 +491,13 @@ class MainActivity : Activity() {
                 .put("free_storage_bytes", filesDir.usableSpace)
                 .put("app_version", BuildConfig.VERSION_NAME)
                 .put("android_version", android.os.Build.VERSION.RELEASE)
+                .put("active_playlist_id", activeManifest?.optString("id"))
+                .put("playback_active", currentStartedAt != null)
+                .put(
+                    "last_successful_sync_at",
+                    store.state("last_successful_sync_at"),
+                )
+                .put("last_playback_at", store.state("last_playback_at"))
             try {
                 api.heartbeat(body)
             } catch (_: Exception) {
@@ -425,6 +507,7 @@ class MainActivity : Activity() {
     }
 
     private fun scheduleOperations() {
+        operationsHandler.removeCallbacksAndMessages(null)
         val heartbeat = object : Runnable {
             override fun run() {
                 sendHeartbeat()
@@ -437,8 +520,24 @@ class MainActivity : Activity() {
                 operationsHandler.postDelayed(this, 60 * 60 * 1000L)
             }
         }
+        val midnightSync = object : Runnable {
+            override fun run() {
+                synchronizeAndPlay()
+                operationsHandler.postDelayed(this, 24 * 60 * 60 * 1000L)
+            }
+        }
         operationsHandler.post(heartbeat)
         operationsHandler.post(sync)
+        val now = ZonedDateTime.now(ZoneId.of("Asia/Kuala_Lumpur"))
+        val nextMidnight = now.toLocalDate().plusDays(1).atStartOfDay(now.zone)
+        operationsHandler.postDelayed(
+            midnightSync,
+            Duration.between(now, nextMidnight).toMillis(),
+        )
+    }
+
+    private fun markSuccessfulSync() {
+        store.putState("last_successful_sync_at", serverClock.now().toString())
     }
 
     private fun hasExternalPower(): Boolean {
@@ -463,6 +562,13 @@ class MainActivity : Activity() {
         stopPlayback()
         binding.status.text = message
         binding.status.visibility = View.VISIBLE
+    }
+
+    private fun showFallback() {
+        stopPlayback()
+        binding.status.visibility = View.GONE
+        binding.image.setImageResource(R.drawable.dudu_fallback)
+        binding.image.visibility = View.VISIBLE
     }
 
     private fun hideSystemUi() {

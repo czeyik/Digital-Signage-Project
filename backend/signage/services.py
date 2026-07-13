@@ -1,9 +1,11 @@
 import hashlib
 import json
+import os
 import secrets
 import shutil
 import subprocess
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 
 from django.conf import settings
@@ -14,12 +16,12 @@ from django.utils import timezone
 
 from .models import (
     Alert,
+    ApiThrottle,
     AuditEvent,
     Device,
     MediaAsset,
     PlatformSettings,
     Playlist,
-    token_hash,
 )
 
 ALLOWED_IMAGE_MIME = {"image/jpeg", "image/png"}
@@ -44,6 +46,43 @@ def audit(actor, action, target, metadata=None):
     )
 
 
+def client_ip(request):
+    """Return the ALB-appended address, not a spoofable left-most XFF value."""
+    forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
+    if getattr(settings, "SECURE_PROXY_SSL_HEADER", None) and forwarded:
+        return forwarded.split(",")[-1].strip()
+    return request.META.get("REMOTE_ADDR", "")
+
+
+@transaction.atomic
+def throttle_wait(request, action, limit=10, window_seconds=900):
+    identity = f"{action}|{client_ip(request)}|{settings.SECRET_KEY}"
+    key = hashlib.sha256(identity.encode()).hexdigest()
+    now = timezone.now()
+    throttle, _ = ApiThrottle.objects.select_for_update().get_or_create(key_hash=key)
+    if throttle.is_blocked:
+        return max(1, int((throttle.blocked_until - now).total_seconds()))
+    if throttle.window_started_at <= now - timedelta(seconds=window_seconds):
+        throttle.attempts = 0
+        throttle.window_started_at = now
+        throttle.blocked_until = None
+    throttle.attempts += 1
+    if throttle.attempts > limit:
+        throttle.blocked_until = now + timedelta(seconds=window_seconds)
+    throttle.save()
+    if throttle.blocked_until:
+        return window_seconds
+    return 0
+
+
+def enforce_api_throttle(request, action, limit=10, window_seconds=900):
+    from rest_framework import exceptions
+
+    wait = throttle_wait(request, action, limit, window_seconds)
+    if wait:
+        raise exceptions.Throttled(wait=wait)
+
+
 def open_alert(device, code, severity, message):
     return Alert.objects.get_or_create(
         device=device,
@@ -57,7 +96,10 @@ def open_alert(device, code, severity, message):
 def issue_kiosk_pin(device, actor):
     raw_pin = f"{secrets.randbelow(1_000_000):06d}"
     locked = Device.objects.select_for_update().get(pk=device.pk)
-    locked.kiosk_pin_hash = token_hash(raw_pin)
+    salt = secrets.token_bytes(16)
+    iterations = 210_000
+    derived = hashlib.pbkdf2_hmac("sha256", raw_pin.encode("utf-8"), salt, iterations)
+    locked.kiosk_pin_hash = f"pbkdf2_sha256${iterations}${salt.hex()}${derived.hex()}"
     locked.kiosk_pin_reset_at = timezone.now()
     locked.save(update_fields=["kiosk_pin_hash", "kiosk_pin_reset_at", "updated_at"])
     audit(actor, "device.kiosk_pin.reset", locked)
@@ -175,6 +217,24 @@ def validate_normalized_video(path):
         raise ValidationError("Normalized output must use H.264 video.")
     if int(video.get("width", 0)) > 1920 or int(video.get("height", 0)) > 1080:
         raise ValidationError("Normalized output exceeds 1920x1080.")
+    duration_ms = round(float(details["format"]["duration"]) * 1000)
+    if duration_ms > 15_000:
+        raise ValidationError("Normalized output exceeds the 15-second limit.")
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-f",
+            "null",
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return duration_ms
 
 
 def copy_source_to_temporary_file(asset, directory):
@@ -255,14 +315,18 @@ def inspect_media(asset, require_malware_scanner=True):
                     check=True,
                     capture_output=True,
                 )
-                validate_normalized_video(output)
+                asset.duration_ms = validate_normalized_video(output)
 
             scanner = shutil.which("clamscan")
             if require_malware_scanner and not scanner:
                 raise ValidationError("Malware scanner is unavailable.")
             if scanner:
+                scan_command = [scanner, "--no-summary"]
+                database = os.getenv("CLAMAV_DATABASE_DIR", "")
+                if database:
+                    scan_command.extend(["--database", database])
                 subprocess.run(
-                    [scanner, "--no-summary", str(source)],
+                    [*scan_command, str(source)],
                     check=True,
                     capture_output=True,
                 )

@@ -19,6 +19,11 @@ urlpatterns = [
         views.playlist_publish,
         name="playlist-publish",
     ),
+    path(
+        "playlists/<uuid:playlist_id>/clone/",
+        views.playlist_clone,
+        name="playlist-clone",
+    ),
     path("devices/", views.device_list, name="device-list"),
     path("devices/new/", views.device_create, name="device-create"),
     path(

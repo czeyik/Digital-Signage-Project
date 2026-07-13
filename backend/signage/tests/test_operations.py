@@ -106,6 +106,12 @@ def test_production_readiness_fails_for_unsafe_environment():
     EMAIL_BACKEND="django.core.mail.backends.smtp.EmailBackend",
     EMAIL_HOST="email-smtp.ap-southeast-1.amazonaws.com",
     DEFAULT_FROM_EMAIL="no-reply@duducar.co",
+    PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
+    PLAY_INTEGRITY_PACKAGE_NAME="com.duducar.signage",
+    PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON=(
+        '{"type":"service_account","project_id":"duducar-signage-production",'
+        '"private_key":"test-only-key","client_email":"integrity@example.test"}'
+    ),
 )
 def test_production_readiness_passes_for_configured_environment(monkeypatch):
     monkeypatch.setattr(

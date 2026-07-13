@@ -1,4 +1,7 @@
+import secrets
 import uuid
+from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.db import IntegrityError, models, transaction
@@ -14,12 +17,15 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import exception_handler as drf_exception_handler
 
+from .integrity import verify_integrity_token
 from .models import (
     Alert,
     Device,
     DeviceAccessToken,
     DeviceCredential,
     DeviceHeartbeat,
+    DeviceOperationalEvent,
+    EnrollmentChallenge,
     EnrollmentCode,
     PlatformSettings,
     PlaybackBatch,
@@ -27,7 +33,7 @@ from .models import (
     Playlist,
     token_hash,
 )
-from .services import open_alert
+from .services import enforce_api_throttle, open_alert, throttle_wait
 
 
 def exception_handler(exc, context):
@@ -60,69 +66,186 @@ def device_for(request):
     return request.user.device
 
 
-@api_view(["POST"])
-@authentication_classes([])
-@permission_classes([AllowAny])
-def enroll(request):
-    code = str(request.data.get("code", "")).strip()
-    android_id = str(request.data.get("android_id", "")).strip()
-    android_version = str(request.data.get("android_version", "")).strip()
-    app_version = str(request.data.get("app_version", "")).strip()
-    compromised = bool(request.data.get("integrity_compromised", False))
-    if not code or not android_id:
-        raise serializers.ValidationError(
-            "Enrollment code and Android ID are required."
-        )
+def enrollment_device_details(data):
+    android_id = str(data.get("android_id", "")).strip()
+    android_version = str(data.get("android_version", "")).strip()
+    app_version = str(data.get("app_version", "")).strip()
+    if not android_id:
+        raise serializers.ValidationError("Android ID is required.")
     try:
         major_android = int(android_version.split(".")[0])
     except (TypeError, ValueError) as exc:
         raise serializers.ValidationError(
             {"android_version": "Invalid Android version."}
         ) from exc
-    if compromised or major_android < 12:
+    if major_android < 12:
         raise exceptions.PermissionDenied("Device integrity requirements were not met.")
+    return android_id, android_version[:32], app_version[:32]
 
-    with transaction.atomic():
-        enrollment = (
-            EnrollmentCode.objects.select_for_update()
-            .select_related("device")
-            .filter(code_hash=token_hash(code))
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def enrollment_challenge(request):
+    enforce_api_throttle(request, "enrollment_challenge", limit=10)
+    code = str(request.data.get("code", "")).strip()
+    if not code:
+        raise serializers.ValidationError("Enrollment code is required.")
+    android_id, android_version, app_version = enrollment_device_details(request.data)
+    enrollment = (
+        EnrollmentCode.objects.select_related("device")
+        .filter(code_hash=token_hash(code))
+        .first()
+    )
+    if not enrollment or not enrollment.is_usable:
+        raise exceptions.AuthenticationFailed("Invalid or expired enrollment code.")
+    if settings.DEPLOYMENT_ENV == "production" and not (
+        enrollment.device.hardware_qualification_id
+        and enrollment.device.hardware_qualification.approved_for_pilot
+    ):
+        raise exceptions.PermissionDenied(
+            "This device does not have an approved hardware qualification."
+        )
+    if not enrollment.device.assignments.filter(unassigned_at__isnull=True).exists():
+        raise serializers.ValidationError("Device must have an active assignment.")
+    android_hash = token_hash(android_id)
+    challenge_id = uuid.uuid4()
+    request_hash = token_hash(
+        f"{challenge_id}:{secrets.token_urlsafe(32)}:{android_hash}:"
+        f"{app_version}:{enrollment.code_hash}"
+    )
+    EnrollmentChallenge.objects.create(
+        id=challenge_id,
+        enrollment=enrollment,
+        request_hash=request_hash,
+        android_id_hash=android_hash,
+        android_version=android_version,
+        app_version=app_version,
+        expires_at=timezone.now()
+        + timedelta(seconds=settings.ENROLLMENT_CHALLENGE_TTL_SECONDS),
+    )
+    return Response(
+        {
+            "challenge_id": str(challenge_id),
+            "request_hash": request_hash,
+            "cloud_project_number": settings.PLAY_INTEGRITY_PROJECT_NUMBER,
+            "expires_at": timezone.now()
+            + timedelta(seconds=settings.ENROLLMENT_CHALLENGE_TTL_SECONDS),
+        },
+        status=status.HTTP_201_CREATED,
+    )
+
+
+def _issue_device_credentials(enrollment, android_hash, android_version, app_version):
+    device = enrollment.device
+    if settings.DEPLOYMENT_ENV == "production" and not (
+        device.hardware_qualification_id
+        and device.hardware_qualification.approved_for_pilot
+    ):
+        raise exceptions.PermissionDenied(
+            "This device does not have an approved hardware qualification."
+        )
+    if not device.assignments.filter(unassigned_at__isnull=True).exists():
+        raise serializers.ValidationError("Device must have an active assignment.")
+    if (
+        Device.objects.exclude(pk=device.pk)
+        .filter(android_id_hash=android_hash)
+        .exists()
+    ):
+        raise exceptions.PermissionDenied("This Android device is already enrolled.")
+    device.android_id_hash = android_hash
+    device.android_version = android_version
+    device.app_version = app_version
+    device.status = Device.Status.ACTIVE
+    device.save(
+        update_fields=[
+            "android_id_hash",
+            "android_version",
+            "app_version",
+            "status",
+            "updated_at",
+        ]
+    )
+    enrollment.used_at = timezone.now()
+    enrollment.save(update_fields=["used_at"])
+    DeviceCredential.objects.filter(device=device, revoked_at__isnull=True).update(
+        revoked_at=timezone.now()
+    )
+    credential, refresh_token = DeviceCredential.issue(device)
+    access, access_token = DeviceAccessToken.issue(credential)
+    return device, refresh_token, access, access_token
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def enroll(request):
+    enforce_api_throttle(request, "enroll", limit=10)
+    challenge_id = request.data.get("challenge_id")
+    integrity_token = str(request.data.get("integrity_token", ""))
+    if challenge_id and integrity_token:
+        challenge = (
+            EnrollmentChallenge.objects.select_related("enrollment__device")
+            .filter(pk=challenge_id)
             .first()
         )
-        if not enrollment or not enrollment.is_usable:
-            raise exceptions.AuthenticationFailed("Invalid or expired enrollment code.")
-        device = enrollment.device
-        if not device.assignments.filter(unassigned_at__isnull=True).exists():
-            raise serializers.ValidationError("Device must have an active assignment.")
-        android_hash = token_hash(android_id)
         if (
-            Device.objects.exclude(pk=device.pk)
-            .filter(android_id_hash=android_hash)
-            .exists()
+            not challenge
+            or not challenge.is_usable
+            or not challenge.enrollment.is_usable
         ):
-            raise exceptions.PermissionDenied(
-                "This Android device is already enrolled."
+            raise exceptions.AuthenticationFailed(
+                "Invalid or expired enrollment challenge."
             )
-        device.android_id_hash = android_hash
-        device.android_version = android_version
-        device.app_version = app_version
-        device.status = Device.Status.ACTIVE
-        device.save(
-            update_fields=[
-                "android_id_hash",
-                "android_version",
-                "app_version",
-                "status",
-                "updated_at",
-            ]
+        verify_integrity_token(integrity_token, challenge.request_hash)
+        with transaction.atomic():
+            challenge = (
+                EnrollmentChallenge.objects.select_for_update()
+                .select_related("enrollment__device")
+                .get(pk=challenge.pk)
+            )
+            enrollment = EnrollmentCode.objects.select_for_update().get(
+                pk=challenge.enrollment_id
+            )
+            if not challenge.is_usable or not enrollment.is_usable:
+                raise exceptions.AuthenticationFailed(
+                    "Invalid or expired enrollment challenge."
+                )
+            challenge.used_at = timezone.now()
+            challenge.save(update_fields=["used_at"])
+            device, refresh_token, access, access_token = _issue_device_credentials(
+                enrollment,
+                challenge.android_id_hash,
+                challenge.android_version,
+                challenge.app_version,
+            )
+    elif settings.DEPLOYMENT_ENV != "production":
+        code = str(request.data.get("code", "")).strip()
+        android_id, android_version, app_version = enrollment_device_details(
+            request.data
         )
-        enrollment.used_at = timezone.now()
-        enrollment.save(update_fields=["used_at"])
-        DeviceCredential.objects.filter(device=device, revoked_at__isnull=True).update(
-            revoked_at=timezone.now()
+        if bool(request.data.get("integrity_compromised", False)):
+            raise exceptions.PermissionDenied(
+                "Device integrity requirements were not met."
+            )
+        with transaction.atomic():
+            enrollment = (
+                EnrollmentCode.objects.select_for_update()
+                .select_related("device")
+                .filter(code_hash=token_hash(code))
+                .first()
+            )
+            if not enrollment or not enrollment.is_usable:
+                raise exceptions.AuthenticationFailed(
+                    "Invalid or expired enrollment code."
+                )
+            device, refresh_token, access, access_token = _issue_device_credentials(
+                enrollment, token_hash(android_id), android_version, app_version
+            )
+    else:
+        raise serializers.ValidationError(
+            "A verified enrollment challenge and integrity token are required."
         )
-        credential, refresh_token = DeviceCredential.issue(device)
-        access, access_token = DeviceAccessToken.issue(credential)
 
     return Response(
         {
@@ -131,6 +254,7 @@ def enroll(request):
             "access_token": access_token,
             "access_token_expires_at": access.expires_at,
             "server_time": timezone.now(),
+            "kiosk_pin_verifier": device.kiosk_pin_hash,
         },
         status=status.HTTP_201_CREATED,
     )
@@ -140,6 +264,7 @@ def enroll(request):
 @authentication_classes([])
 @permission_classes([AllowAny])
 def token_refresh(request):
+    enforce_api_throttle(request, "token_refresh", limit=20)
     refresh_token = str(request.data.get("refresh_token", ""))
     credential = (
         DeviceCredential.objects.select_related("device")
@@ -147,12 +272,15 @@ def token_refresh(request):
         .first()
     )
     if not credential:
-        open_alert(
-            None,
-            "repeated_device_authentication",
-            Alert.Severity.WARNING,
-            "A device token refresh request used an invalid credential.",
-        )
+        if throttle_wait(
+            request, "invalid_device_refresh", limit=5, window_seconds=900
+        ):
+            open_alert(
+                None,
+                "repeated_device_authentication",
+                Alert.Severity.WARNING,
+                "Repeated device token refresh requests used invalid credentials.",
+            )
         raise exceptions.AuthenticationFailed("Invalid device credential.")
     access, raw = DeviceAccessToken.issue(credential)
     return Response(
@@ -216,13 +344,19 @@ def sync_manifest(request):
                 "mode": "maintenance",
                 "server_time": timezone.now(),
                 "message": "This display is temporarily unavailable.",
+                "kiosk_pin_verifier": device.kiosk_pin_hash,
             }
         )
     playlist = active_playlist()
     if not playlist:
         mark_successful_sync()
         return Response(
-            {"mode": "fallback", "server_time": timezone.now(), "playlist": None}
+            {
+                "mode": "fallback",
+                "server_time": timezone.now(),
+                "playlist": None,
+                "kiosk_pin_verifier": device.kiosk_pin_hash,
+            }
         )
     items = playlist.items.select_related("media").all()
     manifest = []
@@ -249,6 +383,7 @@ def sync_manifest(request):
         {
             "mode": "play",
             "server_time": timezone.now(),
+            "kiosk_pin_verifier": device.kiosk_pin_hash,
             "playlist": {
                 "id": str(playlist.id),
                 "name": playlist.name,
@@ -256,6 +391,12 @@ def sync_manifest(request):
                 "urgent": playlist.is_urgent,
                 "starts_at": playlist.starts_at,
                 "ends_at": playlist.ends_at,
+                "required_app_version": settings.REQUIRED_APP_VERSION,
+                "media_cache_bytes": settings.DEVICE_MEDIA_CACHE_BYTES,
+                "event_queue_bytes": settings.DEVICE_EVENT_QUEUE_BYTES,
+                "minimum_free_bytes": settings.DEVICE_MIN_FREE_BYTES,
+                "sync_timezone": settings.TIME_ZONE,
+                "daily_sync_local_time": "00:00:00",
                 "items": manifest,
             },
         }
@@ -268,12 +409,53 @@ def heartbeat(request):
     recorded_at = parse_required_datetime(
         request.data.get("recorded_at"), "recorded_at"
     )
-    free_storage = int(request.data.get("free_storage_bytes", 0))
+    try:
+        free_storage = int(request.data.get("free_storage_bytes", 0))
+    except (TypeError, ValueError) as exc:
+        raise serializers.ValidationError("Invalid free storage value.") from exc
+    if free_storage < 0:
+        raise serializers.ValidationError("Free storage cannot be negative.")
     app_version = str(request.data.get("app_version", ""))[:32]
     battery_percent = request.data.get("battery_percent")
     if battery_percent is not None:
-        battery_percent = min(100, max(0, int(battery_percent)))
+        try:
+            battery_percent = int(battery_percent)
+        except (TypeError, ValueError) as exc:
+            raise serializers.ValidationError("Invalid battery percentage.") from exc
+        if not 0 <= battery_percent <= 100:
+            raise serializers.ValidationError(
+                "Battery percentage must be between 0 and 100."
+            )
     temperature = request.data.get("temperature_celsius")
+    if temperature is not None:
+        try:
+            temperature = Decimal(str(temperature))
+        except InvalidOperation as exc:
+            raise serializers.ValidationError("Invalid temperature value.") from exc
+        if not temperature.is_finite() or not Decimal("-50") <= temperature <= 150:
+            raise serializers.ValidationError("Temperature is outside safe bounds.")
+    active_playlist = None
+    active_playlist_id = request.data.get("active_playlist_id")
+    if active_playlist_id:
+        try:
+            active_playlist_id = uuid.UUID(str(active_playlist_id))
+        except (TypeError, ValueError) as exc:
+            raise serializers.ValidationError("Invalid active playlist ID.") from exc
+        active_playlist = Playlist.objects.filter(pk=active_playlist_id).first()
+    last_sync = (
+        parse_required_datetime(
+            request.data.get("last_successful_sync_at"), "last_successful_sync_at"
+        )
+        if request.data.get("last_successful_sync_at")
+        else None
+    )
+    last_playback = (
+        parse_required_datetime(
+            request.data.get("last_playback_at"), "last_playback_at"
+        )
+        if request.data.get("last_playback_at")
+        else None
+    )
     hb = DeviceHeartbeat.objects.create(
         device=device,
         recorded_at=recorded_at,
@@ -285,12 +467,29 @@ def heartbeat(request):
         temperature_celsius=temperature,
         app_version=app_version,
         android_version=str(request.data.get("android_version", ""))[:32],
+        active_playlist=active_playlist,
+        playback_active=bool(request.data.get("playback_active")),
+        last_successful_sync_at=last_sync,
+        last_playback_at=last_playback,
     )
     device.last_seen_at = timezone.now()
     device.app_version = hb.app_version
     device.android_version = hb.android_version
+    device.current_playlist = active_playlist
+    if last_sync:
+        device.last_sync_at = last_sync
+    if last_playback:
+        device.last_playback_at = last_playback
     device.save(
-        update_fields=["last_seen_at", "app_version", "android_version", "updated_at"]
+        update_fields=[
+            "last_seen_at",
+            "app_version",
+            "android_version",
+            "current_playlist",
+            "last_sync_at",
+            "last_playback_at",
+            "updated_at",
+        ]
     )
     if free_storage < 2 * 1024 * 1024 * 1024:
         Alert.objects.get_or_create(
@@ -316,6 +515,9 @@ def heartbeat(request):
         )
     if (
         temperature is not None
+        and device.hardware_qualification_id
+        and device.hardware_qualification.approved_for_pilot
+        and device.hardware_qualification.thermal_passed
         and float(temperature) >= settings.DEVICE_OVERHEAT_CELSIUS
     ):
         Alert.objects.get_or_create(
@@ -328,6 +530,49 @@ def heartbeat(request):
             },
         )
     return Response({"accepted": True, "server_time": timezone.now()})
+
+
+@api_view(["POST"])
+def operational_event(request):
+    device = device_for(request)
+    if device.status == Device.Status.DISABLED:
+        raise exceptions.PermissionDenied("Disabled devices cannot submit events.")
+    kind = request.data.get("kind")
+    if kind not in DeviceOperationalEvent.Kind.values:
+        raise serializers.ValidationError("Invalid operational event kind.")
+    try:
+        event_id = uuid.UUID(str(request.data.get("id")))
+    except (TypeError, ValueError) as exc:
+        raise serializers.ValidationError(
+            "A valid operational event ID is required."
+        ) from exc
+    existing = DeviceOperationalEvent.objects.filter(pk=event_id).first()
+    if existing:
+        if existing.device_id != device.id:
+            raise exceptions.PermissionDenied("Operational event identifier collision.")
+        return Response({"accepted": True, "duplicate": True, "id": str(event_id)})
+    try:
+        event = DeviceOperationalEvent.objects.create(
+            id=event_id,
+            device=device,
+            kind=kind,
+            recorded_at=parse_required_datetime(
+                request.data.get("recorded_at"), "recorded_at"
+            ),
+            details=request.data.get("details", {}),
+        )
+    except IntegrityError:
+        if DeviceOperationalEvent.objects.filter(pk=event_id, device=device).exists():
+            return Response(
+                {"accepted": True, "duplicate": True, "id": str(event_id)}
+            )
+        raise serializers.ValidationError(
+            "Operational event identifier collision."
+        ) from None
+    return Response(
+        {"accepted": True, "duplicate": False, "id": str(event.id)},
+        status=status.HTTP_201_CREATED,
+    )
 
 
 def validate_event(event, playlist_items):
@@ -373,8 +618,10 @@ def playback_batch(request):
         raise serializers.ValidationError(
             "Valid batch and playlist IDs are required."
         ) from exc
-    existing = PlaybackBatch.objects.filter(pk=batch_id, device=device).first()
+    existing = PlaybackBatch.objects.filter(pk=batch_id).first()
     if existing:
+        if existing.device_id != device.id:
+            raise exceptions.PermissionDenied("Playback batch identifier collision.")
         return Response({"accepted": True, "duplicate": True})
     playlist = Playlist.objects.filter(pk=playlist_id).first()
     if not playlist:
@@ -429,7 +676,11 @@ def playback_batch(request):
             device.last_playback_at = timezone.now()
             device.save(update_fields=["last_playback_at", "updated_at"])
     except IntegrityError:
-        return Response({"accepted": True, "duplicate": True})
+        if PlaybackBatch.objects.filter(pk=batch_id, device=device).exists():
+            return Response({"accepted": True, "duplicate": True})
+        raise serializers.ValidationError(
+            "Playback evidence identifier collision; the batch was not accepted."
+        ) from None
     return Response(
         {"accepted": True, "duplicate": False}, status=status.HTTP_201_CREATED
     )

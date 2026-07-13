@@ -1,0 +1,5 @@
+bucket       = "duducar-signage-terraform-state-123456789012"
+key          = "production/terraform.tfstate"
+region       = "ap-southeast-5"
+encrypt      = true
+use_lockfile = true

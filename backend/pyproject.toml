@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=75"]
+requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
@@ -12,20 +12,22 @@ version = "0.1.0"
 description = "DUDU Car in-car digital signage dashboard and device API"
 requires-python = ">=3.10"
 dependencies = [
-  "Django==5.2.8",
+  "Django==5.2.16",
   "djangorestframework==3.17.1",
   "argon2-cffi==25.1.0",
   "psycopg[binary]==3.2.13",
-  "Pillow==12.0.0",
+  "Pillow==12.3.0",
   "boto3==1.42.4",
   "django-storages[s3]==1.14.6",
   "gunicorn==23.0.0",
   "whitenoise==6.11.0",
+  "google-auth==2.55.2",
+  "requests==2.34.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "pytest==9.0.1",
+  "pytest==9.0.3",
   "pytest-django==4.11.1",
   "ruff==0.14.8",
 ]

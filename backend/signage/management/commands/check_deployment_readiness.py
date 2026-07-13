@@ -1,3 +1,4 @@
+import json
 import shutil
 
 from django.conf import settings
@@ -28,9 +29,7 @@ class Command(BaseCommand):
             for warning in warnings:
                 self.stdout.write(self.style.WARNING(warning))
         if errors:
-            raise CommandError(
-                "Deployment readiness failed:\n- " + "\n- ".join(errors)
-            )
+            raise CommandError("Deployment readiness failed:\n- " + "\n- ".join(errors))
         self.stdout.write(
             self.style.SUCCESS(f"{environment} deployment readiness checks passed.")
         )
@@ -81,6 +80,40 @@ class Command(BaseCommand):
                 errors.append("DEFAULT_FROM_EMAIL must be set for production email.")
         if settings.EMAIL_USE_TLS and settings.EMAIL_USE_SSL:
             errors.append("Email cannot enable both TLS and SSL.")
+        if not settings.PLAY_INTEGRITY_PROJECT_NUMBER:
+            errors.append("PLAY_INTEGRITY_PROJECT_NUMBER is required in production.")
+        if not settings.PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON:
+            errors.append(
+                "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON is required in production."
+            )
+        else:
+            try:
+                credentials = json.loads(settings.PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON)
+            except json.JSONDecodeError:
+                errors.append("PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON is invalid JSON.")
+            else:
+                if credentials.get("type") != "service_account":
+                    errors.append(
+                        "Play Integrity credentials must be a service account."
+                    )
+                required_credential_fields = {
+                    "project_id",
+                    "private_key",
+                    "client_email",
+                }
+                missing = required_credential_fields.difference(credentials)
+                if missing:
+                    errors.append(
+                        "Play Integrity credentials are missing: "
+                        + ", ".join(sorted(missing))
+                    )
+        if settings.PLAY_INTEGRITY_PACKAGE_NAME != "com.duducar.signage":
+            errors.append("PLAY_INTEGRITY_PACKAGE_NAME must match the Android package.")
+        if (
+            "signage.middleware.ProductionSecurityHeadersMiddleware"
+            not in settings.MIDDLEWARE
+        ):
+            errors.append("Production security headers middleware is required.")
 
     def _check_development_settings(self, warnings):
         production_hosts = {

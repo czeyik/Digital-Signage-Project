@@ -10,26 +10,42 @@ import java.net.URL
 class ApiClient(private val credentials: CredentialStore) {
     private var accessToken: String? = null
 
-    fun enroll(code: String, androidId: String): JSONObject {
+    fun enrollmentChallenge(code: String, androidId: String): JSONObject {
         val body = JSONObject()
             .put("code", code)
             .put("android_id", androidId)
             .put("android_version", Build.VERSION.RELEASE)
             .put("app_version", BuildConfig.VERSION_NAME)
-            .put("integrity_compromised", IntegrityChecks.isCompromised())
-        val response = request("devices/enroll/", "POST", body, authenticated = false)
+        return request("devices/enrollment-challenge/", "POST", body, authenticated = false)
+    }
+
+    fun enroll(challengeId: String, integrityToken: String): JSONObject {
+        val response = request(
+            "devices/enroll/",
+            "POST",
+            JSONObject()
+                .put("challenge_id", challengeId)
+                .put("integrity_token", integrityToken),
+            authenticated = false,
+        )
         credentials.saveRefreshToken(response.getString("refresh_token"))
+        credentials.saveKioskPinVerifier(response.optString("kiosk_pin_verifier"))
         accessToken = response.getString("access_token")
         return response
     }
 
-    fun manifest(): JSONObject = authenticatedRequest("devices/sync/", "GET")
+    fun manifest(): JSONObject = authenticatedRequest("devices/sync/", "GET").also {
+        credentials.saveKioskPinVerifier(it.optString("kiosk_pin_verifier"))
+    }
 
     fun heartbeat(body: JSONObject): JSONObject =
         authenticatedRequest("devices/heartbeat/", "POST", body)
 
     fun uploadBatch(body: JSONObject): JSONObject =
         authenticatedRequest("devices/playback-batches/", "POST", body)
+
+    fun uploadOperationalEvent(body: JSONObject): JSONObject =
+        authenticatedRequest("devices/operational-events/", "POST", body)
 
     private fun authenticatedRequest(path: String, method: String, body: JSONObject? = null): JSONObject {
         if (accessToken == null) refreshAccessToken()
@@ -80,17 +96,3 @@ class ApiClient(private val credentials: CredentialStore) {
 
 class UnauthorizedException : RuntimeException()
 class ApiException(val status: Int, message: String) : RuntimeException(message)
-
-object IntegrityChecks {
-    fun isCompromised(): Boolean {
-        val suspicious = listOf(
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/sbin/su",
-            "/data/local/bin/su",
-        )
-        return suspicious.any { java.io.File(it).exists() } ||
-            android.os.Build.TAGS?.contains("test-keys") == true
-    }
-}
-

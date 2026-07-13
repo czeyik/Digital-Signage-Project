@@ -72,5 +72,44 @@
             android:layout_marginTop="12dp"
             android:textColor="#A42A2A" />
     </LinearLayout>
-</FrameLayout>
 
+    <LinearLayout
+        android:id="@+id/adminUnlock"
+        android:layout_width="420dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="#F7F8F4"
+        android:orientation="vertical"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Administrator unlock"
+            android:textColor="#10271E"
+            android:textSize="24sp"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/adminPin"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:digits="0123456789"
+            android:hint="6-digit PIN"
+            android:inputType="numberPassword"
+            android:maxLength="6" />
+
+        <Button
+            android:id="@+id/adminUnlockButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Unlock kiosk" />
+
+        <TextView
+            android:id="@+id/adminError"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#A42A2A" />
+    </LinearLayout>
+</FrameLayout>

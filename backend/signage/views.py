@@ -6,14 +6,15 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.views import LoginView
+from django.contrib.auth.views import LoginView, LogoutView, PasswordResetView
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Count, F, Q
 from django.db.models.functions import TruncDate
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.dateparse import parse_date
 from django.views.decorators.http import require_http_methods, require_POST
 
 from .forms import (
@@ -38,12 +39,14 @@ from .models import (
 )
 from .services import (
     audit,
+    client_ip,
     delete_media_binary,
     disable_device,
     issue_kiosk_pin,
     open_alert,
     publish_playlist,
     reactivate_device,
+    throttle_wait,
 )
 
 
@@ -62,8 +65,7 @@ class SecureLoginView(LoginView):
 
     def _key(self):
         email = self.request.POST.get("username", "").strip().lower()
-        forwarded = self.request.META.get("HTTP_X_FORWARDED_FOR", "")
-        ip = forwarded.split(",")[0].strip() or self.request.META.get("REMOTE_ADDR", "")
+        ip = client_ip(self.request)
         value = f"{email}|{ip}|{settings.SECRET_KEY}"
         return f"login-failures:{hashlib.sha256(value.encode()).hexdigest()}"
 
@@ -112,6 +114,45 @@ class SecureLoginView(LoginView):
         response = super().form_valid(form)
         audit(self.request.user, "auth.login", self.request.user)
         return response
+
+
+class AuditedLogoutView(LogoutView):
+    def post(self, request, *args, **kwargs):
+        if request.user.is_authenticated:
+            audit(request.user, "auth.logout", request.user)
+        return super().post(request, *args, **kwargs)
+
+
+class SecurePasswordResetView(PasswordResetView):
+    def post(self, request, *args, **kwargs):
+        wait = throttle_wait(request, "password_reset", limit=5, window_seconds=900)
+        email = request.POST.get("email", "").strip().lower()
+        AuditEvent.objects.create(
+            action="auth.password_reset_requested",
+            target_type="user",
+            target_id=hashlib.sha256(email.encode()).hexdigest(),
+        )
+        if wait:
+            messages.error(
+                request,
+                "If that account exists, reset instructions will be sent shortly.",
+            )
+            return self.get(request, *args, **kwargs)
+        return super().post(request, *args, **kwargs)
+
+
+def health_live(request):
+    return JsonResponse({"status": "ok"})
+
+
+def health_ready(request):
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+    except Exception:
+        return JsonResponse({"status": "unavailable"}, status=503)
+    return JsonResponse({"status": "ready"})
 
 
 @login_required
@@ -342,6 +383,37 @@ def playlist_publish(request, playlist_id):
 
 
 @login_required
+@require_POST
+@transaction.atomic
+def playlist_clone(request, playlist_id):
+    source = get_object_or_404(
+        Playlist.objects.prefetch_related("items__media"), pk=playlist_id
+    )
+    latest = (
+        Playlist.objects.filter(name=source.name)
+        .order_by("-version")
+        .values_list("version", flat=True)
+        .first()
+    )
+    clone = Playlist.objects.create(
+        name=source.name,
+        version=(latest or source.version) + 1,
+        starts_at=source.starts_at,
+        ends_at=source.ends_at,
+        created_by=request.user,
+    )
+    PlaylistItem.objects.bulk_create(
+        [
+            PlaylistItem(playlist=clone, media=item.media, position=item.position)
+            for item in source.items.all()
+        ]
+    )
+    audit(request.user, "playlist.clone_version", clone, {"source": str(source.id)})
+    messages.success(request, f"Created editable {clone.name} v{clone.version}.")
+    return redirect("playlist-detail", playlist_id=clone.id)
+
+
+@login_required
 def device_list(request):
     return render(
         request,
@@ -536,13 +608,42 @@ def user_edit(request, user_id=None):
 
 @login_required
 def playback_report_csv(request):
-    events = PlaybackEvent.objects.select_related(
-        "batch__device",
-        "batch__assignment__vehicle",
-        "batch__assignment__driver",
-        "batch__playlist",
-        "playlist_item__media",
-    ).order_by("-started_at")
+    events = (
+        PlaybackEvent.objects.select_related(
+            "batch__device",
+            "batch__assignment__vehicle",
+            "batch__assignment__driver",
+            "batch__playlist",
+            "playlist_item__media",
+        )
+        .prefetch_related("corrections")
+        .order_by("-started_at")
+    )
+    filters = {
+        "device": "batch__device__label",
+        "vehicle": "batch__assignment__vehicle__registration",
+        "driver": "batch__assignment__driver__internal_id",
+        "media": "playlist_item__media_id",
+        "campaign": "playlist_item__media__business_name",
+        "status": "status",
+    }
+    for parameter, lookup in filters.items():
+        value = request.GET.get(parameter, "").strip()
+        if value:
+            events = events.filter(**{lookup: value})
+    for parameter, lookup in (
+        ("date_from", "started_at__date__gte"),
+        ("date_to", "started_at__date__lte"),
+    ):
+        raw_date = request.GET.get(parameter, "").strip()
+        if raw_date:
+            parsed_date = parse_date(raw_date)
+            if not parsed_date:
+                return HttpResponse(f"Invalid {parameter}; use YYYY-MM-DD.", status=400)
+            events = events.filter(**{lookup: parsed_date})
+    offline = request.GET.get("offline", "").lower()
+    if offline in {"true", "false"}:
+        events = events.filter(batch__captured_offline=offline == "true")
     AuditEvent.objects.create(
         actor=request.user,
         action="report.playback.export",
@@ -565,10 +666,19 @@ def playback_report_csv(request):
             "status",
             "duration_ms",
             "captured_offline",
+            "report_state",
+            "latest_correction_status",
+            "failure_category",
+            "evidence_notice",
         ]
     )
-    for event in events.iterator():
+    evidence_notice = (
+        "Commercially useful evidence; not independently audited or tamper-proof."
+    )
+    for event in events.iterator(chunk_size=500):
         assignment = event.batch.assignment
+        latest_correction = event.corrections.order_by("-created_at").first()
+        final_at = max(event.started_at, event.batch.received_at) + timedelta(days=7)
         writer.writerow(
             [
                 event.id,
@@ -581,6 +691,10 @@ def playback_report_csv(request):
                 event.status,
                 event.duration_ms,
                 event.batch.captured_offline,
+                "final" if timezone.now() >= final_at else "provisional",
+                latest_correction.replacement_status if latest_correction else "",
+                event.failure_reason,
+                evidence_notice,
             ]
         )
     return response

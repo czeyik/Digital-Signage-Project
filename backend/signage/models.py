@@ -141,6 +141,17 @@ class LoginThrottle(TimeStampedModel):
         return self.locked_until is not None and self.locked_until > timezone.now()
 
 
+class ApiThrottle(TimeStampedModel):
+    key_hash = models.CharField(max_length=64, primary_key=True)
+    attempts = models.PositiveIntegerField(default=0)
+    window_started_at = models.DateTimeField(default=timezone.now)
+    blocked_until = models.DateTimeField(null=True, blank=True)
+
+    @property
+    def is_blocked(self):
+        return self.blocked_until is not None and self.blocked_until > timezone.now()
+
+
 class UserManager(BaseUserManager):
     use_in_migrations = True
 
@@ -394,6 +405,14 @@ class Device(TimeStampedModel):
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     label = models.CharField(max_length=100, unique=True)
+    hardware_qualification = models.ForeignKey(
+        HardwareQualification,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="devices",
+        help_text="Exact model and firmware qualification used for this device.",
+    )
     status = models.CharField(max_length=16, choices=Status, default=Status.PENDING)
     android_id_hash = models.CharField(
         max_length=64, blank=True, unique=True, null=True
@@ -407,7 +426,7 @@ class Device(TimeStampedModel):
         Playlist, null=True, blank=True, on_delete=models.PROTECT
     )
     disabled_at = models.DateTimeField(null=True, blank=True)
-    kiosk_pin_hash = models.CharField(max_length=64, blank=True)
+    kiosk_pin_hash = models.CharField(max_length=255, blank=True)
     kiosk_pin_reset_at = models.DateTimeField(null=True, blank=True)
 
     def __str__(self):
@@ -452,6 +471,23 @@ class EnrollmentCode(TimeStampedModel):
             created_by=created_by,
         )
         return enrollment, raw
+
+    @property
+    def is_usable(self):
+        return self.used_at is None and self.expires_at > timezone.now()
+
+
+class EnrollmentChallenge(TimeStampedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    enrollment = models.ForeignKey(
+        EnrollmentCode, on_delete=models.CASCADE, related_name="challenges"
+    )
+    request_hash = models.CharField(max_length=64, unique=True)
+    android_id_hash = models.CharField(max_length=64)
+    android_version = models.CharField(max_length=32)
+    app_version = models.CharField(max_length=32)
+    expires_at = models.DateTimeField()
+    used_at = models.DateTimeField(null=True, blank=True)
 
     @property
     def is_usable(self):
@@ -508,6 +544,12 @@ class DeviceHeartbeat(models.Model):
     )
     app_version = models.CharField(max_length=32)
     android_version = models.CharField(max_length=32)
+    active_playlist = models.ForeignKey(
+        Playlist, null=True, blank=True, on_delete=models.PROTECT
+    )
+    playback_active = models.BooleanField(default=False)
+    last_successful_sync_at = models.DateTimeField(null=True, blank=True)
+    last_playback_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["-recorded_at"]
@@ -557,6 +599,47 @@ class PlaybackEvent(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValidationError("Playback evidence cannot be deleted.")
+
+
+class PlaybackCorrection(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    event = models.ForeignKey(
+        PlaybackEvent, on_delete=models.PROTECT, related_name="corrections"
+    )
+    reason = models.CharField(max_length=255)
+    replacement_status = models.CharField(
+        max_length=16, choices=PlaybackEvent.Status, null=True, blank=True
+    )
+    created_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("Playback corrections are append-only.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Playback corrections are append-only.")
+
+
+class DeviceOperationalEvent(models.Model):
+    class Kind(models.TextChoices):
+        FORCED_QUEUE_LOSS = "forced_queue_loss", "Forced queue data loss"
+        REPLACEMENT_FAILED = "replacement_failed", "Replacement validation failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    device = models.ForeignKey(
+        Device, on_delete=models.PROTECT, related_name="operational_events"
+    )
+    kind = models.CharField(max_length=32, choices=Kind)
+    recorded_at = models.DateTimeField()
+    received_at = models.DateTimeField(auto_now_add=True)
+    details = models.JSONField(default=dict)
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError("Operational events are append-only.")
+        return super().save(*args, **kwargs)
 
 
 class Alert(TimeStampedModel):

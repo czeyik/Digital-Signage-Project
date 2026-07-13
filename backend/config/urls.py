@@ -4,19 +4,27 @@ from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import include, path
 
-from signage.views import SecureLoginView
+from signage.views import (
+    AuditedLogoutView,
+    SecureLoginView,
+    SecurePasswordResetView,
+    health_live,
+    health_ready,
+)
 
 urlpatterns = [
+    path("health/live/", health_live, name="health-live"),
+    path("health/ready/", health_ready, name="health-ready"),
     path("admin/", admin.site.urls),
     path(
         "login/",
         SecureLoginView.as_view(),
         name="login",
     ),
-    path("logout/", auth_views.LogoutView.as_view(), name="logout"),
+    path("logout/", AuditedLogoutView.as_view(), name="logout"),
     path(
         "password-reset/",
-        auth_views.PasswordResetView.as_view(
+        SecurePasswordResetView.as_view(
             template_name="registration/password_reset_form.html",
             email_template_name="registration/password_reset_email.txt",
             success_url="/password-reset/done/",

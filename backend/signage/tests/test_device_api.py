@@ -95,6 +95,111 @@ def test_duplicate_playback_batch_is_idempotent(client, provisioned_device):
 
 
 @pytest.mark.django_db
+def test_event_identifier_collision_is_not_reported_as_accepted(
+    client, provisioned_device
+):
+    _, playlist, item, access = provisioned_device
+    event_id = str(uuid.uuid4())
+    now = timezone.now().isoformat()
+
+    def payload():
+        return {
+            "id": str(uuid.uuid4()),
+            "playlist_id": str(playlist.id),
+            "loop_started_at": now,
+            "loop_ended_at": now,
+            "captured_offline": False,
+            "events": [
+                {
+                    "id": event_id,
+                    "playlist_item_id": str(item.id),
+                    "started_at": now,
+                    "ended_at": now,
+                    "duration_ms": 10_000,
+                    "status": "completed",
+                }
+            ],
+        }
+
+    headers = {"HTTP_AUTHORIZATION": f"Bearer {access}"}
+    first = client.post(
+        reverse("playback-batch"), payload(), content_type="application/json", **headers
+    )
+    collision = client.post(
+        reverse("playback-batch"), payload(), content_type="application/json", **headers
+    )
+
+    assert first.status_code == 201
+    assert collision.status_code == 400
+    assert collision.json()["error"]["detail"]
+
+
+@pytest.mark.django_db
+def test_csv_filters_preserve_driver_privacy_and_finalization_notice(
+    client, provisioned_device
+):
+    device, playlist, item, access = provisioned_device
+    now = timezone.now()
+    response = client.post(
+        reverse("playback-batch"),
+        {
+            "id": str(uuid.uuid4()),
+            "playlist_id": str(playlist.id),
+            "loop_started_at": now.isoformat(),
+            "loop_ended_at": now.isoformat(),
+            "captured_offline": True,
+            "events": [
+                {
+                    "id": str(uuid.uuid4()),
+                    "playlist_item_id": str(item.id),
+                    "started_at": now.isoformat(),
+                    "ended_at": now.isoformat(),
+                    "duration_ms": 10_000,
+                    "status": "completed",
+                }
+            ],
+        },
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access}",
+    )
+    assert response.status_code == 201
+    client.force_login(User.objects.get(email="owner@duducar.co"))
+
+    report = client.get(
+        reverse("playback-csv"),
+        {
+            "device": device.label,
+            "vehicle": "WXY1234",
+            "driver": "D001",
+            "campaign": "Example",
+            "status": "completed",
+            "offline": "true",
+        },
+    )
+    content = report.content.decode()
+
+    assert report.status_code == 200
+    assert "Example Driver" not in content
+    assert "D001" in content
+    assert "provisional" in content
+    assert "not independently audited or tamper-proof" in content
+
+
+@pytest.mark.django_db
+def test_csv_rejects_invalid_date_filter(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    client.force_login(owner)
+
+    response = client.get(reverse("playback-csv"), {"date_from": "not-a-date"})
+
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
 def test_future_playlist_is_not_selected_early():
     owner = User.objects.create_user(
         "owner@duducar.co",
@@ -174,11 +279,41 @@ def test_playback_batch_requires_every_playlist_entry(client, provisioned_device
 
 @pytest.mark.django_db
 def test_invalid_device_refresh_creates_security_alert(client):
-    response = client.post(
-        reverse("device-token"),
-        {"refresh_token": "invalid-token"},
-        content_type="application/json",
-    )
+    for _ in range(6):
+        response = client.post(
+            reverse("device-token"),
+            {"refresh_token": "invalid-token"},
+            content_type="application/json",
+        )
 
     assert response.status_code == 403
     assert Alert.objects.filter(code="repeated_device_authentication").exists()
+
+
+@pytest.mark.django_db
+def test_operational_event_upload_is_idempotent(client, provisioned_device):
+    _, _, _, access = provisioned_device
+    payload = {
+        "id": str(uuid.uuid4()),
+        "kind": "forced_queue_loss",
+        "recorded_at": timezone.now().isoformat(),
+        "details": {"removed_batches": 1},
+    }
+    headers = {"HTTP_AUTHORIZATION": f"Bearer {access}"}
+
+    first = client.post(
+        reverse("device-operational-event"),
+        payload,
+        content_type="application/json",
+        **headers,
+    )
+    replay = client.post(
+        reverse("device-operational-event"),
+        payload,
+        content_type="application/json",
+        **headers,
+    )
+
+    assert first.status_code == 201
+    assert replay.status_code == 200
+    assert replay.json()["duplicate"] is True

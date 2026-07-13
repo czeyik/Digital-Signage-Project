@@ -1,0 +1,10 @@
+operations_email              = "operations@duducar.co"
+smtp_host                     = "smtp.example.duducar.co"
+smtp_port                     = 587
+play_integrity_project_number = "123456789012"
+monthly_budget_usd            = 115
+
+# Leave false for the first apply. Populate Secrets Manager and push the image,
+# then set the immutable image URI and enable the services.
+enable_services = false
+container_image = ""

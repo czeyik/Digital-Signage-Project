@@ -4,7 +4,15 @@ from django.core.management.base import BaseCommand
 from django.db.models import Exists, Max, OuterRef
 from django.utils import timezone
 
-from signage.models import DeviceAssignment, Driver, Vehicle
+from signage.models import (
+    Alert,
+    AuditEvent,
+    DeviceAssignment,
+    DeviceHeartbeat,
+    DeviceOperationalEvent,
+    Driver,
+    Vehicle,
+)
 
 
 class Command(BaseCommand):
@@ -38,8 +46,31 @@ class Command(BaseCommand):
             vehicle.anonymized_at = timezone.now()
             vehicle.save(update_fields=["registration", "anonymized_at", "updated_at"])
             vehicle_count += 1
+        heartbeat_count, _ = DeviceHeartbeat.objects.filter(
+            received_at__lt=cutoff
+        ).delete()
+        operational_count, _ = DeviceOperationalEvent.objects.filter(
+            received_at__lt=cutoff
+        ).delete()
+        alert_count, _ = Alert.objects.filter(created_at__lt=cutoff).delete()
+        audit_count, _ = AuditEvent.objects.filter(occurred_at__lt=cutoff).delete()
+        AuditEvent.objects.create(
+            action="retention.apply",
+            target_type="retention_window",
+            target_id=cutoff.date().isoformat(),
+            metadata={
+                "drivers_anonymized": driver_count,
+                "vehicles_anonymized": vehicle_count,
+                "heartbeats_deleted": heartbeat_count,
+                "operational_events_deleted": operational_count,
+                "alerts_deleted": alert_count,
+                "audit_events_deleted": audit_count,
+            },
+        )
         self.stdout.write(
             self.style.SUCCESS(
-                f"Anonymized {driver_count} drivers and {vehicle_count} vehicles."
+                f"Anonymized {driver_count} drivers and {vehicle_count} vehicles; "
+                f"removed {heartbeat_count} heartbeats, {operational_count} "
+                f"operational events, {alert_count} alerts, and {audit_count} audits."
             )
         )
