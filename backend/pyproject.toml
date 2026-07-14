@@ -15,7 +15,7 @@ dependencies = [
   "Django==5.2.16",
   "djangorestframework==3.17.1",
   "argon2-cffi==25.1.0",
-  "psycopg[binary]==3.2.13",
+  "psycopg[binary]==3.3.4",
   "Pillow==12.3.0",
   "boto3==1.42.4",
   "django-storages[s3]==1.14.6",
