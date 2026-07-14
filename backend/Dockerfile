@@ -3,12 +3,13 @@ FROM python:3.12-alpine3.23
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-RUN apk add --no-cache ffmpeg clamav freshclam \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ffmpeg clamav freshclam \
     && sed -i 's|^NotifyClamd |# NotifyClamd |' /etc/clamav/freshclam.conf
 
 WORKDIR /app
 COPY . .
-RUN pip install --no-cache-dir --upgrade pip setuptools==80.9.0 \
+RUN pip install --no-cache-dir --upgrade pip setuptools==83.0.0 \
     && pip install --no-cache-dir . \
     && DJANGO_DEBUG=false \
        DJANGO_SECRET_KEY=container-build-only-secret-that-is-never-used-at-runtime \

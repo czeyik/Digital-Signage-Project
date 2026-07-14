@@ -12,6 +12,7 @@ htmlcov/
 media/
 staticfiles/
 backend/.ruff_cache/
+backend/build/
 android-player/.gradle/
 android-player/local.properties
 android-player/**/build/
