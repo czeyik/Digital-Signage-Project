@@ -3,6 +3,7 @@ from datetime import date
 from io import StringIO
 
 import pytest
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.management import CommandError, call_command
 from django.test import Client, override_settings
@@ -54,6 +55,13 @@ def test_hardware_approval_records_approved_timestamp():
     qualification.save()
 
     assert qualification.approved_at is not None
+
+
+def test_staticfiles_use_manifest_storage_during_container_build():
+    assert (
+        settings.STORAGES["staticfiles"]["BACKEND"]
+        == "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    )
 
 
 @pytest.mark.django_db
