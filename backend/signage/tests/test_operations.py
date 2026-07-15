@@ -5,7 +5,7 @@ from io import StringIO
 import pytest
 from django.core.exceptions import ValidationError
 from django.core.management import CommandError, call_command
-from django.test import override_settings
+from django.test import Client, override_settings
 
 from signage.models import HardwareQualification, User
 
@@ -123,3 +123,23 @@ def test_production_readiness_passes_for_configured_environment(monkeypatch):
     call_command("check_deployment_readiness", environment="production", stdout=out)
 
     assert "production deployment readiness checks passed" in out.getvalue()
+
+
+@pytest.mark.django_db
+@override_settings(
+    DEBUG=False,
+    ALLOWED_HOSTS=["marketing.duducaradmin.com", "api.marketing.duducaradmin.com"],
+    SECURE_SSL_REDIRECT=True,
+)
+def test_health_checks_allow_private_alb_host_without_weakening_host_validation():
+    client = Client()
+
+    live = client.get("/health/live/", HTTP_HOST="10.40.0.19:8000")
+    ready = client.get("/health/ready/", HTTP_HOST="10.40.0.19:8000")
+    login = client.get("/login/", HTTP_HOST="10.40.0.19:8000")
+
+    assert live.status_code == 200
+    assert live.json() == {"status": "ok"}
+    assert ready.status_code == 200
+    assert ready.json() == {"status": "ready"}
+    assert login.status_code == 400
