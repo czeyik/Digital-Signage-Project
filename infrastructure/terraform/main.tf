@@ -552,7 +552,7 @@ resource "aws_ecs_task_definition" "application" {
     environment  = local.common_environment
     secrets      = local.common_secrets
     healthCheck = {
-      command     = ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live/', timeout=3)\""]
+      command     = ["CMD-SHELL", "python -c \"import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/health/live/', headers={'Host': 'marketing.duducaradmin.com'}); urllib.request.urlopen(req, timeout=3)\""]
       interval    = 30
       timeout     = 5
       retries     = 3
