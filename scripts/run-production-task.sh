@@ -14,7 +14,7 @@ cluster=$(terraform -chdir="$TF_DIR" output -raw ecs_cluster)
 task_definition=$(terraform -chdir="$TF_DIR" output -raw application_task_definition)
 subnets=$(terraform -chdir="$TF_DIR" output -json public_subnet_ids | jq -r 'join(",")')
 security_group=$(terraform -chdir="$TF_DIR" output -raw task_security_group_id)
-command_json=$(jq -cn '$ARGS.positional' --args "$@")
+command_json=$(jq -cn --args '$ARGS.positional' -- "$@")
 overrides=$(jq -cn --argjson command "$command_json" '{containerOverrides:[{name:"application",command:$command}]}')
 network="awsvpcConfiguration={subnets=[$subnets],securityGroups=[$security_group],assignPublicIp=ENABLED}"
 
