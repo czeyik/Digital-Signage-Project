@@ -3,11 +3,19 @@ from datetime import timedelta
 import pytest
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from signage.models import MediaAsset, Playlist, PlaylistItem, User
 from signage.services import delete_media_binary, publish_playlist
+
+TEST_STATICFILES_STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
+    },
+}
 
 
 def next_monday_noon():
@@ -132,6 +140,50 @@ def test_draft_playlist_can_be_reordered_from_dashboard(client):
         second.id,
         first.id,
     ]
+
+
+@pytest.mark.django_db
+@override_settings(STORAGES=TEST_STATICFILES_STORAGES)
+def test_playlist_detail_uses_csp_safe_drag_script(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = [
+        MediaAsset.objects.create(
+            business_name="Example",
+            title=f"Poster {number}",
+            kind=MediaAsset.Kind.IMAGE,
+            status=MediaAsset.Status.READY,
+            source_file=SimpleUploadedFile(f"poster-{number}.png", b"source"),
+            normalized_file=SimpleUploadedFile(f"ready-{number}.png", b"ready"),
+            duration_ms=10_000,
+            uploaded_by=owner,
+        )
+        for number in (1, 2)
+    ]
+    starts_at = next_monday_noon()
+    playlist = Playlist.objects.create(
+        name="Reorder week",
+        version=1,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    first = PlaylistItem.objects.create(playlist=playlist, media=media[0], position=1)
+    second = PlaylistItem.objects.create(playlist=playlist, media=media[1], position=2)
+    client.force_login(owner)
+
+    response = client.get(reverse("playlist-detail", args=[playlist.id]))
+
+    assert response.status_code == 200
+    assert "script-src 'self'" in response["Content-Security-Policy"]
+    assert b"signage/playlist_detail.js" in response.content
+    assert b"data-playlist-sortable" in response.content
+    assert f'value="{first.id},{second.id}"'.encode() in response.content
+    assert f'form="remove-item-{first.id}"'.encode() in response.content
+    assert b"document.querySelector" not in response.content
 
 
 @pytest.mark.django_db
