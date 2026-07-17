@@ -20,6 +20,16 @@ def next_monday_noon():
     )
 
 
+def current_playlist_window_start():
+    now = timezone.localtime()
+    start = (now - timedelta(days=now.weekday())).replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
+    if now < start:
+        start -= timedelta(days=7)
+    return start
+
+
 @pytest.mark.django_db
 def test_only_ready_media_can_be_published():
     owner = User.objects.create_user(
@@ -122,6 +132,42 @@ def test_draft_playlist_can_be_reordered_from_dashboard(client):
         second.id,
         first.id,
     ]
+
+
+@pytest.mark.django_db
+def test_playlist_list_marks_current_published_window_active(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("poster.png", b"source"),
+        normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+    starts_at = current_playlist_window_start()
+    playlist = Playlist.objects.create(
+        name="Current week",
+        version=1,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    PlaylistItem.objects.create(playlist=playlist, media=media, position=1)
+    publish_playlist(playlist, owner)
+    client.force_login(owner)
+
+    response = client.get(reverse("playlist-list"))
+
+    assert response.status_code == 200
+    assert b"Current week" in response.content
+    assert b"Active now" in response.content
 
 
 @pytest.mark.django_db

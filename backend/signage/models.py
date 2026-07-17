@@ -265,6 +265,17 @@ class Playlist(TimeStampedModel):
     def duration_seconds(self):
         return sum(item.duration_seconds for item in self.items.all())
 
+    @property
+    def window_state(self):
+        if self.status != self.Status.PUBLISHED:
+            return self.get_status_display()
+        now = timezone.now()
+        if self.starts_at <= now < self.ends_at:
+            return "Active now"
+        if self.starts_at > now:
+            return "Scheduled"
+        return "Ended"
+
     def clean(self):
         local_start = timezone.localtime(self.starts_at)
         if (
