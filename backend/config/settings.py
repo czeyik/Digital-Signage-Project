@@ -8,6 +8,10 @@ def env_bool(name, default=False):
     return os.getenv(name, str(default)).lower() in {"1", "true", "yes", "on"}
 
 
+def regional_s3_endpoint(region):
+    return f"https://s3.{region}.amazonaws.com" if region else None
+
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "development-only-unsafe-secret")
 DEBUG = env_bool("DJANGO_DEBUG", True)
 DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "development")
@@ -229,7 +233,9 @@ if os.getenv("AWS_STORAGE_BUCKET_NAME"):
     STORAGES["default"] = {"BACKEND": "storages.backends.s3.S3Storage"}
     AWS_STORAGE_BUCKET_NAME = os.environ["AWS_STORAGE_BUCKET_NAME"]
     AWS_S3_REGION_NAME = os.getenv("AWS_S3_REGION_NAME")
-    AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL")
+    AWS_S3_ENDPOINT_URL = os.getenv("AWS_S3_ENDPOINT_URL") or regional_s3_endpoint(
+        AWS_S3_REGION_NAME
+    )
     AWS_QUERYSTRING_AUTH = True
     AWS_QUERYSTRING_EXPIRE = 900
     AWS_DEFAULT_ACL = None

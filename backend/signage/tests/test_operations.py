@@ -8,6 +8,7 @@ from django.core.exceptions import ValidationError
 from django.core.management import CommandError, call_command
 from django.test import Client, override_settings
 
+from config.settings import regional_s3_endpoint
 from signage.models import HardwareQualification, User
 
 TEST_SECRET_KEY = secrets.token_urlsafe(32)
@@ -61,6 +62,12 @@ def test_staticfiles_use_manifest_storage_during_container_build():
     assert (
         settings.STORAGES["staticfiles"]["BACKEND"]
         == "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    )
+
+
+def test_s3_endpoint_uses_configured_region():
+    assert regional_s3_endpoint("ap-southeast-5") == (
+        "https://s3.ap-southeast-5.amazonaws.com"
     )
 
 
