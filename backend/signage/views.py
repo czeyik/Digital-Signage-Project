@@ -347,9 +347,15 @@ def playlist_detail(request, playlist_id):
             "ready_media": MediaAsset.objects.filter(
                 status=MediaAsset.Status.READY
             ).order_by("business_name", "title"),
-            "superseded_versions": playlist.superseded_versions.prefetch_related(
-                "items"
-            ).order_by("-version"),
+            "superseded_versions": Playlist.objects.filter(
+                name=playlist.name,
+                starts_at=playlist.starts_at,
+                ends_at=playlist.ends_at,
+                version__lt=playlist.version,
+            )
+            .exclude(status=Playlist.Status.DRAFT)
+            .prefetch_related("items")
+            .order_by("-version"),
         },
     )
 

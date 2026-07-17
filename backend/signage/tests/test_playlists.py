@@ -259,18 +259,32 @@ def test_corrected_playlist_publish_cancels_prior_version_and_hides_history(clie
     PlaylistItem.objects.create(playlist=second, media=media, position=1)
 
     publish_playlist(second, owner)
+    third = Playlist.objects.create(
+        name="Corrected week",
+        version=3,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    PlaylistItem.objects.create(playlist=third, media=media, position=1)
+
+    publish_playlist(third, owner)
 
     first.refresh_from_db()
     second.refresh_from_db()
+    third.refresh_from_db()
     assert first.status == Playlist.Status.CANCELLED
     assert first.superseded_by == second
-    assert second.status == Playlist.Status.PUBLISHED
+    assert second.status == Playlist.Status.CANCELLED
+    assert second.superseded_by == third
+    assert third.status == Playlist.Status.PUBLISHED
     client.force_login(owner)
     list_response = client.get(reverse("playlist-list"))
-    detail_response = client.get(reverse("playlist-detail", args=[second.id]))
+    detail_response = client.get(reverse("playlist-detail", args=[third.id]))
     assert list_response.status_code == 200
     assert list_response.content.count(b"Corrected week") == 1
     assert b"v1" in detail_response.content
+    assert b"v2" in detail_response.content
     assert b"Cancelled" in detail_response.content
 
 
