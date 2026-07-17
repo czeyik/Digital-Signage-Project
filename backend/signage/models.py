@@ -233,6 +233,7 @@ class Playlist(TimeStampedModel):
     class Status(models.TextChoices):
         DRAFT = "draft", "Draft"
         PUBLISHED = "published", "Published"
+        CANCELLED = "cancelled", "Cancelled"
         ARCHIVED = "archived", "Archived"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -247,6 +248,14 @@ class Playlist(TimeStampedModel):
         settings.AUTH_USER_MODEL,
         on_delete=models.PROTECT,
         related_name="created_playlists",
+    )
+    superseded_by = models.ForeignKey(
+        "self",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="superseded_versions",
+        help_text="Replacement playlist version that cancelled this version.",
     )
 
     class Meta:
@@ -300,24 +309,45 @@ class Playlist(TimeStampedModel):
                 )
                 if changed:
                     raise ValidationError("Published playlist versions are immutable.")
+                if (
+                    self.status != original.status
+                    and self.status != self.Status.CANCELLED
+                ):
+                    raise ValidationError(
+                        "Published playlists can only be cancelled by a correction."
+                    )
+                if self.status != self.Status.CANCELLED and self.superseded_by_id:
+                    raise ValidationError(
+                        "Only cancelled playlists can link to a replacement."
+                    )
 
     def save(self, *args, **kwargs):
         if self.pk:
             original = Playlist.objects.filter(pk=self.pk).first()
             if original and original.status == self.Status.PUBLISHED:
-                mutable = (
+                immutable = (
                     "name",
                     "version",
-                    "status",
                     "starts_at",
                     "ends_at",
                     "is_urgent",
                 )
                 if any(
                     getattr(original, field) != getattr(self, field)
-                    for field in mutable
+                    for field in immutable
                 ):
                     raise ValidationError("Published playlist versions are immutable.")
+                if (
+                    self.status != original.status
+                    and self.status != self.Status.CANCELLED
+                ):
+                    raise ValidationError(
+                        "Published playlists can only be cancelled by a correction."
+                    )
+                if self.status != self.Status.CANCELLED and self.superseded_by_id:
+                    raise ValidationError(
+                        "Only cancelled playlists can link to a replacement."
+                    )
         return super().save(*args, **kwargs)
 
     def __str__(self):
@@ -391,19 +421,19 @@ class PlaylistItem(models.Model):
     def duration_seconds(self):
         return self.media.duration_ms / 1000
 
-    def playlist_is_published(self):
-        return (
-            Playlist.objects.only("status").get(pk=self.playlist_id).status
-            == Playlist.Status.PUBLISHED
-        )
+    def playlist_is_locked(self):
+        return Playlist.objects.only("status").get(pk=self.playlist_id).status in {
+            Playlist.Status.PUBLISHED,
+            Playlist.Status.CANCELLED,
+        }
 
     def save(self, *args, **kwargs):
-        if self.playlist_id and self.playlist_is_published():
+        if self.playlist_id and self.playlist_is_locked():
             raise ValidationError("Published playlist items are immutable.")
         return super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
-        if self.playlist_is_published():
+        if self.playlist_is_locked():
             raise ValidationError("Published playlist items are immutable.")
         return super().delete(*args, **kwargs)
 

@@ -171,6 +171,58 @@ def test_playlist_list_marks_current_published_window_active(client):
 
 
 @pytest.mark.django_db
+def test_corrected_playlist_publish_cancels_prior_version_and_hides_history(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("poster.png", b"source"),
+        normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+    starts_at = next_monday_noon()
+    first = Playlist.objects.create(
+        name="Corrected week",
+        version=1,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    PlaylistItem.objects.create(playlist=first, media=media, position=1)
+    publish_playlist(first, owner)
+    second = Playlist.objects.create(
+        name="Corrected week",
+        version=2,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    PlaylistItem.objects.create(playlist=second, media=media, position=1)
+
+    publish_playlist(second, owner)
+
+    first.refresh_from_db()
+    second.refresh_from_db()
+    assert first.status == Playlist.Status.CANCELLED
+    assert first.superseded_by == second
+    assert second.status == Playlist.Status.PUBLISHED
+    client.force_login(owner)
+    list_response = client.get(reverse("playlist-list"))
+    detail_response = client.get(reverse("playlist-detail", args=[second.id]))
+    assert list_response.status_code == 200
+    assert list_response.content.count(b"Corrected week") == 1
+    assert b"v1" in detail_response.content
+    assert b"Cancelled" in detail_response.content
+
+
+@pytest.mark.django_db
 def test_media_binary_deletion_is_blocked_when_referenced_by_future_playlist():
     owner = User.objects.create_user(
         "owner@duducar.co",

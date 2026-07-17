@@ -278,7 +278,11 @@ def playlist_list(request):
     return render(
         request,
         "signage/playlist_list.html",
-        {"playlists": Playlist.objects.prefetch_related("items").all()},
+        {
+            "playlists": Playlist.objects.exclude(
+                status=Playlist.Status.CANCELLED
+            ).prefetch_related("items")
+        },
     )
 
 
@@ -343,6 +347,9 @@ def playlist_detail(request, playlist_id):
             "ready_media": MediaAsset.objects.filter(
                 status=MediaAsset.Status.READY
             ).order_by("business_name", "title"),
+            "superseded_versions": playlist.superseded_versions.prefetch_related(
+                "items"
+            ).order_by("-version"),
         },
     )
 

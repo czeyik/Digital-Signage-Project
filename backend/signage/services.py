@@ -378,10 +378,31 @@ def publish_playlist(playlist, actor, urgent=False):
     duration = sum(item.media.duration_ms for item in items) / 1000
     if duration > limits.playlist_max_duration_seconds:
         raise ValidationError("Playlist exceeds the configured duration limit.")
+    superseded = list(
+        Playlist.objects.select_for_update()
+        .filter(
+            name=locked.name,
+            version__lt=locked.version,
+            starts_at=locked.starts_at,
+            ends_at=locked.ends_at,
+            status=Playlist.Status.PUBLISHED,
+        )
+        .exclude(pk=locked.pk)
+    )
     locked.status = Playlist.Status.PUBLISHED
     locked.published_at = timezone.now()
     locked.is_urgent = urgent
     locked.save(update_fields=["status", "published_at", "is_urgent", "updated_at"])
+    for previous in superseded:
+        previous.status = Playlist.Status.CANCELLED
+        previous.superseded_by = locked
+        previous.save(update_fields=["status", "superseded_by", "updated_at"])
+        audit(
+            actor,
+            "playlist.cancelled_by_correction",
+            previous,
+            {"replacement": str(locked.id)},
+        )
     audit(actor, "playlist.publish", locked, {"urgent": urgent})
     return locked
 

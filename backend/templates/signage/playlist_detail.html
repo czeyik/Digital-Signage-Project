@@ -4,6 +4,14 @@
   <div><p class="eyebrow">{{ playlist.get_status_display }}</p><h1>{{ playlist }}</h1></div>
   <a href="{% url 'playlist-list' %}">Back to playlists</a>
 </div>
+{% if playlist.superseded_by %}
+<section class="panel">
+  <p>
+    This version was cancelled by
+    <a href="{% url 'playlist-detail' playlist.superseded_by.id %}">{{ playlist.superseded_by }}</a>.
+  </p>
+</section>
+{% endif %}
 <section class="panel">
   <div class="panel-heading"><h2>Playback order</h2><strong>{{ playlist.duration_seconds|floatformat:0 }} seconds</strong></div>
   {% if playlist.status == "draft" %}
@@ -26,6 +34,24 @@
   <ol>{% for item in playlist.items.all %}<li>{{ item.media.business_name }} / {{ item.media.title }}</li>{% endfor %}</ol>
   {% endif %}
 </section>
+{% if superseded_versions %}
+<section class="panel">
+  <div class="panel-heading"><h2>Correction history</h2><strong>{{ superseded_versions|length }} version{{ superseded_versions|length|pluralize }}</strong></div>
+  <table>
+    <thead><tr><th>Version</th><th>Status</th><th>Entries</th><th>Window</th></tr></thead>
+    <tbody>
+      {% for version in superseded_versions %}
+      <tr>
+        <td><a href="{% url 'playlist-detail' version.id %}">v{{ version.version }}</a></td>
+        <td>{{ version.get_status_display }}</td>
+        <td>{{ version.items.count }}</td>
+        <td>{{ version.starts_at }}<br>{{ version.ends_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
 {% if playlist.status == "draft" %}
 <script>
 (() => {
@@ -63,4 +89,3 @@
 </script>
 {% endif %}
 {% endblock %}
-
