@@ -2,7 +2,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.urls import reverse
 
-from signage.models import Alert, AuditEvent, Driver, User
+from signage.models import Alert, AuditEvent, Driver, LoginThrottle, User
 
 
 @pytest.mark.django_db
@@ -80,6 +80,8 @@ def test_login_lockout_is_shared_database_state(client):
     assert blocked.status_code == 200
     assert b"Too many sign-in attempts" in blocked.content
     assert Alert.objects.filter(code="suspicious_login_lockout").exists()
+    throttle = LoginThrottle.objects.get()
+    assert len(throttle.key_hash) == 64
 
 
 @pytest.mark.django_db

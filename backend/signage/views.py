@@ -66,8 +66,8 @@ class SecureLoginView(LoginView):
     def _key(self):
         email = self.request.POST.get("username", "").strip().lower()
         ip = client_ip(self.request)
-        value = f"{email}|{ip}|{settings.SECRET_KEY}"
-        return f"login-failures:{hashlib.sha256(value.encode()).hexdigest()}"
+        value = f"login-failures|{email}|{ip}|{settings.SECRET_KEY}"
+        return hashlib.sha256(value.encode()).hexdigest()
 
     def post(self, request, *args, **kwargs):
         throttle = LoginThrottle.objects.filter(key_hash=self._key()).first()
