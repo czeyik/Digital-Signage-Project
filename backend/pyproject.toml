@@ -23,6 +23,7 @@ dependencies = [
   "whitenoise==6.11.0",
   "google-auth==2.55.2",
   "requests==2.34.2",
+  "cryptography==49.0.0",
 ]
 
 [project.optional-dependencies]

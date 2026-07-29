@@ -1,0 +1,213 @@
+#!/bin/bash
+set -euo pipefail
+umask 0077
+
+host_config=/etc/duducar/host.env
+release_config=/etc/duducar/release.env
+runtime_dir=/run/duducar
+local_postgres_secrets=/srv/duducar/postgres-secrets
+
+for config in "$host_config" "$release_config"; do
+  if [ ! -f "$config" ]; then
+    echo "Missing required root-owned configuration: $config" >&2
+    exit 1
+  fi
+  owner=$(stat -c '%U:%G' "$config")
+  mode=$(stat -c '%a' "$config")
+  if [ "$owner" != "root:root" ]; then
+    echo "Refusing configuration not owned by root: $config" >&2
+    exit 1
+  fi
+  if [ $((8#$mode & 0022)) -ne 0 ]; then
+    echo "Refusing group/world-writable configuration: $config" >&2
+    exit 1
+  fi
+done
+
+# Both files contain only trusted assignments and are writable only by root.
+set -a
+source "$host_config"
+source "$release_config"
+set +a
+
+required_host_values=(
+  AWS_REGION
+  APPLICATION_SECRET_ARN
+  AWS_STORAGE_BUCKET_NAME
+  PILOT_BACKUP_S3_BUCKET
+  DJANGO_ALLOWED_HOSTS
+  DJANGO_CSRF_TRUSTED_ORIGINS
+  ECS_MEDIA_CLUSTER
+  ECS_MEDIA_TASK_DEFINITION
+  ECS_MEDIA_SUBNET_IDS
+  ECS_MEDIA_SECURITY_GROUP_IDS
+  AWS_S3_CUSTOM_DOMAIN
+  AWS_CLOUDFRONT_KEY_ID
+  OPERATIONS_SNS_TOPIC_ARN
+)
+for name in "${required_host_values[@]}"; do
+  if [ -z "${!name:-}" ]; then
+    echo "Required host setting is empty: $name" >&2
+    exit 1
+  fi
+done
+
+install -d -o root -g root -m 0700 "$runtime_dir"
+backend_secrets_dir="$runtime_dir/backend-secrets"
+install -d -o 10001 -g 10001 -m 0500 "$backend_secrets_dir"
+owner_secrets_dir="$runtime_dir/database-owner"
+install -d -o 10001 -g 10001 -m 0500 "$owner_secrets_dir"
+postgres_runtime_secrets_dir="$runtime_dir/postgres-secrets"
+install -d -o 70 -g 70 -m 0500 "$postgres_runtime_secrets_dir"
+staging_dir=$(mktemp -d "$runtime_dir/render.XXXXXX")
+trap 'rm -rf "$staging_dir"' EXIT
+secret_tmp="$staging_dir/application-secret.json"
+application_tmp="$staging_dir/application.env"
+postgres_tmp="$staging_dir/postgres.env"
+
+aws secretsmanager get-secret-value \
+  --region "$AWS_REGION" \
+  --secret-id "$APPLICATION_SECRET_ARN" \
+  --query SecretString \
+  --output text > "$secret_tmp"
+
+jq -e 'type == "object"' "$secret_tmp" >/dev/null
+
+extract_secret_string() {
+  key=$1
+  destination=$2
+  jq -er --arg key "$key" \
+    '.[$key] | select(type == "string" and length > 0)' \
+    "$secret_tmp" > "$destination"
+}
+
+emit() {
+  key=$1
+  value=$2
+  case "$value" in
+    *$'\n'*|*$'\r'*)
+      echo "Configuration value cannot contain a line break: $key" >&2
+      exit 1
+      ;;
+  esac
+  printf '%s=%s\n' "$key" "$value"
+}
+
+extract_secret_string DJANGO_SECRET_KEY "$staging_dir/django-secret-key"
+if [ "$(wc -c < "$staging_dir/django-secret-key")" -lt 50 ]; then
+  echo "DJANGO_SECRET_KEY must contain at least 50 characters." >&2
+  exit 1
+fi
+extract_secret_string DB_PASSWORD "$staging_dir/database-password"
+database_password=$(<"$staging_dir/database-password")
+case "$database_password" in
+  *$'\n'*|*$'\r'*)
+    echo "DB_PASSWORD must not contain a line break." >&2
+    exit 1
+    ;;
+esac
+extract_secret_string EMAIL_HOST_USER "$staging_dir/email-host-user"
+extract_secret_string EMAIL_HOST_PASSWORD "$staging_dir/email-host-password"
+
+jq -cer '
+  .PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON
+  | if type == "string" then fromjson else . end
+' "$secret_tmp" > "$staging_dir/play-integrity.json"
+
+jq -er '.AWS_CLOUDFRONT_PRIVATE_KEY | select(type == "string" and contains("PRIVATE KEY"))' \
+  "$secret_tmp" > "$staging_dir/cloudfront-private.pem"
+openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
+
+{
+  emit DJANGO_DEBUG false
+  emit DEPLOYMENT_ENV production
+  emit DEPLOYMENT_COMPONENT web
+  emit DJANGO_ALLOWED_HOSTS "$DJANGO_ALLOWED_HOSTS"
+  emit DJANGO_CSRF_TRUSTED_ORIGINS "$DJANGO_CSRF_TRUSTED_ORIGINS"
+  emit DJANGO_SECURE_SSL_REDIRECT true
+  emit DJANGO_TRUST_X_FORWARDED_PROTO true
+  emit DJANGO_USE_X_FORWARDED_HOST false
+  emit DB_HOST duducar-postgres
+  emit DB_PORT 5432
+  emit DB_NAME signage
+  emit DB_USER signage_app
+  emit DB_PASSWORD_FILE /run/duducar/backend-secrets/database-password
+  emit DB_SSLMODE require
+  emit AWS_STORAGE_BUCKET_NAME "$AWS_STORAGE_BUCKET_NAME"
+  emit AWS_S3_REGION_NAME "$AWS_REGION"
+  emit AWS_S3_CUSTOM_DOMAIN "$AWS_S3_CUSTOM_DOMAIN"
+  emit AWS_CLOUDFRONT_KEY_ID "$AWS_CLOUDFRONT_KEY_ID"
+  emit AWS_CLOUDFRONT_PRIVATE_KEY_FILE /run/duducar/backend-secrets/cloudfront-private.pem
+  emit PILOT_BACKUP_ROOT /backups
+  emit PILOT_BACKUP_S3_BUCKET "$PILOT_BACKUP_S3_BUCKET"
+  emit PILOT_BACKUP_RETENTION_DAYS 30
+  emit REQUIRED_APP_VERSION "$REQUIRED_APP_VERSION"
+  emit PLAY_INTEGRITY_PROJECT_NUMBER "$PLAY_INTEGRITY_PROJECT_NUMBER"
+  emit PLAY_INTEGRITY_PACKAGE_NAME com.duducar.signage
+  emit PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON_FILE /run/duducar/backend-secrets/play-integrity.json
+  emit MEDIA_PROCESSING_DISPATCH_BACKEND ecs
+  emit MEDIA_PROCESSING_LEASE_SECONDS "$MEDIA_PROCESSING_LEASE_SECONDS"
+  emit MEDIA_DISPATCH_RETRY_SECONDS "$MEDIA_DISPATCH_RETRY_SECONDS"
+  emit MEDIA_MAX_DISPATCH_ATTEMPTS "$MEDIA_MAX_DISPATCH_ATTEMPTS"
+  emit MEDIA_RECONCILE_MAX_ASSETS "$MEDIA_RECONCILE_MAX_ASSETS"
+  emit ECS_MEDIA_REGION "$ECS_MEDIA_REGION"
+  emit ECS_MEDIA_CLUSTER "$ECS_MEDIA_CLUSTER"
+  emit ECS_MEDIA_TASK_DEFINITION "$ECS_MEDIA_TASK_DEFINITION"
+  emit ECS_MEDIA_CONTAINER_NAME "$ECS_MEDIA_CONTAINER_NAME"
+  emit ECS_MEDIA_SUBNET_IDS "$ECS_MEDIA_SUBNET_IDS"
+  emit ECS_MEDIA_SECURITY_GROUP_IDS "$ECS_MEDIA_SECURITY_GROUP_IDS"
+  emit ECS_MEDIA_ASSIGN_PUBLIC_IP "$ECS_MEDIA_ASSIGN_PUBLIC_IP"
+  emit EMAIL_BACKEND django.core.mail.backends.smtp.EmailBackend
+  emit EMAIL_HOST "$EMAIL_HOST"
+  emit EMAIL_PORT "$EMAIL_PORT"
+  emit EMAIL_USE_TLS true
+  emit EMAIL_USE_SSL false
+  emit EMAIL_HOST_USER_FILE /run/duducar/backend-secrets/email-host-user
+  emit EMAIL_HOST_PASSWORD_FILE /run/duducar/backend-secrets/email-host-password
+  emit DJANGO_SECRET_KEY_FILE /run/duducar/backend-secrets/django-secret-key
+  emit DEFAULT_FROM_EMAIL "$DEFAULT_FROM_EMAIL"
+  emit SERVER_EMAIL "$DEFAULT_FROM_EMAIL"
+  emit LOG_LEVEL INFO
+} > "$application_tmp"
+
+{
+  emit POSTGRES_DB signage
+  emit POSTGRES_USER duducar_admin
+  emit POSTGRES_PASSWORD_FILE /run/postgres-local-secrets/admin-password
+  emit OWNER_DB_PASSWORD_FILE /run/postgres-local-secrets/owner-password
+  emit RUNTIME_DB_PASSWORD_FILE /run/postgres-runtime-secrets/runtime-password
+  emit PGDATA /var/lib/postgresql/data/pgdata
+} > "$postgres_tmp"
+
+install \
+  -o 70 \
+  -g 70 \
+  -m 0400 \
+  "$staging_dir/database-password" \
+  "$postgres_runtime_secrets_dir/runtime-password"
+install \
+  -o 10001 \
+  -g 10001 \
+  -m 0400 \
+  "$local_postgres_secrets/owner-password" \
+  "$owner_secrets_dir/database-owner-password"
+
+for secret_name in \
+  django-secret-key \
+  database-password \
+  email-host-user \
+  email-host-password \
+  play-integrity.json \
+  cloudfront-private.pem; do
+  chown 10001:10001 "$staging_dir/$secret_name"
+  chmod 0400 "$staging_dir/$secret_name"
+  mv -f "$staging_dir/$secret_name" "$backend_secrets_dir/$secret_name"
+done
+
+chown root:root "$application_tmp" "$postgres_tmp"
+chmod 0600 "$application_tmp" "$postgres_tmp"
+mv -f "$application_tmp" "$runtime_dir/application.env"
+mv -f "$postgres_tmp" "$runtime_dir/postgres.env"
+
+trap - EXIT
+rm -rf "$staging_dir"

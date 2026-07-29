@@ -1,0 +1,272 @@
+#!/bin/bash
+set -euo pipefail
+umask 0077
+
+host_config=/etc/duducar/host.env
+release_config=/etc/duducar/release.env
+runtime_dir=/run/duducar
+network=duducar
+
+if [ ! -f "$release_config" ]; then
+  echo "Missing $release_config; copy and review release.env.example first." >&2
+  exit 1
+fi
+
+set -a
+source "$host_config"
+source "$release_config"
+set +a
+
+for name in BACKEND_IMAGE POSTGRES_IMAGE CADDY_IMAGE CADDY_CONFIG; do
+  if [ -z "${!name:-}" ]; then
+    echo "Required release setting is empty: $name" >&2
+    exit 1
+  fi
+done
+
+for image in "$BACKEND_IMAGE" "$POSTGRES_IMAGE" "$CADDY_IMAGE"; do
+  if ! [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]]; then
+    echo "Every production image must be pinned by sha256 digest: $image" >&2
+    exit 1
+  fi
+done
+
+case "$CADDY_CONFIG" in
+  /etc/duducar/Caddyfile.post-cutover) ;;
+  /etc/duducar/Caddyfile.preflight|/etc/duducar/Caddyfile.production)
+    echo "The selected Caddyfile is a retired migration artifact; current production requires Caddyfile.post-cutover." >&2
+    exit 1
+    ;;
+  *)
+    echo "CADDY_CONFIG must select /etc/duducar/Caddyfile.post-cutover." >&2
+    exit 1
+    ;;
+esac
+
+docker_auth="$runtime_dir/docker-auth"
+install -d -o root -g root -m 0700 "$docker_auth"
+export DOCKER_CONFIG="$docker_auth"
+cleanup_docker_auth() {
+  rm -f "$docker_auth/config.json"
+}
+trap cleanup_docker_auth EXIT
+
+ecr_registry=${BACKEND_IMAGE%%/*}
+aws ecr get-login-password --region "${AWS_REGION:-ap-southeast-5}" |
+  docker login --username AWS --password-stdin "$ecr_registry" >/dev/null
+
+ensure_network() {
+  if ! docker network inspect "$network" >/dev/null 2>&1; then
+    docker network create "$network" >/dev/null
+  fi
+}
+
+pull_images() {
+  docker pull "$BACKEND_IMAGE"
+  docker pull "$POSTGRES_IMAGE"
+  docker pull "$CADDY_IMAGE"
+}
+
+create_database() {
+  docker run -d \
+    --name duducar-postgres \
+    --restart unless-stopped \
+    --network "$network" \
+    --log-driver journald \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 640m \
+    --cpus 1.0 \
+    --env-file "$runtime_dir/postgres.env" \
+    --publish 5432:5432 \
+    --volume /srv/duducar/postgres:/var/lib/postgresql/data \
+    --volume /srv/duducar/postgres-secrets:/run/postgres-local-secrets:ro \
+    --volume /srv/duducar/postgres-tls:/run/postgres-tls:ro \
+    --volume "$runtime_dir/postgres-secrets:/run/postgres-runtime-secrets:ro" \
+    --volume /etc/duducar/postgres-init/postgres-init-roles.sh:/docker-entrypoint-initdb.d/010-roles.sh:ro \
+    --volume /etc/duducar/postgres-init/postgres-runtime-grants.sql:/docker-entrypoint-initdb.d/020-runtime-grants.sql:ro \
+    --volume /etc/duducar/postgres-init/postgres-runtime-grants.sql:/run/postgres-config/runtime-grants.sql:ro \
+    --volume /etc/duducar/pg_hba.conf:/run/postgres-config/pg_hba.conf:ro \
+    --health-cmd 'pg_isready -U duducar_admin -d signage' \
+    --health-interval 10s \
+    --health-timeout 5s \
+    --health-retries 12 \
+    "$POSTGRES_IMAGE" \
+    -c ssl=on \
+    -c ssl_cert_file=/run/postgres-tls/server.crt \
+    -c ssl_key_file=/run/postgres-tls/server.key \
+    -c ssl_min_protocol_version=TLSv1.2 \
+    -c hba_file=/run/postgres-config/pg_hba.conf \
+    -c listen_addresses=* \
+    -c password_encryption=scram-sha-256 \
+    -c shared_buffers=128MB \
+    -c max_connections=50 >/dev/null
+}
+
+wait_for_database() {
+  for attempt in $(seq 1 60); do
+    status=$(docker inspect --format '{{.State.Health.Status}}' duducar-postgres 2>/dev/null || true)
+    if [ "$status" = "healthy" ]; then
+      return
+    fi
+    if [ "$status" = "unhealthy" ]; then
+      docker logs --tail 40 duducar-postgres >&2
+      return 1
+    fi
+    sleep 2
+  done
+  echo "PostgreSQL did not become healthy within two minutes." >&2
+  return 1
+}
+
+create_web() {
+  docker run -d \
+    --name duducar-web \
+    --restart unless-stopped \
+    --network "$network" \
+    --log-driver journald \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
+    --env-file "$runtime_dir/application.env" \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m \
+    --volume /srv/duducar/backups:/backups \
+    --volume "$runtime_dir/backend-secrets:/run/duducar/backend-secrets:ro" \
+    --health-cmd "python -c \"import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/health/live/', headers={'Host':'marketing.duducaradmin.com'}); urllib.request.urlopen(req, timeout=3)\"" \
+    --health-interval 30s \
+    --health-timeout 5s \
+    --health-retries 5 \
+    "$BACKEND_IMAGE" >/dev/null
+}
+
+wait_for_web() {
+  for attempt in $(seq 1 60); do
+    status=$(docker inspect --format '{{.State.Health.Status}}' duducar-web 2>/dev/null || true)
+    if [ "$status" = "healthy" ]; then
+      return
+    fi
+    if [ "$status" = "unhealthy" ]; then
+      docker logs --tail 60 duducar-web >&2
+      return 1
+    fi
+    sleep 2
+  done
+  echo "Django did not become healthy within two minutes." >&2
+  return 1
+}
+
+create_caddy() {
+  docker run -d \
+    --name duducar-caddy \
+    --restart unless-stopped \
+    --network "$network" \
+    --log-driver journald \
+    --cap-drop ALL \
+    --cap-add NET_BIND_SERVICE \
+    --security-opt no-new-privileges:true \
+    --pids-limit 128 \
+    --memory 128m \
+    --cpus 0.5 \
+    --publish 80:80 \
+    --publish 443:443 \
+    --publish 443:443/udp \
+    --volume "$CADDY_CONFIG:/etc/caddy/Caddyfile:ro" \
+    --volume /srv/duducar/caddy-data:/data \
+    --volume /srv/duducar/caddy-config:/config \
+    "$CADDY_IMAGE" >/dev/null
+}
+
+remove_container() {
+  name=$1
+  if docker container inspect "$name" >/dev/null 2>&1; then
+    docker rm --force "$name" >/dev/null
+  fi
+}
+
+remove_database_container() {
+  if docker container inspect duducar-postgres >/dev/null 2>&1; then
+    # PostgreSQL receives SIGTERM and completes a fast, clean shutdown before
+    # its container metadata is removed. A failed stop aborts the deployment.
+    docker stop --time 120 duducar-postgres >/dev/null
+    docker rm duducar-postgres >/dev/null
+  fi
+}
+
+start_stack() {
+  ensure_network
+
+  if docker container inspect duducar-postgres >/dev/null 2>&1; then
+    docker start duducar-postgres >/dev/null
+  else
+    create_database
+  fi
+  wait_for_database
+
+  if docker container inspect duducar-web >/dev/null 2>&1; then
+    docker start duducar-web >/dev/null
+  else
+    create_web
+  fi
+  wait_for_web
+
+  if docker container inspect duducar-caddy >/dev/null 2>&1; then
+    docker start duducar-caddy >/dev/null
+  else
+    create_caddy
+  fi
+}
+
+deploy_stack() {
+  ensure_network
+  pull_images
+
+  remove_container duducar-caddy
+  remove_container duducar-web
+
+  if docker container inspect duducar-postgres >/dev/null 2>&1; then
+    current_database_image=$(docker inspect --format '{{.Config.Image}}' duducar-postgres)
+    if [ "$current_database_image" != "$POSTGRES_IMAGE" ]; then
+      remove_database_container
+    fi
+  fi
+
+  if ! docker container inspect duducar-postgres >/dev/null 2>&1; then
+    create_database
+  else
+    docker start duducar-postgres >/dev/null
+  fi
+  wait_for_database
+  create_web
+  wait_for_web
+  create_caddy
+}
+
+stop_stack() {
+  for name in duducar-caddy duducar-web duducar-postgres; do
+    if docker container inspect "$name" >/dev/null 2>&1; then
+      docker stop --time 30 "$name" >/dev/null
+    fi
+  done
+}
+
+case "${1:-start}" in
+  start)
+    start_stack
+    ;;
+  deploy)
+    deploy_stack
+    ;;
+  stop)
+    stop_stack
+    ;;
+  status)
+    docker ps --filter name=duducar- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+    ;;
+  *)
+    echo "Usage: duducar-stack {start|deploy|stop|status}" >&2
+    exit 2
+    ;;
+esac

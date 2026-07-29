@@ -1,0 +1,66 @@
+#!/bin/bash
+set -uo pipefail
+umask 0077
+
+host_config=/etc/duducar/host.env
+state_dir=/var/lib/duducar-alerts
+
+if [ ! -r "$host_config" ]; then
+  exit 0
+fi
+
+set -a
+source "$host_config"
+set +a
+
+if [ -z "${OPERATIONS_SNS_TOPIC_ARN:-}" ] || [ -z "${AWS_REGION:-}" ]; then
+  exit 0
+fi
+
+install -d -o root -g root -m 0700 "$state_dir"
+
+publish() {
+  subject=$1
+  message=$2
+  aws sns publish \
+    --region "$AWS_REGION" \
+    --topic-arn "$OPERATIONS_SNS_TOPIC_ARN" \
+    --subject "$subject" \
+    --message "$message" >/dev/null 2>&1
+}
+
+mode=problem
+case "${1:-}" in
+  --problem|--clear)
+    mode=${1#--}
+    shift
+    ;;
+esac
+
+key=${1:-unknown}
+message=${2:-"A production host unit requires attention: $key"}
+marker_hash=$(printf '%s' "$key" | sha256sum | cut -d' ' -f1)
+marker="$state_dir/$marker_hash"
+
+if [ "$mode" = "clear" ]; then
+  if [ ! -f "$marker" ]; then
+    exit 0
+  fi
+  if publish "DUDU host alert recovered" "$message"; then
+    rm -f "$marker"
+  fi
+  exit 0
+fi
+
+if [ -f "$marker" ]; then
+  exit 0
+fi
+
+if publish "DUDU production host alert" "$message"; then
+  marker_tmp=$(mktemp "$state_dir/.alert.XXXXXX")
+  printf '%s\n' "$key" > "$marker_tmp"
+  chmod 0600 "$marker_tmp"
+  mv -f "$marker_tmp" "$marker"
+fi
+
+exit 0

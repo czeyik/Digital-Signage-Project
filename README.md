@@ -7,14 +7,21 @@ Production-oriented pilot platform for the DUDU Car in-vehicle signage service:
 - AWS Malaysia Terraform in `infrastructure/`
 - Production, release, backup, and hardware procedures in `docs/`
 
-Start with [the production runbook](docs/production-deployment-runbook.md). The
-AWS owner-run commands and secret-handling sequence are in
-[the infrastructure guide](infrastructure/README.md). Do not enroll a production
-tablet until its exact model and firmware has an approved hardware qualification
-record and all go/no-go gates in the runbook pass.
+Current production in AWS Malaysia targets USD 30 per month. One ARM
+`t4g.small` runs Caddy, Django, and local PostgreSQL; private S3 media is
+delivered through signed CloudFront URLs, and media processing uses one
+isolated Fargate task only when an upload requires it. The former ECS web
+services and schedules, ALB, and live RDS instance have been removed.
 
-The owner must complete [the AWS cost worksheet](docs/aws-cost-estimate.md)
-before applying infrastructure.
+Start with [the current architecture](docs/architecture.md) and
+[the production runbook](docs/production-deployment-runbook.md). The AWS
+owner-run commands and secret-handling sequence are in
+[the infrastructure guide](infrastructure/README.md). Do not enroll a
+production tablet until its exact model and firmware has an approved hardware
+qualification record and all go/no-go gates in the runbook pass.
+
+The owner must review [the AWS cost worksheet](docs/aws-cost-estimate.md)
+before any infrastructure change that could affect the USD 30 target.
 
 ## Local verification
 

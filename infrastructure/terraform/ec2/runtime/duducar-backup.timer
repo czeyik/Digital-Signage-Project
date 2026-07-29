@@ -1,0 +1,11 @@
+[Unit]
+Description=Create and upload the daily DUDU logical backup
+
+[Timer]
+OnCalendar=*-*-* 18:00:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+Unit=duducar-command@backup.service
+
+[Install]
+WantedBy=timers.target

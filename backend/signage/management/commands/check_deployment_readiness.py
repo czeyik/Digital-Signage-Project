@@ -14,16 +14,30 @@ class Command(BaseCommand):
             choices=["development", "production"],
             default=settings.DEPLOYMENT_ENV,
         )
+        parser.add_argument(
+            "--component",
+            choices=["all", "web", "media-worker", "scheduled"],
+            default=settings.DEPLOYMENT_COMPONENT,
+            help=(
+                "Validate all components or one runtime role. The media-worker "
+                "role is the isolated, one-off Fargate task image."
+            ),
+        )
 
     def handle(self, *args, **options):
         environment = options["environment"]
+        component = options["component"]
         errors = []
         warnings = []
         if environment == "production":
-            self._check_media_dependencies(errors)
-            self._check_production_settings(errors, warnings)
+            if component in {"all", "media-worker"}:
+                self._check_media_dependencies(errors)
+            if component in {"all", "scheduled"}:
+                self._check_database_tools(errors)
+            self._check_production_settings(errors, warnings, component)
         else:
-            self._check_media_dependencies(warnings)
+            if component in {"all", "media-worker"}:
+                self._check_media_dependencies(warnings)
             self._check_development_settings(warnings)
         if warnings:
             for warning in warnings:
@@ -39,7 +53,12 @@ class Command(BaseCommand):
             if not shutil.which(executable):
                 errors.append(f"{executable} is required for media processing.")
 
-    def _check_production_settings(self, errors, warnings):
+    def _check_database_tools(self, errors):
+        for executable in ("pg_dump", "pg_restore"):
+            if not shutil.which(executable):
+                errors.append(f"{executable} is required for backup and restore.")
+
+    def _check_production_settings(self, errors, warnings, component):
         if settings.DEBUG:
             errors.append("DJANGO_DEBUG must be false in production.")
         if (
@@ -50,8 +69,17 @@ class Command(BaseCommand):
         database_engine = settings.DATABASES["default"]["ENGINE"]
         if "postgresql" not in database_engine:
             errors.append("Production must use PostgreSQL, not SQLite.")
+        if not settings.DATABASES["default"].get("PASSWORD"):
+            errors.append("Production PostgreSQL credentials must include a password.")
         if not getattr(settings, "AWS_STORAGE_BUCKET_NAME", ""):
             errors.append("Production media storage must use a private object bucket.")
+        if component in {"all", "scheduled"} and not settings.PILOT_BACKUP_S3_BUCKET:
+            errors.append("PILOT_BACKUP_S3_BUCKET is required for database backups.")
+        if component not in {"all", "web"}:
+            return
+        self._check_web_settings(errors)
+
+    def _check_web_settings(self, errors):
         required_hosts = {
             "marketing.duducaradmin.com",
             "api.marketing.duducaradmin.com",
@@ -114,6 +142,71 @@ class Command(BaseCommand):
             not in settings.MIDDLEWARE
         ):
             errors.append("Production security headers middleware is required.")
+        self._check_cloudfront_signing(errors)
+        self._check_media_dispatch(errors)
+
+    def _check_cloudfront_signing(self, errors):
+        domain = getattr(settings, "AWS_S3_CUSTOM_DOMAIN", "")
+        key_id = getattr(settings, "AWS_CLOUDFRONT_KEY_ID", "")
+        private_key = getattr(settings, "AWS_CLOUDFRONT_KEY", "")
+        if not domain:
+            errors.append(
+                "AWS_S3_CUSTOM_DOMAIN must use the private CloudFront distribution."
+            )
+        elif "://" in domain or "/" in domain:
+            errors.append("AWS_S3_CUSTOM_DOMAIN must be a hostname without a scheme.")
+        if not key_id or not private_key:
+            errors.append(
+                "CloudFront key ID and private key are required for signed media URLs."
+            )
+        if not getattr(settings, "AWS_QUERYSTRING_AUTH", False):
+            errors.append("Signed media URLs must keep AWS_QUERYSTRING_AUTH enabled.")
+        query_expiry = getattr(settings, "AWS_QUERYSTRING_EXPIRE", 0)
+        if not 1 <= query_expiry <= 900:
+            errors.append("Signed media URLs must expire within 900 seconds.")
+        if private_key:
+            try:
+                from cryptography.hazmat.primitives.asymmetric.rsa import (
+                    RSAPrivateKey,
+                )
+                from cryptography.hazmat.primitives.serialization import (
+                    load_pem_private_key,
+                )
+
+                signing_key = load_pem_private_key(
+                    private_key.encode("utf-8"),
+                    password=None,
+                )
+                if not isinstance(signing_key, RSAPrivateKey):
+                    raise ValueError
+            except (ImportError, TypeError, ValueError):
+                errors.append("CloudFront signing private key must be a valid RSA PEM.")
+
+    def _check_media_dispatch(self, errors):
+        if settings.MEDIA_PROCESSING_DISPATCH_BACKEND != "ecs":
+            errors.append(
+                "Production web media dispatch must use one-off ECS/Fargate tasks."
+            )
+        required = {
+            "ECS_MEDIA_REGION": settings.ECS_MEDIA_REGION,
+            "ECS_MEDIA_CLUSTER": settings.ECS_MEDIA_CLUSTER,
+            "ECS_MEDIA_TASK_DEFINITION": settings.ECS_MEDIA_TASK_DEFINITION,
+            "ECS_MEDIA_CONTAINER_NAME": settings.ECS_MEDIA_CONTAINER_NAME,
+            "ECS_MEDIA_SUBNET_IDS": settings.ECS_MEDIA_SUBNET_IDS,
+            "ECS_MEDIA_SECURITY_GROUP_IDS": settings.ECS_MEDIA_SECURITY_GROUP_IDS,
+        }
+        for name, value in required.items():
+            if not value:
+                errors.append(f"{name} is required for one-off media processing.")
+        positive_settings = {
+            "MEDIA_PROCESSING_LEASE_SECONDS": settings.MEDIA_PROCESSING_LEASE_SECONDS,
+            "MEDIA_DISPATCH_RETRY_SECONDS": settings.MEDIA_DISPATCH_RETRY_SECONDS,
+            "MEDIA_MAX_DISPATCH_ATTEMPTS": settings.MEDIA_MAX_DISPATCH_ATTEMPTS,
+            "MEDIA_RECONCILE_MAX_ASSETS": settings.MEDIA_RECONCILE_MAX_ASSETS,
+        }
+        for name, value in positive_settings.items():
+            if value < 1:
+                errors.append(f"{name} must be positive.")
 
     def _check_development_settings(self, warnings):
         production_hosts = {

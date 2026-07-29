@@ -11,17 +11,19 @@ pilot scope. When a requested change conflicts with this file, explain the
 conflict and confirm the new decision before implementing it.
 
 This is an agent playbook, not the complete architecture specification. The
-technology stack, service boundaries, schemas, APIs, and deployment topology
-must be selected in a separate architecture plan before application
-implementation begins.
+selected application and production topology is recorded in
+`docs/architecture.md`; preserve that decision unless a reviewed architecture
+change explicitly replaces it.
 
 ## Product Goal And Constraints
 
 - Deliver a controlled pilot within one month for 10 vehicles in Malaysia.
 - Design application boundaries and data models to scale toward 1,000 devices
   within three years, while provisioning only pilot-scale infrastructure.
-- Keep AWS pilot spending at or below RM500 per month, excluding the RM40
-  monthly mobile-data allowance for each tablet.
+- Keep the AWS project at or below the **USD 30 monthly target**, excluding the
+  RM 40 monthly mobile-data allowance for each tablet. Treat unusual media
+  egress, snapshot growth, and on-demand worker duration as budget risks rather
+  than assuming the target is guaranteed.
 - Use `Asia/Kuala_Lumpur` for all business scheduling and user-facing times.
 - Use English for the pilot interfaces.
 - Host separate development and production environments with separate
@@ -33,6 +35,30 @@ implementation begins.
   `api.marketing.duducaradmin.com` for the API.
 - Optimize for secure operation and one-person maintainability. Do not select a
   technology solely because the project owner knows Python.
+
+## Current Production Architecture
+
+Production in `ap-southeast-5` is intentionally pilot-sized:
+
+- One Amazon Linux ARM64 `t4g.small` EC2 instance runs Caddy, Django, and
+  PostgreSQL containers under systemd.
+- The instance uses an encrypted 8 GB GP3 root volume, an encrypted 32 GB GP3
+  data volume, one Elastic IP, and Session Manager; SSH is not exposed.
+- Media remains in private S3 and is delivered through CloudFront origin access
+  control and signed URLs.
+- Each upload may dispatch one bounded, isolated ARM Fargate media-processing
+  task. There is no continuous media worker.
+- Daily logical PostgreSQL backups go to private versioned S3, and DLM is
+  configured for daily encrypted data-volume snapshots with 30 retained
+  recovery points.
+- The legacy ECS web service and schedules, Application Load Balancer, and live
+  RDS instance have been removed. They are not a current rollback path. The ECS
+  cluster remains only for isolated on-demand media tasks.
+
+This single-host topology accepts a pilot-level failure domain to meet the USD
+30 target and 24-hour RPO/RTO. A return to managed PostgreSQL or independently
+scaled web services requires a new costed architecture decision and data
+migration plan.
 
 ## Pilot Users And Roles
 
@@ -394,9 +420,10 @@ release acceptance requires testing on the selected 10-inch landscape hardware.
 
 ## Engineering Expectations
 
-- Begin implementation only after an architecture plan selects the stack based
-  on functionality, security, AWS cost, Android kiosk reliability, scalability,
-  deployment simplicity, and one-person maintainability.
+- Preserve the selected architecture while implementing features. Any proposed
+  topology change must first update the architecture plan based on
+  functionality, security, the USD 30 AWS target, Android kiosk reliability,
+  scalability, deployment simplicity, and one-person maintainability.
 - Prefer established, maintained libraries and managed services where they fit
   the budget and reduce operational risk.
 - Keep code, commands, migrations, and documentation understandable to a

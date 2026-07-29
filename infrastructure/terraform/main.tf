@@ -9,10 +9,26 @@ data "aws_route53_zone" "primary" {
   private_zone = false
 }
 
+# State-compatibility boundary: current production uses EC2, local PostgreSQL,
+# CloudFront/S3, and the isolated ec2-media-worker task. The legacy resources
+# below remain gated definitions only so old state can be audited safely.
+# Never infer the live topology from migration-era resource names.
 locals {
-  name = var.project_name
-  azs  = slice(data.aws_availability_zones.available.names, 0, 2)
-  common_environment = [
+  name                                = var.project_name
+  azs                                 = slice(data.aws_availability_zones.available.names, 0, 2)
+  legacy_ecs_runtime_enabled          = var.enable_services && var.enable_legacy_ecs_runtime
+  legacy_ecs_task_definitions_enabled = var.container_image != "" && var.enable_legacy_rds
+  legacy_rds_final_snapshot_identifier = (
+    trimspace(var.legacy_rds_final_snapshot_identifier) != ""
+    ? trimspace(var.legacy_rds_final_snapshot_identifier)
+    : "${var.project_name}-final"
+  )
+  ec2_alarm_arns = [
+    "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-ec2-target-status",
+    "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-ec2-target-high-cpu",
+    "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-ec2-target-low-cpu-credits"
+  ]
+  shared_environment = [
     { name = "DJANGO_DEBUG", value = "false" },
     { name = "DEPLOYMENT_ENV", value = "production" },
     { name = "DJANGO_ALLOWED_HOSTS", value = "${var.dashboard_hostname},${var.api_hostname}" },
@@ -20,11 +36,6 @@ locals {
     { name = "DJANGO_SECURE_SSL_REDIRECT", value = "true" },
     { name = "DJANGO_TRUST_X_FORWARDED_PROTO", value = "true" },
     { name = "DJANGO_USE_X_FORWARDED_HOST", value = "false" },
-    { name = "DB_HOST", value = aws_db_instance.production.address },
-    { name = "DB_PORT", value = "5432" },
-    { name = "DB_NAME", value = "signage" },
-    { name = "DB_USER", value = "signage" },
-    { name = "DB_SSLMODE", value = "require" },
     { name = "AWS_STORAGE_BUCKET_NAME", value = aws_s3_bucket.media.bucket },
     { name = "AWS_S3_REGION_NAME", value = var.aws_region },
     { name = "PILOT_BACKUP_S3_BUCKET", value = aws_s3_bucket.backups.bucket },
@@ -32,6 +43,10 @@ locals {
     { name = "REQUIRED_APP_VERSION", value = var.required_app_version },
     { name = "PLAY_INTEGRITY_PROJECT_NUMBER", value = var.play_integrity_project_number },
     { name = "PLAY_INTEGRITY_PACKAGE_NAME", value = "com.duducar.signage" },
+    { name = "MEDIA_PROCESSING_LEASE_SECONDS", value = tostring(var.media_processing_lease_seconds) },
+    { name = "MEDIA_DISPATCH_RETRY_SECONDS", value = tostring(var.media_dispatch_retry_seconds) },
+    { name = "MEDIA_MAX_DISPATCH_ATTEMPTS", value = tostring(var.media_max_dispatch_attempts) },
+    { name = "MEDIA_RECONCILE_MAX_ASSETS", value = tostring(var.media_reconcile_max_assets) },
     { name = "EMAIL_BACKEND", value = "django.core.mail.backends.smtp.EmailBackend" },
     { name = "EMAIL_HOST", value = var.smtp_host },
     { name = "EMAIL_PORT", value = tostring(var.smtp_port) },
@@ -41,23 +56,134 @@ locals {
     { name = "SERVER_EMAIL", value = var.default_from_email },
     { name = "LOG_LEVEL", value = "INFO" }
   ]
-  common_secrets = [
-    { name = "DJANGO_SECRET_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:DJANGO_SECRET_KEY::" },
-    { name = "EMAIL_HOST_USER", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_USER::" },
-    { name = "EMAIL_HOST_PASSWORD", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_PASSWORD::" },
-    { name = "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", valueFrom = "${aws_secretsmanager_secret.application.arn}:PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON::" },
-    { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.production.master_user_secret[0].secret_arn}:password::" }
-  ]
-  task_secrets = [
-    { name = "DJANGO_SECRET_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:DJANGO_SECRET_KEY::" },
-    { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.production.master_user_secret[0].secret_arn}:password::" }
-  ]
+  legacy_database_environment = var.enable_legacy_rds ? [
+    { name = "DB_HOST", value = aws_db_instance.production[0].address },
+    { name = "DB_PORT", value = "5432" },
+    { name = "DB_NAME", value = "signage" },
+    { name = "DB_USER", value = "signage" },
+    { name = "DB_SSLMODE", value = "require" }
+  ] : []
+  common_environment = concat(local.shared_environment, local.legacy_database_environment)
+  common_secrets = concat(
+    [
+      { name = "DJANGO_SECRET_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:DJANGO_SECRET_KEY::" },
+      { name = "EMAIL_HOST_USER", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_USER::" },
+      { name = "EMAIL_HOST_PASSWORD", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_PASSWORD::" },
+      { name = "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", valueFrom = "${aws_secretsmanager_secret.application.arn}:PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON::" }
+    ],
+    var.enable_legacy_rds ? [
+      { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.production[0].master_user_secret[0].secret_arn}:password::" }
+    ] : []
+  )
+  task_secrets = concat(
+    [
+      { name = "DJANGO_SECRET_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:DJANGO_SECRET_KEY::" }
+    ],
+    var.enable_legacy_rds ? [
+      { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.production[0].master_user_secret[0].secret_arn}:password::" }
+    ] : []
+  )
 }
 
 check "service_image" {
   assert {
-    condition     = !var.enable_services || var.container_image != ""
-    error_message = "container_image must be set before enable_services is true."
+    condition     = !local.legacy_ecs_runtime_enabled || var.container_image != ""
+    error_message = "The retired ECS runtime cannot be enabled without container_image. Current EC2 production requires enable_legacy_ecs_runtime=false; reviewed examples also keep enable_services=false."
+  }
+}
+
+check "ec2_target_image" {
+  assert {
+    condition     = !var.enable_ec2_target || var.container_image != ""
+    error_message = "container_image must be set before enable_ec2_target is true."
+  }
+
+  assert {
+    condition     = !var.enable_ec2_target || var.enable_media_cloudfront
+    error_message = "enable_media_cloudfront must be true whenever enable_ec2_target is true."
+  }
+}
+
+check "application_origin" {
+  assert {
+    condition     = var.application_origin != "ec2" || var.enable_ec2_target
+    error_message = "application_origin cannot switch to ec2 until enable_ec2_target is true."
+  }
+
+  assert {
+    condition     = var.application_origin != "alb" || var.enable_legacy_alb
+    error_message = "application_origin cannot select alb after the legacy ALB is disabled."
+  }
+}
+
+check "legacy_ecs_runtime_dependencies" {
+  assert {
+    condition     = !local.legacy_ecs_runtime_enabled || (var.enable_legacy_alb && var.enable_legacy_rds)
+    error_message = "The legacy ECS runtime requires both the legacy ALB and RDS."
+  }
+}
+
+check "legacy_ecs_runtime_decommission" {
+  assert {
+    condition = var.enable_legacy_ecs_runtime || (
+      var.application_origin == "ec2" &&
+      var.enable_ec2_target &&
+      var.ecs_web_desired_count == 0 &&
+      !var.enable_ecs_schedules &&
+      !var.enable_continuous_media_worker
+    )
+    error_message = "Switch production to the EC2 target and quiesce the legacy web service, schedules, and continuous worker before disabling the legacy ECS runtime."
+  }
+}
+
+check "legacy_alb_decommission" {
+  assert {
+    condition = var.enable_legacy_alb || (
+      !var.enable_legacy_ecs_runtime &&
+      var.ecs_web_desired_count == 0 &&
+      !var.enable_ecs_schedules &&
+      !var.enable_continuous_media_worker &&
+      var.application_origin == "ec2" &&
+      var.enable_ec2_target &&
+      !var.enable_ec2_acme_bridge
+    )
+    error_message = "Disable and quiesce the legacy ECS runtime, switch application_origin to ec2, and remove the ACME bridge before disabling the legacy ALB."
+  }
+}
+
+check "legacy_rds_decommission" {
+  assert {
+    condition = !var.confirm_legacy_rds_final_snapshot || (
+      !var.enable_legacy_rds &&
+      trimspace(var.legacy_rds_final_snapshot_identifier) != ""
+    )
+    error_message = "Final-snapshot confirmation is valid only on the RDS removal plan and requires an explicit snapshot identifier."
+  }
+
+  assert {
+    condition = var.enable_legacy_rds || (
+      !var.enable_legacy_alb &&
+      !var.enable_legacy_ecs_runtime &&
+      var.application_origin == "ec2" &&
+      !var.legacy_rds_deletion_protection &&
+      var.confirm_legacy_rds_final_snapshot &&
+      trimspace(var.legacy_rds_final_snapshot_identifier) != ""
+    )
+    error_message = "Legacy RDS deletion requires the ECS runtime and ALB to be disabled, deletion protection already disabled, and the explicit final snapshot separately confirmed."
+  }
+}
+
+check "cloudfront_public_key" {
+  assert {
+    condition     = !var.enable_media_cloudfront || can(regex("-----BEGIN PUBLIC KEY-----", var.cloudfront_public_key_pem))
+    error_message = "A PEM public key must be supplied before enable_media_cloudfront is true; keep its private key outside Terraform."
+  }
+}
+
+check "migration_budget_notification_limit" {
+  assert {
+    condition     = length(var.migration_budget_forecast_thresholds) + length(var.migration_budget_actual_thresholds) <= 5
+    error_message = "AWS Budgets permits at most five notifications per budget."
   }
 }
 
@@ -192,6 +318,31 @@ resource "aws_s3_bucket" "backups" {
   bucket = "${local.name}-backups-${data.aws_caller_identity.current.account_id}"
 }
 
+data "aws_iam_policy_document" "backups_transport" {
+  statement {
+    sid       = "DenyInsecureTransport"
+    effect    = "Deny"
+    actions   = ["s3:*"]
+    resources = [aws_s3_bucket.backups.arn, "${aws_s3_bucket.backups.arn}/*"]
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "backups_transport" {
+  bucket = aws_s3_bucket.backups.id
+  policy = data.aws_iam_policy_document.backups_transport.json
+}
+
 resource "aws_s3_bucket_public_access_block" "private" {
   for_each = {
     media   = aws_s3_bucket.media.id
@@ -256,6 +407,7 @@ resource "aws_db_subnet_group" "production" {
 }
 
 resource "aws_db_instance" "production" {
+  count                         = var.enable_legacy_rds ? 1 : 0
   identifier                    = local.name
   engine                        = "postgres"
   engine_version                = "16"
@@ -277,9 +429,9 @@ resource "aws_db_instance" "production" {
   backup_window                 = "18:30-19:00"
   maintenance_window            = "sun:19:30-sun:20:30"
   auto_minor_version_upgrade    = true
-  deletion_protection           = true
+  deletion_protection           = var.legacy_rds_deletion_protection
   skip_final_snapshot           = false
-  final_snapshot_identifier     = "${local.name}-final"
+  final_snapshot_identifier     = local.legacy_rds_final_snapshot_identifier
   copy_tags_to_snapshot         = true
 }
 
@@ -298,11 +450,12 @@ resource "aws_ecr_lifecycle_policy" "backend" {
   policy = jsonencode({
     rules = [{
       rulePriority = 1
-      description  = "Keep the latest 20 release images"
+      description  = "Expire only untagged artifacts after fourteen days; retain every tagged rollback release"
       selection = {
-        tagStatus   = "any"
-        countType   = "imageCountMoreThan"
-        countNumber = 20
+        tagStatus   = "untagged"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = 14
       }
       action = { type = "expire" }
     }]
@@ -344,6 +497,7 @@ resource "aws_acm_certificate_validation" "production" {
 }
 
 resource "aws_lb" "production" {
+  count                      = var.enable_legacy_alb ? 1 : 0
   name                       = "duducar-signage-prod"
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.alb.id]
@@ -352,6 +506,7 @@ resource "aws_lb" "production" {
 }
 
 resource "aws_lb_target_group" "web" {
+  count       = var.enable_legacy_alb ? 1 : 0
   name        = "duducar-signage-web"
   port        = 8000
   protocol    = "HTTP"
@@ -368,7 +523,8 @@ resource "aws_lb_target_group" "web" {
 }
 
 resource "aws_lb_listener" "http" {
-  load_balancer_arn = aws_lb.production.arn
+  count             = var.enable_legacy_alb ? 1 : 0
+  load_balancer_arn = aws_lb.production[0].arn
   port              = 80
   protocol          = "HTTP"
   default_action {
@@ -382,14 +538,15 @@ resource "aws_lb_listener" "http" {
 }
 
 resource "aws_lb_listener" "https" {
-  load_balancer_arn = aws_lb.production.arn
+  count             = var.enable_legacy_alb ? 1 : 0
+  load_balancer_arn = aws_lb.production[0].arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   certificate_arn   = aws_acm_certificate_validation.production.certificate_arn
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.web.arn
+    target_group_arn = aws_lb_target_group.web[0].arn
   }
 }
 
@@ -398,10 +555,16 @@ resource "aws_route53_record" "application" {
   zone_id  = data.aws_route53_zone.primary.zone_id
   name     = each.value
   type     = "A"
-  alias {
-    name                   = aws_lb.production.dns_name
-    zone_id                = aws_lb.production.zone_id
-    evaluate_target_health = true
+  ttl      = var.application_origin == "ec2" ? 60 : null
+  records  = var.application_origin == "ec2" ? compact([try(aws_eip.ec2_target[0].public_ip, "")]) : null
+
+  dynamic "alias" {
+    for_each = var.application_origin == "alb" ? [1] : []
+    content {
+      name                   = aws_lb.production[0].dns_name
+      zone_id                = aws_lb.production[0].zone_id
+      evaluate_target_health = true
+    }
   }
 }
 
@@ -409,7 +572,7 @@ resource "aws_ecs_cluster" "production" {
   name = local.name
   setting {
     name  = "containerInsights"
-    value = "enabled"
+    value = var.enable_container_insights ? "enabled" : "disabled"
   }
 }
 
@@ -420,7 +583,9 @@ resource "aws_cloudwatch_log_group" "application" {
 
 resource "aws_sns_topic" "operations" {
   name              = "${local.name}-operations"
-  kms_master_key_id = "alias/aws/sns"
+  kms_master_key_id = aws_kms_key.production.arn
+
+  depends_on = [aws_kms_key_policy.media_cloudfront]
 }
 
 resource "aws_sns_topic_subscription" "operations_email" {
@@ -431,12 +596,26 @@ resource "aws_sns_topic_subscription" "operations_email" {
 
 data "aws_iam_policy_document" "operations_topic" {
   statement {
+    sid       = "AllowCloudWatchAlarmNotifications"
     effect    = "Allow"
     actions   = ["sns:Publish"]
     resources = [aws_sns_topic.operations.arn]
+
     principals {
       type        = "Service"
-      identifiers = ["events.amazonaws.com"]
+      identifiers = ["cloudwatch.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [data.aws_caller_identity.current.account_id]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = local.ec2_alarm_arns
     }
   }
 }
@@ -464,7 +643,14 @@ resource "aws_iam_role_policy" "execution_secrets" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["secretsmanager:GetSecretValue"], Resource = [aws_secretsmanager_secret.application.arn, aws_db_instance.production.master_user_secret[0].secret_arn] },
+      {
+        Effect = "Allow"
+        Action = ["secretsmanager:GetSecretValue"]
+        Resource = concat(
+          [aws_secretsmanager_secret.application.arn],
+          var.enable_legacy_rds ? [aws_db_instance.production[0].master_user_secret[0].secret_arn] : []
+        )
+      },
       { Effect = "Allow", Action = ["kms:Decrypt"], Resource = [aws_kms_key.production.arn] }
     ]
   })
@@ -524,16 +710,50 @@ resource "aws_iam_role_policy" "scheduled_task" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["s3:ListBucket"], Resource = [aws_s3_bucket.media.arn, aws_s3_bucket.backups.arn] },
-      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = ["${aws_s3_bucket.media.arn}/*", "${aws_s3_bucket.backups.arn}/*"] },
+      { Effect = "Allow", Action = ["s3:ListBucket"], Resource = [aws_s3_bucket.media.arn] },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.backups.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["database-backups", "database-backups/*"]
+          }
+        }
+      },
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = ["${aws_s3_bucket.media.arn}/*"] },
+      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject"], Resource = ["${aws_s3_bucket.backups.arn}/database-backups/*"] },
       { Effect = "Allow", Action = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"], Resource = [aws_kms_key.production.arn] }
     ]
   })
 }
 
+locals {
+  media_dispatch_environment = local.legacy_ecs_task_definitions_enabled ? [
+    { name = "MEDIA_PROCESSING_DISPATCH_BACKEND", value = "ecs" },
+    { name = "ECS_MEDIA_REGION", value = var.aws_region },
+    { name = "ECS_MEDIA_CLUSTER", value = aws_ecs_cluster.production.arn },
+    { name = "ECS_MEDIA_TASK_DEFINITION", value = aws_ecs_task_definition.worker[0].arn },
+    { name = "ECS_MEDIA_CONTAINER_NAME", value = "application" },
+    { name = "ECS_MEDIA_SUBNET_IDS", value = join(",", aws_subnet.public[*].id) },
+    { name = "ECS_MEDIA_SECURITY_GROUP_IDS", value = aws_security_group.tasks.id },
+    { name = "ECS_MEDIA_ASSIGN_PUBLIC_IP", value = "true" }
+  ] : []
+
+  web_delivery_environment = var.enable_media_cloudfront ? [
+    { name = "AWS_S3_CUSTOM_DOMAIN", value = aws_cloudfront_distribution.media[0].domain_name },
+    { name = "AWS_CLOUDFRONT_KEY_ID", value = aws_cloudfront_public_key.media[0].id }
+  ] : []
+
+  web_delivery_secrets = var.enable_media_cloudfront ? [
+    { name = "AWS_CLOUDFRONT_PRIVATE_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:AWS_CLOUDFRONT_PRIVATE_KEY::" }
+  ] : []
+}
+
 resource "aws_ecs_task_definition" "application" {
-  count                    = var.container_image != "" ? 1 : 0
+  count                    = local.legacy_ecs_task_definitions_enabled ? 1 : 0
   family                   = local.name
+  skip_destroy             = true
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 512
@@ -549,8 +769,8 @@ resource "aws_ecs_task_definition" "application" {
     image        = var.container_image
     essential    = true
     portMappings = [{ containerPort = 8000, hostPort = 8000, protocol = "tcp" }]
-    environment  = local.common_environment
-    secrets      = local.common_secrets
+    environment  = concat(local.common_environment, local.media_dispatch_environment, local.web_delivery_environment)
+    secrets      = concat(local.common_secrets, local.web_delivery_secrets)
     healthCheck = {
       command     = ["CMD-SHELL", "python -c \"import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/health/live/', headers={'Host': 'marketing.duducaradmin.com'}); urllib.request.urlopen(req, timeout=3)\""]
       interval    = 30
@@ -567,11 +787,18 @@ resource "aws_ecs_task_definition" "application" {
       }
     }
   }])
+
+  tags = { Component = "web" }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_ecs_task_definition" "worker" {
-  count                    = var.container_image != "" ? 1 : 0
+  count                    = local.legacy_ecs_task_definitions_enabled ? 1 : 0
   family                   = "${local.name}-worker"
+  skip_destroy             = true
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 1024
@@ -598,11 +825,72 @@ resource "aws_ecs_task_definition" "worker" {
       }
     }
   }])
+
+  tags = { Component = "media-worker" }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_iam_role_policy" "web_media_dispatch" {
+  count = local.legacy_ecs_task_definitions_enabled ? 1 : 0
+  role  = aws_iam_role.web_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["ecs:RunTask"], Resource = [aws_ecs_task_definition.worker[0].arn] },
+      {
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = [aws_iam_role.execution.arn, aws_iam_role.worker_task.arn]
+        Condition = {
+          StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" }
+        }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecs:TagResource"]
+        Resource = ["arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.production.name}/*"]
+        Condition = {
+          StringEquals = { "ecs:CreateAction" = "RunTask" }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "scheduled_media_dispatch" {
+  count = local.legacy_ecs_task_definitions_enabled ? 1 : 0
+  role  = aws_iam_role.scheduled_task.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Effect = "Allow", Action = ["ecs:RunTask"], Resource = [aws_ecs_task_definition.worker[0].arn] },
+      {
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = [aws_iam_role.execution.arn, aws_iam_role.worker_task.arn]
+        Condition = {
+          StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" }
+        }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecs:TagResource"]
+        Resource = ["arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.production.name}/*"]
+        Condition = {
+          StringEquals = { "ecs:CreateAction" = "RunTask" }
+        }
+      }
+    ]
+  })
 }
 
 resource "aws_ecs_task_definition" "scheduled" {
-  count                    = var.container_image != "" ? 1 : 0
+  count                    = local.legacy_ecs_task_definitions_enabled ? 1 : 0
   family                   = "${local.name}-scheduled"
+  skip_destroy             = true
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
   cpu                      = 512
@@ -618,7 +906,7 @@ resource "aws_ecs_task_definition" "scheduled" {
     image       = var.container_image
     essential   = true
     command     = ["python", "manage.py", "check"]
-    environment = local.common_environment
+    environment = concat(local.common_environment, local.media_dispatch_environment)
     secrets     = local.task_secrets
     logConfiguration = {
       logDriver = "awslogs"
@@ -629,16 +917,24 @@ resource "aws_ecs_task_definition" "scheduled" {
       }
     }
   }])
+
+  tags = { Component = "scheduled" }
+
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 resource "aws_ecs_service" "web" {
-  count                  = var.enable_services ? 1 : 0
-  name                   = "web"
-  cluster                = aws_ecs_cluster.production.id
-  task_definition        = aws_ecs_task_definition.application[0].arn
-  desired_count          = 1
-  launch_type            = "FARGATE"
-  enable_execute_command = true
+  count                   = local.legacy_ecs_runtime_enabled && local.legacy_ecs_task_definitions_enabled && var.enable_legacy_alb ? 1 : 0
+  name                    = "web"
+  cluster                 = aws_ecs_cluster.production.id
+  task_definition         = aws_ecs_task_definition.application[0].arn
+  desired_count           = var.ecs_web_desired_count
+  launch_type             = "FARGATE"
+  enable_execute_command  = true
+  enable_ecs_managed_tags = true
+  propagate_tags          = "TASK_DEFINITION"
   deployment_circuit_breaker {
     enable   = true
     rollback = true
@@ -649,20 +945,22 @@ resource "aws_ecs_service" "web" {
     assign_public_ip = true
   }
   load_balancer {
-    target_group_arn = aws_lb_target_group.web.arn
+    target_group_arn = aws_lb_target_group.web[0].arn
     container_name   = "application"
     container_port   = 8000
   }
-  depends_on = [aws_lb_listener.https]
+  depends_on = [aws_lb_listener.https[0]]
 }
 
 resource "aws_ecs_service" "worker" {
-  count           = var.enable_services ? 1 : 0
-  name            = "media-worker"
-  cluster         = aws_ecs_cluster.production.id
-  task_definition = aws_ecs_task_definition.worker[0].arn
-  desired_count   = 1
-  launch_type     = "FARGATE"
+  count                   = local.legacy_ecs_runtime_enabled && local.legacy_ecs_task_definitions_enabled ? 1 : 0
+  name                    = "media-worker"
+  cluster                 = aws_ecs_cluster.production.id
+  task_definition         = aws_ecs_task_definition.worker[0].arn
+  desired_count           = var.enable_continuous_media_worker ? 1 : 0
+  launch_type             = "FARGATE"
+  enable_ecs_managed_tags = true
+  propagate_tags          = "TASK_DEFINITION"
   deployment_circuit_breaker {
     enable   = true
     rollback = true
@@ -683,22 +981,39 @@ resource "aws_iam_role" "events" {
 }
 
 resource "aws_iam_role_policy" "events" {
-  role = aws_iam_role.events.id
+  count = local.legacy_ecs_task_definitions_enabled ? 1 : 0
+  role  = aws_iam_role.events.id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["ecs:RunTask"], Resource = var.container_image != "" ? [aws_ecs_task_definition.scheduled[0].arn] : ["*"] },
-      { Effect = "Allow", Action = ["iam:PassRole"], Resource = [aws_iam_role.execution.arn, aws_iam_role.scheduled_task.arn] }
+      { Effect = "Allow", Action = ["ecs:RunTask"], Resource = [aws_ecs_task_definition.scheduled[0].arn] },
+      {
+        Effect   = "Allow"
+        Action   = ["iam:PassRole"]
+        Resource = [aws_iam_role.execution.arn, aws_iam_role.scheduled_task.arn]
+        Condition = {
+          StringEquals = { "iam:PassedToService" = "ecs-tasks.amazonaws.com" }
+        }
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["ecs:TagResource"]
+        Resource = ["arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${aws_ecs_cluster.production.name}/*"]
+        Condition = {
+          StringEquals = { "ecs:CreateAction" = "RunTask" }
+        }
+      }
     ]
   })
 }
 
 locals {
-  scheduled_tasks = var.enable_services ? {
-    fleet-health = { expression = "rate(30 minutes)", command = ["python", "manage.py", "evaluate_device_health"] },
-    playlists    = { expression = "rate(6 hours)", command = ["python", "manage.py", "evaluate_playlists"] },
-    retention    = { expression = "cron(30 17 * * ? *)", command = ["python", "manage.py", "apply_retention"] },
-    backup       = { expression = "cron(0 18 * * ? *)", command = ["python", "manage.py", "create_pilot_backup", "--output-dir", "/tmp/backups", "--skip-media"] }
+  scheduled_tasks = local.legacy_ecs_runtime_enabled && local.legacy_ecs_task_definitions_enabled ? {
+    fleet-health    = { expression = "rate(30 minutes)", command = ["python", "manage.py", "evaluate_device_health"] },
+    playlists       = { expression = "rate(6 hours)", command = ["python", "manage.py", "evaluate_playlists"] },
+    media-reconcile = { expression = "rate(15 minutes)", command = ["python", "manage.py", "reconcile_media_processing"] },
+    retention       = { expression = "cron(30 17 * * ? *)", command = ["python", "manage.py", "apply_retention"] },
+    backup          = { expression = "cron(0 18 * * ? *)", command = ["python", "manage.py", "create_postgres_backup", "--output-dir", "/tmp/backups"] }
   } : {}
 }
 
@@ -706,6 +1021,7 @@ resource "aws_cloudwatch_event_rule" "scheduled" {
   for_each            = local.scheduled_tasks
   name                = "${local.name}-${each.key}"
   schedule_expression = each.value.expression
+  state               = var.enable_ecs_schedules ? "ENABLED" : "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "scheduled" {
@@ -718,9 +1034,11 @@ resource "aws_cloudwatch_event_target" "scheduled" {
     containerOverrides = [{ name = "application", command = each.value.command }]
   })
   ecs_target {
-    task_definition_arn = aws_ecs_task_definition.scheduled[0].arn
-    launch_type         = "FARGATE"
-    task_count          = 1
+    task_definition_arn     = aws_ecs_task_definition.scheduled[0].arn
+    launch_type             = "FARGATE"
+    task_count              = 1
+    enable_ecs_managed_tags = true
+    propagate_tags          = "TASK_DEFINITION"
     network_configuration {
       subnets          = aws_subnet.public[*].id
       security_groups  = [aws_security_group.tasks.id]
@@ -744,13 +1062,62 @@ resource "aws_cloudwatch_event_rule" "ecs_task_failure" {
   })
 }
 
+resource "aws_iam_role" "eventbridge_sns" {
+  name = "${local.name}-eventbridge-sns"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Service = "events.amazonaws.com"
+      }
+      Action = "sts:AssumeRole"
+      Condition = {
+        StringEquals = {
+          "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+        }
+        ArnEquals = {
+          "aws:SourceArn" = aws_cloudwatch_event_rule.ecs_task_failure.arn
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "eventbridge_sns" {
+  role = aws_iam_role.eventbridge_sns.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "PublishOnlyOperationalAlerts"
+        Effect   = "Allow"
+        Action   = ["sns:Publish"]
+        Resource = [aws_sns_topic.operations.arn]
+      },
+      {
+        Sid      = "UseOnlyOperationalAlertKey"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+        Resource = [aws_kms_key.production.arn]
+      }
+    ]
+  })
+}
+
 resource "aws_cloudwatch_event_target" "ecs_task_failure" {
   rule      = aws_cloudwatch_event_rule.ecs_task_failure.name
   target_id = "operations"
   arn       = aws_sns_topic.operations.arn
+  role_arn  = aws_iam_role.eventbridge_sns.arn
+
+  depends_on = [aws_iam_role_policy.eventbridge_sns]
 }
 
 resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
+  count               = var.enable_legacy_alb ? 1 : 0
   alarm_name          = "${local.name}-alb-5xx"
   namespace           = "AWS/ApplicationELB"
   metric_name         = "HTTPCode_Target_5XX_Count"
@@ -759,12 +1126,13 @@ resource "aws_cloudwatch_metric_alarm" "alb_5xx" {
   evaluation_periods  = 1
   threshold           = 5
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  dimensions          = { LoadBalancer = aws_lb.production.arn_suffix }
+  dimensions          = { LoadBalancer = aws_lb.production[0].arn_suffix }
   alarm_actions       = [aws_sns_topic.operations.arn]
   ok_actions          = [aws_sns_topic.operations.arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
+  count               = var.enable_legacy_alb ? 1 : 0
   alarm_name          = "${local.name}-unhealthy-targets"
   namespace           = "AWS/ApplicationELB"
   metric_name         = "UnHealthyHostCount"
@@ -774,14 +1142,15 @@ resource "aws_cloudwatch_metric_alarm" "unhealthy_targets" {
   threshold           = 1
   comparison_operator = "GreaterThanOrEqualToThreshold"
   dimensions = {
-    LoadBalancer = aws_lb.production.arn_suffix
-    TargetGroup  = aws_lb_target_group.web.arn_suffix
+    LoadBalancer = aws_lb.production[0].arn_suffix
+    TargetGroup  = aws_lb_target_group.web[0].arn_suffix
   }
   alarm_actions = [aws_sns_topic.operations.arn]
   ok_actions    = [aws_sns_topic.operations.arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "database_storage" {
+  count               = var.enable_legacy_rds ? 1 : 0
   alarm_name          = "${local.name}-database-low-storage"
   namespace           = "AWS/RDS"
   metric_name         = "FreeStorageSpace"
@@ -790,12 +1159,13 @@ resource "aws_cloudwatch_metric_alarm" "database_storage" {
   evaluation_periods  = 2
   threshold           = 5368709120
   comparison_operator = "LessThanThreshold"
-  dimensions          = { DBInstanceIdentifier = aws_db_instance.production.id }
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.production[0].id }
   alarm_actions       = [aws_sns_topic.operations.arn]
   ok_actions          = [aws_sns_topic.operations.arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "database_cpu" {
+  count               = var.enable_legacy_rds ? 1 : 0
   alarm_name          = "${local.name}-database-high-cpu"
   namespace           = "AWS/RDS"
   metric_name         = "CPUUtilization"
@@ -804,12 +1174,13 @@ resource "aws_cloudwatch_metric_alarm" "database_cpu" {
   evaluation_periods  = 3
   threshold           = 80
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  dimensions          = { DBInstanceIdentifier = aws_db_instance.production.id }
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.production[0].id }
   alarm_actions       = [aws_sns_topic.operations.arn]
   ok_actions          = [aws_sns_topic.operations.arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "database_connections" {
+  count               = var.enable_legacy_rds ? 1 : 0
   alarm_name          = "${local.name}-database-high-connections"
   namespace           = "AWS/RDS"
   metric_name         = "DatabaseConnections"
@@ -818,30 +1189,9 @@ resource "aws_cloudwatch_metric_alarm" "database_connections" {
   evaluation_periods  = 2
   threshold           = 50
   comparison_operator = "GreaterThanOrEqualToThreshold"
-  dimensions          = { DBInstanceIdentifier = aws_db_instance.production.id }
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.production[0].id }
   alarm_actions       = [aws_sns_topic.operations.arn]
   ok_actions          = [aws_sns_topic.operations.arn]
-}
-
-resource "aws_cloudwatch_metric_alarm" "service_task_count" {
-  for_each = var.enable_services ? {
-    web    = aws_ecs_service.web[0].name
-    worker = aws_ecs_service.worker[0].name
-  } : {}
-  alarm_name          = "${local.name}-${each.key}-task-count"
-  namespace           = "ECS/ContainerInsights"
-  metric_name         = "RunningTaskCount"
-  statistic           = "Minimum"
-  period              = 60
-  evaluation_periods  = 3
-  threshold           = 1
-  comparison_operator = "LessThanThreshold"
-  dimensions = {
-    ClusterName = aws_ecs_cluster.production.name
-    ServiceName = each.value
-  }
-  alarm_actions = [aws_sns_topic.operations.arn]
-  ok_actions    = [aws_sns_topic.operations.arn]
 }
 
 resource "aws_cloudwatch_metric_alarm" "scheduled_failures" {

@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply DUDU retention rules daily
+
+[Timer]
+OnCalendar=*-*-* 17:30:00 UTC
+Persistent=true
+RandomizedDelaySec=5min
+Unit=duducar-command@retention.service
+
+[Install]
+WantedBy=timers.target

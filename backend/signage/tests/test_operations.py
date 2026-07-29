@@ -1,17 +1,32 @@
+import hashlib
+import os
 import secrets
+import subprocess
 from datetime import date
 from io import StringIO
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from django.conf import settings
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.management import CommandError, call_command
 from django.test import Client, override_settings
+from storages.backends.s3 import S3Storage
 
-from config.settings import regional_s3_endpoint
+from config.settings import regional_s3_endpoint, secret_env_or_file
 from signage.models import HardwareQualification, User
 
 TEST_SECRET_KEY = secrets.token_urlsafe(32)
+TEST_CLOUDFRONT_PRIVATE_KEY = (
+    rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    .private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    .decode("ascii")
+)
 
 
 @pytest.mark.django_db
@@ -71,6 +86,49 @@ def test_s3_endpoint_uses_configured_region():
     )
 
 
+def test_secret_file_loader_requires_private_unambiguous_file(
+    tmp_path,
+    monkeypatch,
+):
+    secret_file = tmp_path / "application-secret"
+    secret_file.write_text("multiline\nsecret\n", encoding="utf-8")
+    secret_file.chmod(0o600)
+    monkeypatch.delenv("TEST_APPLICATION_SECRET", raising=False)
+    monkeypatch.setenv("TEST_APPLICATION_SECRET_FILE", str(secret_file))
+
+    assert secret_env_or_file("TEST_APPLICATION_SECRET") == "multiline\nsecret"
+
+    secret_file.chmod(0o644)
+    with pytest.raises(ImproperlyConfigured, match="group or other"):
+        secret_env_or_file("TEST_APPLICATION_SECRET")
+
+    secret_file.chmod(0o600)
+    monkeypatch.setenv("TEST_APPLICATION_SECRET", "ambiguous")
+    with pytest.raises(ImproperlyConfigured, match="either"):
+        secret_env_or_file("TEST_APPLICATION_SECRET")
+
+
+@override_settings(
+    AWS_STORAGE_BUCKET_NAME="private-media",
+    AWS_S3_CUSTOM_DOMAIN="media.example.cloudfront.net",
+    AWS_CLOUDFRONT_KEY_ID="KTEST",
+    AWS_CLOUDFRONT_KEY=TEST_CLOUDFRONT_PRIVATE_KEY,
+    AWS_QUERYSTRING_AUTH=True,
+    AWS_QUERYSTRING_EXPIRE=900,
+)
+def test_s3_storage_builds_short_lived_cloudfront_signed_url():
+    storage = S3Storage()
+
+    url = storage.url("validated/poster.png")
+
+    assert url.startswith(
+        "https://media.example.cloudfront.net/validated/poster.png?"
+    )
+    assert "Key-Pair-Id=KTEST" in url
+    assert "Signature=" in url
+    assert "Expires=" in url
+
+
 @pytest.mark.django_db
 def test_pilot_backup_can_be_created_and_verified(tmp_path):
     User.objects.create_user(
@@ -93,6 +151,84 @@ def test_pilot_backup_can_be_created_and_verified(tmp_path):
 
 
 @override_settings(
+    DATABASES={
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": "signage",
+            "USER": "signage",
+            "PASSWORD": "database-secret",
+            "HOST": "127.0.0.1",
+            "PORT": 5432,
+            "OPTIONS": {"sslmode": "require"},
+        }
+    },
+    PILOT_BACKUP_S3_BUCKET="backup-bucket",
+)
+def test_postgres_backup_is_custom_format_validated_hashed_and_uploaded(
+    tmp_path,
+    monkeypatch,
+):
+    process_calls = []
+    uploads = []
+    old_archive = tmp_path / "duducar-signage-postgres-20000101T000000Z.dump"
+    old_digest = tmp_path / "duducar-signage-postgres-20000101T000000Z.dump.sha256"
+    old_archive.write_bytes(b"expired backup")
+    old_digest.write_text("expired", encoding="ascii")
+    os.utime(old_archive, (946684800, 946684800))
+    os.utime(old_digest, (946684800, 946684800))
+
+    def fake_which(executable):
+        return f"/usr/bin/{executable}"
+
+    def fake_run(command, **kwargs):
+        process_calls.append((command, kwargs))
+        if command[0].endswith("pg_dump"):
+            destination = command[command.index("--file") + 1]
+            with open(destination, "wb") as archive:
+                archive.write(b"test custom-format archive")
+            assert "database-secret" not in command
+            assert kwargs["env"]["PGPASSWORD"] == "database-secret"
+        return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+
+    class S3Client:
+        def upload_file(self, source, bucket, key, ExtraArgs=None):
+            uploads.append((source, bucket, key, ExtraArgs))
+
+    monkeypatch.setattr(
+        "signage.management.commands.create_postgres_backup.shutil.which",
+        fake_which,
+    )
+    monkeypatch.setattr(
+        "signage.management.commands.create_postgres_backup.subprocess.run",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        "signage.management.commands.create_postgres_backup.boto3.client",
+        lambda service: S3Client(),
+    )
+    out = StringIO()
+
+    call_command(
+        "create_postgres_backup",
+        output_dir=str(tmp_path),
+        stdout=out,
+    )
+
+    archive = next(tmp_path.glob("*.dump"))
+    digest_file = next(tmp_path.glob("*.dump.sha256"))
+    expected = hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert "--format=custom" in process_calls[0][0]
+    assert process_calls[1][0][1] == "--list"
+    assert digest_file.read_text(encoding="ascii").startswith(expected)
+    assert len(uploads) == 2
+    assert all(upload[2].startswith("database-backups/") for upload in uploads)
+    assert uploads[0][3]["Metadata"]["sha256"] == expected
+    assert "database-secret" not in out.getvalue()
+    assert not old_archive.exists()
+    assert not old_digest.exists()
+
+
+@override_settings(
     DEBUG=True,
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
     AWS_STORAGE_BUCKET_NAME="",
@@ -110,8 +246,20 @@ def test_production_readiness_fails_for_unsafe_environment():
 @override_settings(
     DEBUG=False,
     SECRET_KEY=TEST_SECRET_KEY,
-    DATABASES={"default": {"ENGINE": "django.db.backends.postgresql", "NAME": "x"}},
+    DATABASES={
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": "x",
+            "PASSWORD": "test-password",
+        }
+    },
     AWS_STORAGE_BUCKET_NAME="duducar-signage-production-media",
+    AWS_S3_CUSTOM_DOMAIN="media.example.cloudfront.net",
+    AWS_CLOUDFRONT_KEY_ID="KTEST",
+    AWS_CLOUDFRONT_KEY=TEST_CLOUDFRONT_PRIVATE_KEY,
+    AWS_QUERYSTRING_AUTH=True,
+    AWS_QUERYSTRING_EXPIRE=900,
+    PILOT_BACKUP_S3_BUCKET="duducar-signage-production-backups",
     ALLOWED_HOSTS=["marketing.duducaradmin.com", "api.marketing.duducaradmin.com"],
     CSRF_TRUSTED_ORIGINS=["https://marketing.duducaradmin.com"],
     SESSION_COOKIE_SECURE=True,
@@ -127,6 +275,13 @@ def test_production_readiness_fails_for_unsafe_environment():
         '{"type":"service_account","project_id":"duducar-signage-production",'
         '"private_key":"test-only-key","client_email":"integrity@example.test"}'
     ),
+    MEDIA_PROCESSING_DISPATCH_BACKEND="ecs",
+    ECS_MEDIA_REGION="ap-southeast-5",
+    ECS_MEDIA_CLUSTER="production",
+    ECS_MEDIA_TASK_DEFINITION="production-worker:1",
+    ECS_MEDIA_CONTAINER_NAME="application",
+    ECS_MEDIA_SUBNET_IDS=["subnet-a"],
+    ECS_MEDIA_SECURITY_GROUP_IDS=["sg-worker"],
 )
 def test_production_readiness_passes_for_configured_environment(monkeypatch):
     monkeypatch.setattr(
@@ -140,13 +295,42 @@ def test_production_readiness_passes_for_configured_environment(monkeypatch):
     assert "production deployment readiness checks passed" in out.getvalue()
 
 
+@override_settings(
+    DEBUG=False,
+    SECRET_KEY=TEST_SECRET_KEY,
+    DATABASES={
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": "x",
+            "PASSWORD": "test-password",
+        }
+    },
+    AWS_STORAGE_BUCKET_NAME="duducar-signage-production-media",
+)
+def test_media_worker_readiness_does_not_require_web_only_secrets(monkeypatch):
+    monkeypatch.setattr(
+        "signage.management.commands.check_deployment_readiness.shutil.which",
+        lambda executable: f"/usr/bin/{executable}",
+    )
+    out = StringIO()
+
+    call_command(
+        "check_deployment_readiness",
+        environment="production",
+        component="media-worker",
+        stdout=out,
+    )
+
+    assert "production deployment readiness checks passed" in out.getvalue()
+
+
 @pytest.mark.django_db
 @override_settings(
     DEBUG=False,
     ALLOWED_HOSTS=["marketing.duducaradmin.com", "api.marketing.duducaradmin.com"],
     SECURE_SSL_REDIRECT=True,
 )
-def test_health_checks_allow_private_alb_host_without_weakening_host_validation():
+def test_health_checks_bypass_host_validation_only_for_health_endpoints():
     client = Client()
 
     live = client.get("/health/live/", HTTP_HOST="10.40.0.19:8000")

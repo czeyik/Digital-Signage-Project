@@ -1,0 +1,29 @@
+# RETIRED MIGRATION-ONLY CONFIGURATION.
+# The current runtime guard refuses this file; do not use it on production.
+{
+	admin off
+	auto_https disable_redirects
+}
+
+http:// {
+	@health path /health/live/
+	handle @health {
+		reverse_proxy duducar-web:8000 {
+			header_up Host marketing.duducaradmin.com
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto https
+		}
+	}
+	respond 404
+}
+
+marketing.duducaradmin.com, api.marketing.duducaradmin.com {
+	tls internal
+	encode zstd gzip
+	reverse_proxy duducar-web:8000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}

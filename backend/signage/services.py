@@ -5,6 +5,7 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import uuid
 from datetime import timedelta
 from pathlib import Path
 
@@ -47,7 +48,7 @@ def audit(actor, action, target, metadata=None):
 
 
 def client_ip(request):
-    """Return the ALB-appended address, not a spoofable left-most XFF value."""
+    """Return the trusted proxy-set address, not a spoofable left-most XFF value."""
     forwarded = request.META.get("HTTP_X_FORWARDED_FOR", "")
     if getattr(settings, "SECURE_PROXY_SSL_HEADER", None) and forwarded:
         return forwarded.split(",")[-1].strip()
@@ -116,6 +117,7 @@ def media_has_current_or_future_references(asset):
 @transaction.atomic
 def delete_media_binary(asset, actor):
     locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+    was_processing = locked.status == MediaAsset.Status.PROCESSING
     if media_has_current_or_future_references(locked):
         raise ValidationError(
             "Media is referenced by a draft, current, or future playlist."
@@ -127,12 +129,19 @@ def delete_media_binary(asset, actor):
             setattr(locked, field_name, "")
     locked.status = MediaAsset.Status.ARCHIVED
     locked.archived_at = timezone.now()
+    locked.processing_token = None
+    locked.processing_lease_expires_at = None
+    if was_processing:
+        locked.processing_finished_at = timezone.now()
     locked.save(
         update_fields=[
             "source_file",
             "normalized_file",
             "status",
             "archived_at",
+            "processing_token",
+            "processing_lease_expires_at",
+            "processing_finished_at",
             "updated_at",
         ]
     )
@@ -251,15 +260,109 @@ def copy_source_to_temporary_file(asset, directory):
     return source_path
 
 
-def normalized_media_name(asset, source_path):
+def normalized_media_name(asset, source_path, processing_token):
     if asset.kind == MediaAsset.Kind.VIDEO:
-        return f"{asset.id}-normalized.mp4"
-    return f"{asset.id}{source_path.suffix.lower()}"
+        filename = f"{asset.id}-normalized.mp4"
+    else:
+        filename = f"{asset.id}{source_path.suffix.lower()}"
+    return f"{asset.id}/{processing_token}/{filename}"
+
+
+@transaction.atomic
+def _start_media_processing_attempt(asset_id):
+    asset = MediaAsset.objects.select_for_update().get(pk=asset_id)
+    if asset.status != MediaAsset.Status.QUARANTINED:
+        return None
+    now = timezone.now()
+    asset.status = MediaAsset.Status.PROCESSING
+    asset.processing_attempts += 1
+    asset.processing_token = uuid.uuid4()
+    asset.processing_started_at = now
+    asset.processing_lease_expires_at = now + timedelta(
+        seconds=settings.MEDIA_PROCESSING_LEASE_SECONDS
+    )
+    asset.processing_finished_at = None
+    asset.save(
+        update_fields=[
+            "status",
+            "processing_attempts",
+            "processing_token",
+            "processing_started_at",
+            "processing_lease_expires_at",
+            "processing_finished_at",
+            "updated_at",
+        ]
+    )
+    return asset.processing_token
+
+
+@transaction.atomic
+def _finalize_media_processing(asset, processing_token, staged_name):
+    locked = MediaAsset.objects.select_for_update().get(pk=asset.pk)
+    if (
+        locked.status != MediaAsset.Status.PROCESSING
+        or locked.processing_token != processing_token
+    ):
+        return False
+
+    old_normalized_name = (
+        locked.normalized_file.name if locked.normalized_file else ""
+    )
+    for field_name in (
+        "sha256",
+        "file_size",
+        "mime_type",
+        "duration_ms",
+        "width",
+        "height",
+        "rejection_reason",
+    ):
+        setattr(locked, field_name, getattr(asset, field_name))
+    locked.status = asset.status
+    if asset.status == MediaAsset.Status.READY:
+        locked.normalized_file = staged_name
+    locked.processing_token = None
+    locked.processing_lease_expires_at = None
+    locked.processing_finished_at = timezone.now()
+    locked.save(
+        update_fields=[
+            "normalized_file",
+            "sha256",
+            "file_size",
+            "mime_type",
+            "duration_ms",
+            "width",
+            "height",
+            "rejection_reason",
+            "status",
+            "processing_token",
+            "processing_lease_expires_at",
+            "processing_finished_at",
+            "updated_at",
+        ]
+    )
+    if (
+        old_normalized_name
+        and staged_name
+        and old_normalized_name != staged_name
+    ):
+        storage = asset.normalized_file.storage
+        transaction.on_commit(
+            lambda name=old_normalized_name: storage.delete(name)
+        )
+    return True
 
 
 def inspect_media(asset, require_malware_scanner=True):
-    asset.status = MediaAsset.Status.PROCESSING
-    asset.save(update_fields=["status", "updated_at"])
+    processing_token = asset.processing_token
+    if asset.status != MediaAsset.Status.PROCESSING or not processing_token:
+        processing_token = _start_media_processing_attempt(asset.pk)
+        if not processing_token:
+            asset.refresh_from_db()
+            return asset
+        asset.refresh_from_db()
+    staged_name = ""
+    storage = asset.normalized_file.storage
     try:
         with tempfile.TemporaryDirectory() as temporary:
             source = copy_source_to_temporary_file(asset, temporary)
@@ -334,12 +437,12 @@ def inspect_media(asset, require_malware_scanner=True):
             with output.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
                     digest.update(chunk)
-            if asset.normalized_file:
-                asset.normalized_file.delete(save=False)
             with output.open("rb") as handle:
-                asset.normalized_file.save(
-                    normalized_media_name(asset, source), File(handle), save=False
+                generated_name = asset.normalized_file.field.generate_filename(
+                    asset,
+                    normalized_media_name(asset, source, processing_token),
                 )
+                staged_name = storage.save(generated_name, File(handle))
             asset.sha256 = digest.hexdigest()
             asset.file_size = output.stat().st_size
             asset.mime_type = (
@@ -356,8 +459,10 @@ def inspect_media(asset, require_malware_scanner=True):
     ) as exc:
         asset.status = MediaAsset.Status.REJECTED
         asset.rejection_reason = str(exc)[:255]
-    finally:
-        asset.save()
+    finalized = _finalize_media_processing(asset, processing_token, staged_name)
+    if not finalized and staged_name:
+        storage.delete(staged_name)
+    asset.refresh_from_db()
     return asset
 
 
