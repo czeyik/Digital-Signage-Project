@@ -386,6 +386,14 @@ class MediaAsset(TimeStampedModel):
     rejection_reason = models.CharField(max_length=255, blank=True)
     uploaded_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     archived_at = models.DateTimeField(null=True, blank=True)
+    dispatch_attempts = models.PositiveIntegerField(default=0)
+    last_dispatch_attempt_at = models.DateTimeField(null=True, blank=True)
+    dispatched_at = models.DateTimeField(null=True, blank=True)
+    processing_attempts = models.PositiveIntegerField(default=0)
+    processing_token = models.UUIDField(null=True, blank=True, editable=False)
+    processing_started_at = models.DateTimeField(null=True, blank=True)
+    processing_lease_expires_at = models.DateTimeField(null=True, blank=True)
+    processing_finished_at = models.DateTimeField(null=True, blank=True)
 
     def clean(self):
         if self.kind == self.Kind.IMAGE and self.duration_ms != 10_000:

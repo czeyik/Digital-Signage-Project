@@ -1,0 +1,20 @@
+# CURRENT PRODUCTION CONFIGURATION.
+# The historical filename is retained to avoid changing the live release path.
+{
+	admin off
+	email support@duducar.co
+}
+
+http:// {
+	# Caddy's internal ACME handler is evaluated before this redirect.
+	redir https://{host}{uri} permanent
+}
+
+marketing.duducaradmin.com, api.marketing.duducaradmin.com {
+	encode zstd gzip
+	reverse_proxy duducar-web:8000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}

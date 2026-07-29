@@ -1,0 +1,33 @@
+# Non-secret control-only reference for the live USD 30 production stack.
+#
+# This file is not loaded automatically by Terraform. Copy these values into
+# the reviewed, untracked terraform.tfvars only after comparing them with the
+# existing production state. Do not pass this file directly to Terraform, use
+# it to bootstrap a new environment, or treat the historical RDS confirmation
+# as authorization to delete a database.
+
+# Current Django and local PostgreSQL run on EC2. Keep this deprecated outer
+# compatibility gate false alongside the decisive legacy-runtime guard.
+enable_services = false
+
+# Completed legacy-resource decommission state. The final snapshot fields are
+# immutable historical evidence for this production state.
+enable_legacy_ecs_runtime             = false
+enable_legacy_alb                     = false
+enable_legacy_rds                     = false
+legacy_rds_deletion_protection        = false
+legacy_rds_final_snapshot_identifier  = "duducar-signage-production-final-20260728t031513z"
+confirm_legacy_rds_final_snapshot     = true
+
+ecs_web_desired_count            = 0
+enable_ecs_schedules             = false
+enable_continuous_media_worker   = false
+enable_container_insights        = false
+
+application_origin      = "ec2"
+enable_ec2_target       = true
+enable_media_cloudfront = true
+enable_ec2_acme_bridge  = false
+
+# Authoritative project-tagged production budget.
+migration_budget_usd = 30

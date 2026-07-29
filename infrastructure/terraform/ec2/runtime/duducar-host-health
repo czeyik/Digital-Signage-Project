@@ -1,0 +1,61 @@
+#!/bin/bash
+set -euo pipefail
+
+host_config=/etc/duducar/host.env
+set -a
+source "$host_config"
+set +a
+
+minimum_free=${HOST_MIN_FREE_BYTES:-5368709120}
+maximum_backup_age=${HOST_BACKUP_MAX_AGE_SECONDS:-108000}
+alert=/usr/local/sbin/duducar-alert
+
+free_bytes=$(df --output=avail -B1 /srv/duducar | tail -n 1 | tr -d ' ')
+if [ "$free_bytes" -lt "$minimum_free" ]; then
+  "$alert" --problem disk-low "The production EC2 data volume has less than 5 GB free."
+else
+  "$alert" --clear disk-low "The production EC2 data volume has recovered above 5 GB free."
+fi
+
+latest_backup=$(
+  find /srv/duducar/backups \
+    -maxdepth 1 \
+    -type f \
+    -name 'duducar-signage-postgres-*.dump' \
+    -printf '%T@ %p\n' |
+    sort -nr |
+    awk 'NR == 1 { sub(/^[^ ]+ /, ""); newest = $0 } END { print newest }'
+)
+
+backup_stale=true
+if [ -n "$latest_backup" ] && [ -f "$latest_backup" ]; then
+  backup_age=$(($(date +%s) - $(stat -c %Y "$latest_backup")))
+  if [ "$backup_age" -le "$maximum_backup_age" ]; then
+    backup_stale=false
+  fi
+fi
+
+if [ "$backup_stale" = true ]; then
+  "$alert" --problem backup-stale "No successful local PostgreSQL backup is newer than 30 hours."
+else
+  "$alert" --clear backup-stale "A current PostgreSQL backup is present on the production EC2 host."
+fi
+
+probe_public_https() {
+  key=$1
+  hostname=$2
+
+  if curl \
+    --fail \
+    --silent \
+    --show-error \
+    --max-time 10 \
+    "https://${hostname}/health/ready/" >/dev/null; then
+    "$alert" --clear "$key" "The public HTTPS readiness path for ${hostname} has recovered."
+  else
+    "$alert" --problem "$key" "The production host cannot reach the public HTTPS readiness path for ${hostname}."
+  fi
+}
+
+probe_public_https dashboard-public-https marketing.duducaradmin.com
+probe_public_https api-public-https api.marketing.duducaradmin.com

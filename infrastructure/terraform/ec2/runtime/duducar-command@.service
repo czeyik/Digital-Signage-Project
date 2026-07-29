@@ -1,0 +1,14 @@
+[Unit]
+Description=DUDU signage local systemd command %i
+Requires=duducar.service
+After=duducar.service
+OnFailure=duducar-alert@%n.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/local/sbin/duducar-command %i
+ExecStartPost=/usr/local/sbin/duducar-alert --clear %n "The local DUDU host command is succeeding again: %n"
+TimeoutStartSec=30min

@@ -1,10 +1,54 @@
+# CURRENT PRODUCTION OPERATOR TEMPLATE — not a new-environment bootstrap file.
+#
+# Never overwrite the reviewed, gitignored terraform.tfvars with this example.
+# Copy only deliberate values after comparing them with the current state.
+# The image digest and CloudFront public key are empty on purpose so a blind
+# copy fails the Terraform safety checks before it can change production.
+
 operations_email              = "operations@duducar.co"
 smtp_host                     = "smtp.example.duducar.co"
 smtp_port                     = 587
 play_integrity_project_number = "123456789012"
-monthly_budget_usd            = 115
 
-# Leave false for the first apply. Populate Secrets Manager and push the image,
-# then set the immutable image URI and enable the services.
-enable_services = false
+# Existing account-wide/shared-workload guard. This is not the project target.
+monthly_budget_usd = 115
+
+# Authoritative Project=duducar-signage production target.
+migration_budget_usd     = 30
+budget_project_tag_value = "duducar-signage"
+
+# Pin the current ARM64 backend image by digest. The EC2 release configuration
+# and isolated media-worker task must use the same reviewed release.
 container_image = ""
+
+# Deprecated outer compatibility gate. Current Django runs on EC2, and the
+# decisive enable_legacy_ecs_runtime guard below remains false.
+enable_services = false
+
+# Completed decommission state. These values are historical state guards, not
+# instructions to create or delete another stack. The snapshot identifier must
+# remain the recorded final snapshot for this production state.
+enable_legacy_ecs_runtime            = false
+enable_legacy_alb                    = false
+enable_legacy_rds                    = false
+legacy_rds_deletion_protection       = false
+legacy_rds_final_snapshot_identifier = "duducar-signage-production-final-20260728t031513z"
+confirm_legacy_rds_final_snapshot    = true
+
+# There is no ECS web service, EventBridge application schedule, continuous
+# media worker, or paid Container Insights in current production.
+ecs_web_desired_count          = 0
+enable_ecs_schedules           = false
+enable_continuous_media_worker = false
+enable_container_insights      = false
+
+# Current USD 30 production host and private media delivery.
+application_origin                    = "ec2"
+enable_ec2_target                     = true
+ec2_target_instance_type              = "t4g.small"
+ec2_target_termination_protection     = true
+enable_media_cloudfront               = true
+enable_ec2_acme_bridge                = false
+
+# Supply only the reviewed public half. Keep the private key in Secrets Manager.
+cloudfront_public_key_pem = ""

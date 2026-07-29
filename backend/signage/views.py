@@ -25,6 +25,7 @@ from .forms import (
     PlatformSettingsForm,
     PlaylistForm,
 )
+from .media_dispatch import queue_media_processing
 from .models import (
     Alert,
     AuditEvent,
@@ -261,13 +262,15 @@ def media_delete(request, media_id):
 def media_upload(request):
     form = MediaUploadForm(request.POST or None, request.FILES or None)
     if request.method == "POST" and form.is_valid():
-        asset = form.save(commit=False)
-        asset.uploaded_by = request.user
-        asset.save()
-        audit(request.user, "media.upload", asset)
+        with transaction.atomic():
+            asset = form.save(commit=False)
+            asset.uploaded_by = request.user
+            asset.save()
+            audit(request.user, "media.upload", asset)
+            queue_media_processing(asset.id)
         messages.success(
             request,
-            "Upload quarantined. Run the media processor before using it.",
+            "Upload quarantined and queued for validation.",
         )
         return redirect("media-list")
     return render(request, "signage/form.html", {"form": form, "title": "Upload media"})

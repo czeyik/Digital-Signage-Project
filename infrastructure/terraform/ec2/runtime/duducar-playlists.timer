@@ -1,0 +1,11 @@
+[Unit]
+Description=Evaluate DUDU playlist scheduling every six hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+AccuracySec=5min
+Unit=duducar-command@playlists.service
+
+[Install]
+WantedBy=timers.target

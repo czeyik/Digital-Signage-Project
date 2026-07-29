@@ -143,6 +143,14 @@ class MediaAssetAdmin(admin.ModelAdmin):
         "width",
         "height",
         "rejection_reason",
+        "dispatch_attempts",
+        "last_dispatch_attempt_at",
+        "dispatched_at",
+        "processing_attempts",
+        "processing_token",
+        "processing_started_at",
+        "processing_lease_expires_at",
+        "processing_finished_at",
     )
 
 

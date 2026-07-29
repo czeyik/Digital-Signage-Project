@@ -1,0 +1,101 @@
+#!/bin/bash
+set -euo pipefail
+
+runtime_dir=/run/duducar
+release_config=/etc/duducar/release.env
+
+run_owner_command() {
+  database_name=$1
+  shift
+  if [ ! -r "$release_config" ]; then
+    echo "Missing reviewed release configuration: $release_config" >&2
+    exit 1
+  fi
+  set -a
+  source "$release_config"
+  set +a
+  docker run --rm \
+    --network duducar \
+    --log-driver journald \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
+    --env-file "$runtime_dir/application.env" \
+    --env DB_NAME="$database_name" \
+    --env DB_USER=signage_owner \
+    --env DB_PASSWORD_FILE=/run/duducar/database-owner/database-owner-password \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m \
+    --volume "$runtime_dir/backend-secrets:/run/duducar/backend-secrets:ro" \
+    --volume "$runtime_dir/database-owner:/run/duducar/database-owner:ro" \
+    "$BACKEND_IMAGE" \
+    python manage.py "$@"
+}
+
+command_name=${1:-}
+database_name=${2:-signage}
+if ! [[ "$database_name" =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
+  echo "Database name must be a lowercase PostgreSQL identifier." >&2
+  exit 2
+fi
+case "$command_name" in
+  health)
+    args=(evaluate_device_health)
+    ;;
+  playlists)
+    args=(evaluate_playlists)
+    ;;
+  media-reconcile)
+    args=(reconcile_media_processing)
+    ;;
+  retention)
+    args=(apply_retention)
+    ;;
+  backup)
+    args=(create_postgres_backup --output-dir /backups)
+    ;;
+  migrate)
+    run_owner_command "$database_name" migrate --noinput
+    exit
+    ;;
+  migration-check)
+    run_owner_command "$database_name" migrate --check
+    exit
+    ;;
+  grant-runtime)
+    docker exec duducar-postgres \
+      psql \
+      --set ON_ERROR_STOP=1 \
+      --username duducar_admin \
+      --dbname "$database_name" \
+      --file /run/postgres-config/runtime-grants.sql
+    exit
+    ;;
+  readiness)
+    args=(check_deployment_readiness --environment production --component web)
+    ;;
+  *)
+    echo "Unknown managed command alias: $command_name" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$command_name" = "health" ]; then
+  status=0
+  docker exec duducar-web python manage.py "${args[@]}" || status=$?
+  /usr/local/sbin/duducar-host-health || status=$?
+  exit "$status"
+fi
+
+docker exec duducar-web python manage.py "${args[@]}"
+
+if [ "$command_name" = "backup" ]; then
+  find /srv/duducar/backups \
+    -maxdepth 1 \
+    -type f \
+    -name 'duducar-signage-postgres-*' \
+    -mtime +30 \
+    -delete
+fi

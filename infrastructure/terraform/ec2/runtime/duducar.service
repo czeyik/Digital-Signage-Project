@@ -1,0 +1,21 @@
+[Unit]
+Description=DUDU signage Caddy, Django, and PostgreSQL stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/duducar
+OnFailure=duducar-alert@%n.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+UMask=0077
+ExecStartPre=/usr/local/sbin/render-duducar-runtime-env
+ExecStart=/usr/local/sbin/duducar-stack start
+ExecStartPost=/usr/local/sbin/duducar-alert --clear duducar.service "The DUDU production stack is healthy again."
+ExecStop=/usr/local/sbin/duducar-stack stop
+TimeoutStartSec=10min
+TimeoutStopSec=2min
+
+[Install]
+WantedBy=multi-user.target

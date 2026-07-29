@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apk upgrade --no-cache \
-    && apk add --no-cache ffmpeg clamav freshclam \
+    && apk add --no-cache ffmpeg clamav freshclam postgresql16-client \
     && sed -i 's|^NotifyClamd |# NotifyClamd |' /etc/clamav/freshclam.conf
 
 WORKDIR /app

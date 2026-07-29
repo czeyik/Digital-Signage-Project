@@ -1,0 +1,28 @@
+# RETIRED ALB-BRIDGE MIGRATION CONFIGURATION.
+# The current runtime guard refuses this file; do not use it on production.
+{
+	admin off
+	email support@duducar.co
+}
+
+http:// {
+	@health path /health/live/
+	handle @health {
+		reverse_proxy duducar-web:8000 {
+			header_up Host marketing.duducaradmin.com
+			header_up X-Forwarded-For {remote_host}
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Proto https
+		}
+	}
+	redir https://{host}{uri} permanent
+}
+
+marketing.duducaradmin.com, api.marketing.duducaradmin.com {
+	encode zstd gzip
+	reverse_proxy duducar-web:8000 {
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}

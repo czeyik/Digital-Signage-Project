@@ -1,0 +1,185 @@
+#!/bin/bash
+set -euo pipefail
+
+export AWS_DEFAULT_REGION="${aws_region}"
+
+dnf upgrade --security -y
+dnf install -y docker jq openssl xfsprogs
+
+if ! command -v aws >/dev/null 2>&1; then
+  dnf install -y awscli2
+fi
+
+systemctl enable --now amazon-ssm-agent
+
+data_device="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${data_volume_id}"
+for attempt in $(seq 1 120); do
+  if [ -b "$data_device" ]; then
+    break
+  fi
+  sleep 5
+done
+
+if [ ! -b "$data_device" ]; then
+  echo "The encrypted data volume was not attached within 10 minutes." >&2
+  exit 1
+fi
+
+filesystem_type=$(blkid -o value -s TYPE "$data_device" || true)
+if [ -z "$filesystem_type" ]; then
+  mkfs.xfs -L duducar-data "$data_device"
+elif [ "$filesystem_type" != "xfs" ]; then
+  echo "Refusing to overwrite unexpected data-volume filesystem: $filesystem_type" >&2
+  exit 1
+fi
+
+volume_uuid=$(blkid -o value -s UUID "$data_device")
+install -d -o root -g root -m 0755 /srv/duducar
+if ! grep -q "^UUID=$volume_uuid " /etc/fstab; then
+  printf 'UUID=%s /srv/duducar xfs defaults,nofail,nodev,nosuid,x-systemd.device-timeout=2min 0 2\n' "$volume_uuid" >> /etc/fstab
+fi
+mount /srv/duducar
+
+install -d -o root -g root -m 0700 \
+  /srv/duducar/backups \
+  /srv/duducar/caddy-config \
+  /srv/duducar/caddy-data \
+  /srv/duducar/docker \
+  /srv/duducar/postgres
+chown 10001:10001 /srv/duducar/backups
+chown 70:70 /srv/duducar/postgres
+install -d -o 70 -g 70 -m 0700 /srv/duducar/postgres-tls
+install -d -o 70 -g 70 -m 0700 /srv/duducar/postgres-secrets
+
+for database_secret in admin-password owner-password; do
+  database_secret_path="/srv/duducar/postgres-secrets/$database_secret"
+  if [ ! -s "$database_secret_path" ]; then
+    openssl rand -base64 48 > "$database_secret_path"
+  fi
+  chown 70:70 "$database_secret_path"
+  chmod 0400 "$database_secret_path"
+done
+
+if [ ! -s /srv/duducar/postgres-tls/server.key ]; then
+  openssl req \
+    -new \
+    -newkey rsa:3072 \
+    -nodes \
+    -x509 \
+    -days 397 \
+    -subj "/CN=duducar-postgres.internal" \
+    -keyout /srv/duducar/postgres-tls/server.key \
+    -out /srv/duducar/postgres-tls/server.crt
+fi
+chown 70:70 /srv/duducar/postgres-tls/server.key /srv/duducar/postgres-tls/server.crt
+chmod 0600 /srv/duducar/postgres-tls/server.key
+chmod 0644 /srv/duducar/postgres-tls/server.crt
+
+install -d -o root -g root -m 0755 /etc/docker
+cat > /etc/docker/daemon.json <<'EOF'
+{
+  "data-root": "/srv/duducar/docker",
+  "log-driver": "journald",
+  "live-restore": true,
+  "no-new-privileges": true
+}
+EOF
+
+install -d -o root -g root -m 0755 /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/duducar.conf <<'EOF'
+[Journal]
+SystemMaxUse=200M
+MaxRetentionSec=14day
+Compress=yes
+Seal=yes
+EOF
+
+install -d -o root -g root -m 0755 /etc/duducar
+install -d -o root -g root -m 0755 /etc/duducar/postgres-init
+cat > /etc/duducar/host.env <<'EOF'
+AWS_REGION=${aws_region}
+APPLICATION_SECRET_ARN=${application_secret_arn}
+AWS_STORAGE_BUCKET_NAME=${media_bucket}
+PILOT_BACKUP_S3_BUCKET=${backup_bucket}
+DJANGO_ALLOWED_HOSTS=${dashboard_hostname},${api_hostname}
+DJANGO_CSRF_TRUSTED_ORIGINS=https://${dashboard_hostname}
+REQUIRED_APP_VERSION=${required_app_version}
+PLAY_INTEGRITY_PROJECT_NUMBER=${play_integrity_project}
+EMAIL_HOST=${smtp_host}
+EMAIL_PORT=${smtp_port}
+DEFAULT_FROM_EMAIL=${default_from_email}
+OPERATIONS_SNS_TOPIC_ARN=${operations_sns_topic}
+HOST_MIN_FREE_BYTES=5368709120
+HOST_BACKUP_MAX_AGE_SECONDS=108000
+ECS_MEDIA_REGION=${aws_region}
+ECS_MEDIA_CLUSTER=${ecs_cluster}
+ECS_MEDIA_TASK_DEFINITION=${ecs_worker_task_definition}
+ECS_MEDIA_CONTAINER_NAME=application
+ECS_MEDIA_SUBNET_IDS=${ecs_media_subnet_ids}
+ECS_MEDIA_SECURITY_GROUP_IDS=${ecs_media_security_group_ids}
+ECS_MEDIA_ASSIGN_PUBLIC_IP=true
+MEDIA_PROCESSING_LEASE_SECONDS=${media_processing_lease}
+MEDIA_DISPATCH_RETRY_SECONDS=${media_dispatch_retry}
+MEDIA_MAX_DISPATCH_ATTEMPTS=${media_max_dispatch_attempts}
+MEDIA_RECONCILE_MAX_ASSETS=${media_reconcile_max_assets}
+AWS_S3_CUSTOM_DOMAIN=${cloudfront_domain}
+AWS_CLOUDFRONT_KEY_ID=${cloudfront_public_key_id}
+EOF
+chmod 0644 /etc/duducar/host.env
+
+cat > /etc/duducar/release.env.example <<'EOF'
+# Copy to /etc/duducar/release.env through an audited SSM session.
+# Pin every image by digest; tags are rejected by the deployment script.
+BACKEND_IMAGE=ACCOUNT.dkr.ecr.REGION.amazonaws.com/duducar-signage-backend@sha256:REPLACE
+POSTGRES_IMAGE=postgres@sha256:REPLACE
+CADDY_IMAGE=caddy@sha256:REPLACE
+# Current production uses the direct-to-EC2 configuration. The preflight and
+# production Caddyfiles are retired migration artifacts and are rejected.
+CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover
+EOF
+chmod 0644 /etc/duducar/release.env.example
+
+install_b64() {
+  encoded=$1
+  destination=$2
+  mode=$3
+  printf '%s' "$encoded" | base64 -d > "$destination"
+  chown root:root "$destination"
+  chmod "$mode" "$destination"
+}
+
+install_b64 '${caddyfile_preflight_b64}' /etc/duducar/Caddyfile.preflight 0644
+install_b64 '${caddyfile_production_b64}' /etc/duducar/Caddyfile.production 0644
+install_b64 '${caddyfile_post_cutover_b64}' /etc/duducar/Caddyfile.post-cutover 0644
+install_b64 '${postgres_hba_b64}' /etc/duducar/pg_hba.conf 0644
+install_b64 '${postgres_init_roles_b64}' /etc/duducar/postgres-init/postgres-init-roles.sh 0555
+install_b64 '${postgres_runtime_grants_b64}' /etc/duducar/postgres-init/postgres-runtime-grants.sql 0444
+install_b64 '${render_env_b64}' /usr/local/sbin/render-duducar-runtime-env 0750
+install_b64 '${stack_b64}' /usr/local/sbin/duducar-stack 0750
+install_b64 '${command_b64}' /usr/local/sbin/duducar-command 0750
+install_b64 '${alert_b64}' /usr/local/sbin/duducar-alert 0750
+install_b64 '${host_health_b64}' /usr/local/sbin/duducar-host-health 0750
+install_b64 '${service_b64}' /etc/systemd/system/duducar.service 0644
+install_b64 '${command_service_b64}' /etc/systemd/system/duducar-command@.service 0644
+install_b64 '${alert_service_b64}' /etc/systemd/system/duducar-alert@.service 0644
+install_b64 '${health_timer_b64}' /etc/systemd/system/duducar-health.timer 0644
+install_b64 '${playlist_timer_b64}' /etc/systemd/system/duducar-playlists.timer 0644
+install_b64 '${reconcile_timer_b64}' /etc/systemd/system/duducar-media-reconcile.timer 0644
+install_b64 '${retention_timer_b64}' /etc/systemd/system/duducar-retention.timer 0644
+install_b64 '${backup_timer_b64}' /etc/systemd/system/duducar-backup.timer 0644
+
+install -d -o root -g root -m 0755 /etc/tmpfiles.d
+cat > /etc/tmpfiles.d/duducar.conf <<'EOF'
+d /run/duducar 0700 root root -
+EOF
+systemd-tmpfiles --create /etc/tmpfiles.d/duducar.conf
+install -d -o root -g root -m 0700 /var/lib/duducar-alerts
+
+systemctl daemon-reload
+systemctl restart systemd-journald
+systemctl enable --now docker
+
+# Safe recovery default: the application and timers remain disabled until the
+# release file, database restore, readiness checks, and explicit activation are
+# reviewed. There is no ALB/ECS/RDS cutover in the current topology.
+touch /var/lib/cloud/instance/duducar-bootstrap-complete

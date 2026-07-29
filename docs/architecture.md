@@ -1,4 +1,4 @@
-# Pilot Architecture
+# Current Pilot Architecture
 
 ## Decision
 
@@ -41,16 +41,35 @@ system.
 Development and production use separate databases, buckets, secrets, hostnames,
 and enrollment namespaces. Local development uses Docker Compose with
 PostgreSQL and filesystem media storage; local files are never production data.
-The production target is a small AWS container service, RDS PostgreSQL, S3,
-Secrets Manager, and daily encrypted backups. Exact AWS services must be
-selected after measuring pilot load and obtaining a current cost estimate.
+
+Production is live in `ap-southeast-5` with this USD 30/month target topology:
+
+- one Amazon Linux ARM64 `t4g.small` EC2 instance;
+- Caddy, Django/Gunicorn, and PostgreSQL 16 containers managed by systemd;
+- an encrypted 8 GB GP3 root volume and encrypted 32 GB GP3 data volume;
+- one Elastic IP with ports 80/443 public, PostgreSQL restricted to the
+  dedicated worker security group, and operator access through Session Manager;
+- private S3 media and backups encrypted with the project KMS key;
+- CloudFront origin access control and signed URLs for validated media;
+- one bounded ARM Fargate task per media-processing dispatch, with no
+  continuously running worker; and
+- daily logical PostgreSQL backups plus a DLM policy scheduled to retain 30
+  encrypted data-volume snapshots.
+
+The legacy ECS web service and schedules, Application Load Balancer, and live
+RDS database were removed on 2026-07-28. The retained ECS cluster exists only
+to run isolated media tasks. Historical migration controls are not a rollback
+mechanism.
 
 ## Scale Path
 
 The pilot writes heartbeats and proof-of-play in append-only batches. Database
 indexes use device and event time as leading keys. At 1,000 devices, media stays
 on object storage/CDN, API processes remain stateless, and media processing can
-scale independently without splitting the transactional application.
+scale independently without splitting the transactional application. Moving
+PostgreSQL back to a managed database or splitting web capacity across hosts
+requires a separately reviewed migration and budget; do not provision that
+three-year shape for the 10-device pilot.
 
 ## Known Limits
 
@@ -60,3 +79,6 @@ scale independently without splitting the transactional application.
   hardware.
 - MFA and remote application updates are deferred by product decision.
 - Media scanning requires ClamAV in the deployed processing environment.
+- The current EC2 host contains both Django and PostgreSQL and is therefore a
+  single-host failure domain. Daily logical backups, DLM snapshots, and tested
+  recovery procedures support the accepted 24-hour RPO/RTO.
