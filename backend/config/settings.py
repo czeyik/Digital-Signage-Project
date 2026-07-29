@@ -69,6 +69,12 @@ def regional_s3_endpoint(region):
     return f"https://s3.{region}.amazonaws.com" if region else None
 
 
+def staticfiles_storage_backend(debug):
+    if debug:
+        return "django.contrib.staticfiles.storage.StaticFilesStorage"
+    return "whitenoise.storage.CompressedManifestStaticFilesStorage"
+
+
 SECRET_KEY = secret_env_or_file(
     "DJANGO_SECRET_KEY",
     default="development-only-unsafe-secret",
@@ -199,7 +205,7 @@ MEDIA_ROOT = BASE_DIR / "media"
 STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
     "staticfiles": {
-        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage"
+        "BACKEND": staticfiles_storage_backend(DEBUG)
     },
 }
 

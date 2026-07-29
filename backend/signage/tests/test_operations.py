@@ -8,13 +8,17 @@ from io import StringIO
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.management import CommandError, call_command
 from django.test import Client, override_settings
 from storages.backends.s3 import S3Storage
 
-from config.settings import regional_s3_endpoint, secret_env_or_file
+from config import settings as config_settings
+from config.settings import (
+    regional_s3_endpoint,
+    secret_env_or_file,
+    staticfiles_storage_backend,
+)
 from signage.models import HardwareQualification, User
 
 TEST_SECRET_KEY = secrets.token_urlsafe(32)
@@ -73,10 +77,18 @@ def test_hardware_approval_records_approved_timestamp():
     assert qualification.approved_at is not None
 
 
-def test_staticfiles_use_manifest_storage_during_container_build():
+def test_staticfiles_storage_matches_runtime_mode():
     assert (
-        settings.STORAGES["staticfiles"]["BACKEND"]
+        staticfiles_storage_backend(True)
+        == "django.contrib.staticfiles.storage.StaticFilesStorage"
+    )
+    assert (
+        staticfiles_storage_backend(False)
         == "whitenoise.storage.CompressedManifestStaticFilesStorage"
+    )
+    assert (
+        config_settings.STORAGES["staticfiles"]["BACKEND"]
+        == staticfiles_storage_backend(config_settings.DEBUG)
     )
 
 
