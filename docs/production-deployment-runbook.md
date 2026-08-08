@@ -27,6 +27,10 @@ Before a production change or device enrollment, the project owner must confirm:
   dedicated decode service account. Store its JSON directly in Secrets Manager.
 - A protected Android release keystore, passwords in the company vault, an
   encrypted offline backup, and the certificate SHA-256 fingerprint.
+- The final production APK version name and version code, plus the matching
+  `required_app_version` in the reviewed production tfvars. These values must
+  be identical for the canary or every heartbeat will raise an outdated-app
+  alert.
 - Two Play Protect-certified Android 12+ canary tablets, data SIMs, assignments,
   test media, contacts, approver, and rollback window.
 - The authoritative release commit is reviewed and protected by CI, secret
@@ -53,10 +57,16 @@ approves a cost reduction or an explicit new target.
    reviewed reference; never replace the live untracked variables with generic
    staging defaults.
 5. Create and inspect a saved Terraform plan when infrastructure or the worker
-   task definition changes. The expected steady-state plan must not recreate an
-   ECS web service, Fargate schedules, ALB, live RDS instance, NAT Gateway, or
-   public S3 access.
-6. Keep all production secret values out of Terraform, command arguments,
+   task definition changes. Explicitly approve its backup-bucket lifecycle
+   consequence before applying: the current release changes noncurrent backup
+   versions from 30 days to one day. The expected steady-state plan must not
+   recreate an ECS web service, Fargate schedules, ALB, live RDS instance, NAT
+   Gateway, or public S3 access.
+6. When media dispatch changes, apply the reviewed IAM and worker-task portion
+   before deploying the new web image. The web requires `ecs:ListTasks`, and
+   the isolated worker must use the same reviewed backend digest. Never deploy
+   code that calls a permission the host role does not yet have.
+7. Keep all production secret values out of Terraform, command arguments,
    shell history, logs, Git, and chat. Enter rotations directly through the
    approved Secrets Manager path.
 
@@ -72,22 +82,53 @@ Use a reviewed maintenance window. Ensure no isolated media task is running
 before changing database schema or worker code.
 
 Connect through Session Manager; port 22 is deliberately closed. Update the
-root-owned `/etc/duducar/release.env` to the reviewed image digests, keeping the
-post-cutover Caddy configuration. Render runtime configuration without printing
-secret values:
+existing host does not replay Terraform user data. If the checked-in
+`Caddyfile.post-cutover` or `render-runtime-env` changed, first apply the
+reviewed Terraform plan that updates the zero-cost SSM command document. Run
+that exact pinned document version and hash once with `Mode=validate`, wait for
+`Success`, and inspect its Caddy validation and SHA-256 output. Only then run
+the same document version and hash with `Mode=install` and the full reviewed Git
+commit as `ExpectedCommit`. The release worktree must be clean so that commit
+identifies the embedded file hashes. Installation preserves the previous files beneath
+`/var/lib/duducar/runtime-backups/<commit>-<operation-id>/` and does not restart
+services. Use the documented unique operation ID and host lock; never reuse an
+operation ID for a different release. If rendering, deployment, or readiness
+fails, use that same pinned document, commit, and operation ID with
+`Mode=rollback`; rollback validates the saved files with the digest-pinned
+Caddy image recorded at installation and does not depend on the new
+`release.env`. Record the document version/hash, operation ID, Caddy digest,
+validation and install command IDs, plus the rollback command ID if used. Do
+not use a generic file-copy command or replay cloud-init against the live host.
+
+Only after the runtime-asset installation succeeds, update the root-owned
+`/etc/duducar/release.env` to the reviewed image digests while keeping the
+post-cutover Caddy configuration. If Caddy itself changes, pre-pull its reviewed
+digest and pass that digest as `CaddyImage` during runtime validation; never use
+a mutable tag. Then render runtime configuration without printing secret
+values:
 
 ```sh
 sudo /usr/local/sbin/render-duducar-runtime-env
 ```
 
 For a backward-compatible Django migration, run the owner-scoped workflow
-before deploying the new web container:
+before deploying the new web container. Before running migration `0009`, use a
+separate browser session to verify that an active account-owner can sign in and
+reach the dashboard. Record that preflight in the change record; do not infer
+it from a database user count or a marketing-user login. The migration cannot
+restore marketing administrator flags or the terminated sessions.
 
 ```sh
 sudo /usr/local/sbin/duducar-command migrate
 sudo /usr/local/sbin/duducar-command grant-runtime
 sudo /usr/local/sbin/duducar-command migration-check
 ```
+
+Migration `0009_revoke_marketing_admin_access` intentionally removes legacy
+marketing-admin flags and flushes all dashboard sessions so old one-time
+secrets cannot remain in session storage. Notify the pilot dashboard users
+of the scheduled forced logout and require them to sign in again after this
+migration.
 
 Deploy and verify the pinned stack:
 
@@ -97,9 +138,9 @@ sudo /usr/local/sbin/duducar-stack status
 sudo /usr/local/sbin/duducar-command readiness
 ```
 
-If the release changes media processing, apply the reviewed Terraform plan so
-the isolated worker task definition uses the same application digest. Do not
-start a polling worker or an ECS web service.
+If the release changes media processing, confirm the already-applied isolated
+worker task definition uses the same application digest. Do not start a polling
+worker or an ECS web service.
 
 ## Qualify hardware before enrollment
 

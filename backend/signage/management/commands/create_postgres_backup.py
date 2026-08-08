@@ -26,6 +26,11 @@ class Command(BaseCommand):
             type=int,
             default=settings.PILOT_BACKUP_RETENTION_DAYS,
         )
+        parser.add_argument(
+            "--max-local-archives",
+            type=int,
+            default=settings.PILOT_BACKUP_MAX_LOCAL_ARCHIVES,
+        )
 
     def handle(self, *args, **options):
         database = settings.DATABASES["default"]
@@ -35,6 +40,8 @@ class Command(BaseCommand):
             raise CommandError("An S3 backup bucket is required.")
         if options["retain_days"] < 1:
             raise CommandError("Backup retention must be at least one day.")
+        if options["max_local_archives"] < 1:
+            raise CommandError("At least one local backup archive must be retained.")
         pg_dump = shutil.which("pg_dump")
         pg_restore = shutil.which("pg_restore")
         if not pg_dump or not pg_restore:
@@ -65,7 +72,11 @@ class Command(BaseCommand):
                 digest_path,
                 digest,
             )
-            self._prune_old_backups(output_dir, options["retain_days"])
+            self._prune_old_backups(
+                output_dir,
+                options["retain_days"],
+                options["max_local_archives"],
+            )
         except subprocess.SubprocessError as exc:
             raise CommandError(
                 "PostgreSQL backup or archive validation failed."
@@ -153,7 +164,7 @@ class Command(BaseCommand):
         except (BotoCoreError, ClientError) as exc:
             raise CommandError("PostgreSQL backup upload failed.") from exc
 
-    def _prune_old_backups(self, output_dir, retain_days):
+    def _prune_old_backups(self, output_dir, retain_days, max_local_archives):
         cutoff = timezone.now() - timedelta(days=retain_days)
         for backup_path in output_dir.glob(f"{BACKUP_PREFIX}-*"):
             if backup_path.suffix not in {".dump", ".sha256"}:
@@ -164,3 +175,12 @@ class Command(BaseCommand):
             )
             if modified_at < cutoff:
                 backup_path.unlink()
+
+        archives = sorted(
+            output_dir.glob(f"{BACKUP_PREFIX}-*.dump"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+        for archive_path in archives[max_local_archives:]:
+            archive_path.unlink(missing_ok=True)
+            archive_path.with_suffix(".dump.sha256").unlink(missing_ok=True)

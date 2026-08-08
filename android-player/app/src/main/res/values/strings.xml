@@ -3,5 +3,11 @@
     <string name="admin_description">Controls the approved DUDU signage kiosk.</string>
     <string name="maintenance">This display is temporarily unavailable.</string>
     <string name="fallback">DUDU Car</string>
+    <string name="device_owner_required">Production enrollment requires approved device-owner provisioning.</string>
+    <string name="kiosk_policy_failed">Required kiosk policy could not be applied. Contact DUDU support.</string>
+    <string name="playback_recovery_failed">Playback evidence could not be recovered safely. Contact DUDU support.</string>
+    <string name="admin_session_active">Administrator session active for at most five minutes.</string>
+    <string name="open_android_settings">Open Android settings</string>
+    <string name="relock_now">Relock now</string>
+    <string name="exact_alarm_required">Administrator access is unavailable until exact-alarm scheduling is granted during staff provisioning.</string>
 </resources>
-

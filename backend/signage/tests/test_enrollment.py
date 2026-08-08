@@ -1,6 +1,7 @@
 from datetime import timedelta
 
 import pytest
+from django.core.exceptions import ValidationError
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -16,7 +17,9 @@ from signage.models import (
     HardwareQualification,
     User,
     Vehicle,
+    token_hash,
 )
+from signage.services import issue_kiosk_pin
 
 
 def enrollment_fixture():
@@ -43,6 +46,7 @@ def enrollment_fixture():
     driver = Driver.objects.create(internal_id="DI01", name="Example Driver")
     vehicle = Vehicle.objects.create(registration="INT1234")
     DeviceAssignment.objects.create(device=device, driver=driver, vehicle=vehicle)
+    issue_kiosk_pin(device, owner)
     _, raw_code = EnrollmentCode.issue(device, owner)
     return device, raw_code
 
@@ -62,6 +66,7 @@ def test_production_challenge_requires_approved_hardware(client):
     driver = Driver.objects.create(internal_id="UNQUAL", name="Example Driver")
     vehicle = Vehicle.objects.create(registration="UNQ1234")
     DeviceAssignment.objects.create(device=device, driver=driver, vehicle=vehicle)
+    issue_kiosk_pin(device, owner)
     _, raw_code = EnrollmentCode.issue(device, owner)
 
     response = client.post(
@@ -119,6 +124,49 @@ def test_production_enrollment_requires_verified_single_use_challenge(
     assert replay.status_code == 403
     device.refresh_from_db()
     assert device.status == Device.Status.ACTIVE
+
+
+@pytest.mark.django_db
+@override_settings(
+    DEPLOYMENT_ENV="production",
+    PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
+)
+def test_device_disabled_after_challenge_cannot_finish_enrollment(client, monkeypatch):
+    device, raw_code = enrollment_fixture()
+    challenge_response = client.post(
+        reverse("device-enrollment-challenge"),
+        {
+            "code": raw_code,
+            "android_id": "disabled-after-challenge",
+            "android_version": "12",
+            "app_version": "0.1.0",
+        },
+        content_type="application/json",
+    )
+    challenge = EnrollmentChallenge.objects.get(
+        pk=challenge_response.json()["challenge_id"]
+    )
+    Device.objects.filter(pk=device.pk).update(status=Device.Status.DISABLED)
+    monkeypatch.setattr(
+        "signage.api.verify_integrity_token",
+        lambda token, expected: {"verified": bool(token and expected)},
+    )
+
+    response = client.post(
+        reverse("device-enroll"),
+        {
+            "challenge_id": str(challenge.id),
+            "integrity_token": "signed-token",
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+    device.refresh_from_db()
+    challenge.refresh_from_db()
+    assert device.status == Device.Status.DISABLED
+    assert challenge.used_at is None
+    assert EnrollmentCode.objects.get(pk=challenge.enrollment_id).used_at is None
 
 
 @pytest.mark.django_db
@@ -216,6 +264,7 @@ def test_enrollment_code_is_single_use(client):
     driver = Driver.objects.create(internal_id="D001", name="Example Driver")
     vehicle = Vehicle.objects.create(registration="WXY1234")
     DeviceAssignment.objects.create(device=device, driver=driver, vehicle=vehicle)
+    issue_kiosk_pin(device, owner)
     _, raw_code = EnrollmentCode.issue(device, owner)
     payload = {
         "code": raw_code,
@@ -235,6 +284,18 @@ def test_enrollment_code_is_single_use(client):
     assert first.status_code == 201
     assert "refresh_token" in first.json()
     assert second.status_code == 403
+
+
+@pytest.mark.django_db
+def test_issuing_a_new_enrollment_code_expires_the_previous_code():
+    device, first_code = enrollment_fixture()
+    first = EnrollmentCode.objects.get(code_hash=token_hash(first_code))
+
+    second, _ = EnrollmentCode.issue(device, first.created_by)
+
+    first.refresh_from_db()
+    assert first.is_usable is False
+    assert second.is_usable is True
 
 
 @pytest.mark.django_db
@@ -264,6 +325,7 @@ def test_reenrollment_revokes_previous_device_credential(client):
     driver = Driver.objects.create(internal_id="D002", name="Example Driver")
     vehicle = Vehicle.objects.create(registration="WXY5678")
     DeviceAssignment.objects.create(device=device, driver=driver, vehicle=vehicle)
+    issue_kiosk_pin(device, owner)
     payload = {
         "android_id": "android-test-id-2",
         "android_version": "12",
@@ -311,11 +373,15 @@ def test_dashboard_can_provision_device_with_assignment(client):
         },
     )
 
-    assert response.status_code == 302
+    assert response.status_code == 200
     device = Device.objects.get(label="PILOT-03")
     assignment = device.assignments.get(unassigned_at__isnull=True)
     assert assignment.driver.internal_id == "D003"
     assert assignment.vehicle.registration == "WXY9012"
+    assert device.kiosk_pin_hash
+    assert len(response.context["pin"]) == 6
+    assert "one_time_kiosk_pin" not in client.session
+    assert response["Cache-Control"].startswith("no-store")
 
 
 @pytest.mark.django_db
@@ -345,6 +411,8 @@ def test_reassignment_preserves_assignment_history(client):
     old_assignment = DeviceAssignment.objects.create(
         device=device, driver=driver, vehicle=vehicle
     )
+    issue_kiosk_pin(device, owner)
+    pending_enrollment, _ = EnrollmentCode.issue(device, owner)
     client.force_login(owner)
 
     response = client.post(
@@ -361,6 +429,51 @@ def test_reassignment_preserves_assignment_history(client):
     assert old_assignment.unassigned_at is not None
     active_assignment = device.assignments.filter(unassigned_at__isnull=True).get()
     assert active_assignment.driver.internal_id == "D005"
+    pending_enrollment.refresh_from_db()
+    assert pending_enrollment.is_usable is False
+
+
+@pytest.mark.django_db
+def test_reassignment_and_code_invalidation_roll_back_together(client, monkeypatch):
+    owner = User.objects.create_user(
+        "owner-reassign@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="PILOT-REASSIGN-ROLLBACK")
+    driver = Driver.objects.create(internal_id="D-ROLLBACK", name="Old Driver")
+    vehicle = Vehicle.objects.create(registration="ROLL1234")
+    old_assignment = DeviceAssignment.objects.create(
+        device=device,
+        driver=driver,
+        vehicle=vehicle,
+    )
+    issue_kiosk_pin(device, owner)
+    pending_enrollment, _ = EnrollmentCode.issue(device, owner)
+    client.force_login(owner)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr("signage.views.audit", fail_audit)
+
+    with pytest.raises(RuntimeError, match="simulated audit failure"):
+        client.post(
+            reverse("device-reassign", args=[device.id]),
+            {
+                "driver_internal_id": "D-ROLLBACK-NEW",
+                "driver_name": "New Driver",
+                "vehicle_registration": "ROLL5678",
+            },
+        )
+
+    old_assignment.refresh_from_db()
+    pending_enrollment.refresh_from_db()
+    assert old_assignment.unassigned_at is None
+    assert pending_enrollment.is_usable is True
+    assert not device.assignments.filter(
+        driver__internal_id="D-ROLLBACK-NEW"
+    ).exists()
 
 
 @pytest.mark.django_db
@@ -375,11 +488,9 @@ def test_owner_pin_reset_shows_once_and_stores_only_hash(client):
 
     response = client.post(reverse("device-pin-reset", args=[device.id]))
 
-    assert response.status_code == 302
+    assert response.status_code == 200
     device.refresh_from_db()
-    page = client.get(reverse("kiosk-pin"))
-    assert page.status_code == 200
-    pin = page.context["pin"]
+    pin = response.context["pin"]
     assert len(pin) == 6
     algorithm, iterations, salt_hex, expected_hex = device.kiosk_pin_hash.split("$")
     import hashlib
@@ -390,4 +501,113 @@ def test_owner_pin_reset_shows_once_and_stores_only_hash(client):
     assert algorithm == "pbkdf2_sha256"
     assert actual == expected_hex
     assert pin not in device.kiosk_pin_hash
+    assert "one_time_kiosk_pin" not in client.session
+    assert response["Cache-Control"].startswith("no-store")
     assert client.get(reverse("kiosk-pin")).status_code == 302
+
+
+@pytest.mark.django_db
+def test_enrollment_code_requires_kiosk_pin_verifier():
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="PIN-REQUIRED-01")
+
+    with pytest.raises(ValidationError, match="kiosk administrator PIN"):
+        EnrollmentCode.issue(device, owner)
+
+
+@pytest.mark.django_db
+def test_legacy_code_is_unusable_without_kiosk_pin_verifier():
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="LEGACY-NO-PIN-01")
+    enrollment = EnrollmentCode.objects.create(
+        device=device,
+        code_hash=token_hash("123456"),
+        expires_at=timezone.now() + timedelta(minutes=15),
+        created_by=owner,
+    )
+
+    assert enrollment.is_usable is False
+
+
+@pytest.mark.django_db
+def test_dashboard_does_not_issue_enrollment_code_without_pin(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="NO-PIN-DASHBOARD-01")
+    driver = Driver.objects.create(internal_id="NO-PIN", name="Example Driver")
+    vehicle = Vehicle.objects.create(registration="NOPIN01")
+    DeviceAssignment.objects.create(device=device, driver=driver, vehicle=vehicle)
+    client.force_login(owner)
+
+    response = client.post(reverse("issue-enrollment", args=[device.id]))
+
+    assert response.status_code == 302
+    assert not EnrollmentCode.objects.filter(device=device).exists()
+
+
+@pytest.mark.django_db
+def test_enrollment_code_is_returned_once_without_session_persistence(client):
+    device, _ = enrollment_fixture()
+    owner = EnrollmentCode.objects.get(device=device).created_by
+    client.force_login(owner)
+
+    response = client.post(reverse("issue-enrollment", args=[device.id]))
+
+    assert response.status_code == 200
+    raw_code = response.context["code"]
+    assert len(raw_code) == 6
+    assert EnrollmentCode.objects.filter(
+        device=device,
+        code_hash=token_hash(raw_code),
+        expires_at__gt=timezone.now(),
+    ).exists()
+    assert raw_code not in EnrollmentCode.objects.get(
+        code_hash=token_hash(raw_code)
+    ).code_hash
+    assert "one_time_enrollment_code" not in client.session
+    assert response["Cache-Control"].startswith("no-store")
+    assert response["Pragma"] == "no-cache"
+    assert client.get(reverse("enrollment-code")).status_code == 302
+
+
+@pytest.mark.django_db
+def test_disablement_invalidates_enrollment_and_blocks_new_codes(client):
+    device, _ = enrollment_fixture()
+    enrollment = EnrollmentCode.objects.get(device=device)
+    owner = enrollment.created_by
+    client.force_login(owner)
+
+    response = client.post(reverse("device-disable", args=[device.id]))
+
+    assert response.status_code == 302
+    device.refresh_from_db()
+    enrollment.refresh_from_db()
+    assert device.status == Device.Status.DISABLED
+    assert enrollment.is_usable is False
+    with pytest.raises(ValidationError, match="enabled, assigned device"):
+        EnrollmentCode.issue(device, owner)
+
+
+@pytest.mark.django_db
+def test_kiosk_pin_reset_invalidates_outstanding_enrollment_code(client):
+    device, _ = enrollment_fixture()
+    enrollment = EnrollmentCode.objects.get(device=device)
+    owner = enrollment.created_by
+    client.force_login(owner)
+
+    response = client.post(reverse("device-pin-reset", args=[device.id]))
+
+    assert response.status_code == 200
+    enrollment.refresh_from_db()
+    assert enrollment.is_usable is False

@@ -12,6 +12,20 @@ http:// {
 
 marketing.duducaradmin.com, api.marketing.duducaradmin.com {
 	encode zstd gzip
+	@media_upload {
+		method POST
+		path /media/upload/
+	}
+	request_body @media_upload {
+		max_size 51MiB
+	}
+	@playback_batch {
+		method POST
+		path /api/v1/devices/playback-batches/
+	}
+	request_body @playback_batch {
+		max_size 256KiB
+	}
 	reverse_proxy duducar-web:8000 {
 		header_up X-Forwarded-For {remote_host}
 		header_up X-Real-IP {remote_host}

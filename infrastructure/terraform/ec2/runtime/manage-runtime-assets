@@ -1,0 +1,234 @@
+#!/bin/bash
+set -Eeuo pipefail
+umask 0077
+
+mode=${1:-}
+commit=${2:-}
+operation_id=${3:-}
+reviewed_caddy_input=${4:-}
+reviewed_renderer_input=${5:-}
+reviewed_caddy_sha=${6:-}
+reviewed_renderer_sha=${7:-}
+caddy_image=${8:-}
+
+case "$mode" in
+  validate|install|rollback) ;;
+  *) echo "Mode must be validate, install, or rollback." >&2; exit 2 ;;
+esac
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "ExpectedCommit must be a full lowercase Git commit." >&2
+  exit 2
+}
+[[ "$operation_id" =~ ^[0-9a-f]{32}$ ]] || {
+  echo "OperationId must contain 32 lowercase hexadecimal characters." >&2
+  exit 2
+}
+for value in "$reviewed_caddy_sha" "$reviewed_renderer_sha"; do
+  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "Reviewed runtime asset hashes must be SHA-256 values." >&2
+    exit 2
+  }
+done
+test -f "$reviewed_caddy_input"
+test -f "$reviewed_renderer_input"
+reviewed_caddy=$(readlink -f -- "$reviewed_caddy_input")
+reviewed_renderer=$(readlink -f -- "$reviewed_renderer_input")
+
+caddy_target=/etc/duducar/Caddyfile.post-cutover
+renderer_target=/usr/local/sbin/render-duducar-runtime-env
+backup_dir=/var/lib/duducar/runtime-backups/$commit-$operation_id
+caddy_temp=''
+renderer_temp=''
+pending_backup=''
+rollback_needed=0
+
+cleanup() {
+  status=$?
+  set +e
+  if [ "$rollback_needed" -eq 1 ]; then
+    echo "Runtime asset replacement failed; restoring both operation backups." >&2
+    restore_caddy_temp=$(mktemp /etc/duducar/.Caddyfile.rollback.XXXXXX)
+    restore_renderer_temp=$(mktemp /usr/local/sbin/.render-duducar-rollback.XXXXXX)
+    install -o root -g root -m 0644 \
+      "$backup_dir/Caddyfile.post-cutover" "$restore_caddy_temp"
+    caddy_restore_status=$?
+    install -o root -g root -m 0755 \
+      "$backup_dir/render-duducar-runtime-env" "$restore_renderer_temp"
+    renderer_restore_status=$?
+    if [ "$caddy_restore_status" -eq 0 ]; then
+      mv -f -- "$restore_caddy_temp" "$caddy_target"
+      caddy_restore_status=$?
+    fi
+    if [ "$renderer_restore_status" -eq 0 ]; then
+      mv -f -- "$restore_renderer_temp" "$renderer_target"
+      renderer_restore_status=$?
+    fi
+    rm -f -- "$restore_caddy_temp" "$restore_renderer_temp"
+    if ! (
+      cd "$backup_dir" &&
+        printf '%s  %s\n' \
+          "$(sha256sum Caddyfile.post-cutover | awk '{print $1}')" "$caddy_target" \
+          "$(sha256sum render-duducar-runtime-env | awk '{print $1}')" "$renderer_target" |
+          sha256sum -c -
+    ); then
+      caddy_restore_status=1
+      renderer_restore_status=1
+    fi
+    if [ "$caddy_restore_status" -ne 0 ] || [ "$renderer_restore_status" -ne 0 ]; then
+      echo "CRITICAL: runtime asset rollback did not complete." >&2
+      status=1
+    fi
+  fi
+  [ -z "$caddy_temp" ] || rm -f -- "$caddy_temp"
+  [ -z "$renderer_temp" ] || rm -f -- "$renderer_temp"
+  [ -z "$pending_backup" ] || rm -rf -- "$pending_backup"
+  exit "$status"
+}
+trap cleanup EXIT
+
+file_sha256() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+targets_match() {
+  expected_caddy=$1
+  expected_renderer=$2
+  [ "$(file_sha256 "$caddy_target")" = "$expected_caddy" ] &&
+    [ "$(file_sha256 "$renderer_target")" = "$expected_renderer" ]
+}
+
+validate_caddy() {
+  candidate=$1
+  docker run --rm \
+    --network none \
+    --read-only \
+    --cap-drop ALL \
+    --cap-add NET_BIND_SERVICE \
+    --security-opt no-new-privileges:true \
+    --tmpfs /data \
+    --tmpfs /config \
+    --volume "$candidate:/etc/caddy/Caddyfile:ro" \
+    "$caddy_image" \
+    caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+}
+
+if [ "$mode" != rollback ]; then
+  [[ "$caddy_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
+    echo "CaddyImage must be pinned by SHA-256 digest." >&2
+    exit 2
+  }
+  printf '%s  %s\n' \
+    "$reviewed_caddy_sha" "$reviewed_caddy" \
+    "$reviewed_renderer_sha" "$reviewed_renderer" |
+    sha256sum -c -
+  bash -n "$reviewed_renderer"
+  docker image inspect "$caddy_image" >/dev/null
+  validate_caddy "$reviewed_caddy"
+  sha256sum "$reviewed_caddy" "$reviewed_renderer"
+
+  if [ "$mode" = validate ]; then
+    echo "Validation-only mode complete for $commit operation $operation_id; no host files changed."
+    exit 0
+  fi
+fi
+
+test -f "$caddy_target"
+test -f "$renderer_target"
+command -v flock >/dev/null
+exec 9>/var/lock/duducar-runtime-assets.lock
+flock -n 9 || {
+  echo "Another runtime asset operation is active; no files changed." >&2
+  exit 1
+}
+
+if [ "$mode" = rollback ]; then
+  test -d "$backup_dir"
+  (cd "$backup_dir" && sha256sum -c SHA256SUMS)
+  caddy_image=$(<"$backup_dir/CADDY_IMAGE")
+  [[ "$caddy_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
+    echo "Recorded rollback Caddy image is not digest-pinned." >&2
+    exit 1
+  }
+  docker image inspect "$caddy_image" >/dev/null
+  bash -n "$backup_dir/render-duducar-runtime-env"
+  validate_caddy "$backup_dir/Caddyfile.post-cutover"
+  backup_caddy_sha=$(file_sha256 "$backup_dir/Caddyfile.post-cutover")
+  backup_renderer_sha=$(file_sha256 "$backup_dir/render-duducar-runtime-env")
+  if targets_match "$backup_caddy_sha" "$backup_renderer_sha"; then
+    echo "Operation $operation_id is already rolled back; no files changed."
+    exit 0
+  fi
+  targets_match "$reviewed_caddy_sha" "$reviewed_renderer_sha" || {
+    echo "Current runtime assets do not match this installation; refusing stale rollback." >&2
+    exit 1
+  }
+  install_caddy_source=$backup_dir/Caddyfile.post-cutover
+  install_renderer_source=$backup_dir/render-duducar-runtime-env
+  expected_caddy_sha=$backup_caddy_sha
+  expected_renderer_sha=$backup_renderer_sha
+else
+  if [ -d "$backup_dir" ]; then
+    (cd "$backup_dir" && sha256sum -c SHA256SUMS)
+    backup_caddy_sha=$(file_sha256 "$backup_dir/Caddyfile.post-cutover")
+    backup_renderer_sha=$(file_sha256 "$backup_dir/render-duducar-runtime-env")
+    if targets_match "$reviewed_caddy_sha" "$reviewed_renderer_sha"; then
+      echo "Operation $operation_id is already installed; no files changed."
+      exit 0
+    fi
+    targets_match "$backup_caddy_sha" "$backup_renderer_sha" || {
+      echo "Operation backup does not match current files; refusing stale retry." >&2
+      exit 1
+    }
+  elif [ -e "$backup_dir" ]; then
+    echo "Runtime backup path exists but is not a directory." >&2
+    exit 1
+  else
+    running_caddy_image=$(docker inspect duducar-caddy | jq -er '.[0].Config.Image')
+    [[ "$running_caddy_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
+      echo "Running Caddy container is not pinned by SHA-256 digest." >&2
+      exit 1
+    }
+    docker image inspect "$running_caddy_image" >/dev/null
+    backup_root=$(dirname "$backup_dir")
+    install -d -o root -g root -m 0700 "$backup_root"
+    pending_backup=$(mktemp -d "$backup_root/.$commit-$operation_id.XXXXXX")
+    install -o root -g root -m 0644 \
+      "$caddy_target" "$pending_backup/Caddyfile.post-cutover"
+    install -o root -g root -m 0755 \
+      "$renderer_target" "$pending_backup/render-duducar-runtime-env"
+    printf '%s\n' "$running_caddy_image" > "$pending_backup/CADDY_IMAGE"
+    chmod 0400 "$pending_backup/CADDY_IMAGE"
+    (
+      cd "$pending_backup"
+      sha256sum \
+        Caddyfile.post-cutover \
+        render-duducar-runtime-env \
+        CADDY_IMAGE > SHA256SUMS
+      chmod 0400 SHA256SUMS
+    )
+    mv -- "$pending_backup" "$backup_dir"
+    pending_backup=''
+    (cd "$backup_dir" && sha256sum -c SHA256SUMS)
+  fi
+  install_caddy_source=$reviewed_caddy
+  install_renderer_source=$reviewed_renderer
+  expected_caddy_sha=$reviewed_caddy_sha
+  expected_renderer_sha=$reviewed_renderer_sha
+fi
+
+caddy_temp=$(mktemp /etc/duducar/.Caddyfile.post-cutover.XXXXXX)
+renderer_temp=$(mktemp /usr/local/sbin/.render-duducar-runtime-env.XXXXXX)
+install -o root -g root -m 0644 "$install_caddy_source" "$caddy_temp"
+install -o root -g root -m 0755 "$install_renderer_source" "$renderer_temp"
+rollback_needed=1
+mv -f -- "$caddy_temp" "$caddy_target"
+caddy_temp=''
+mv -f -- "$renderer_temp" "$renderer_target"
+renderer_temp=''
+printf '%s  %s\n' \
+  "$expected_caddy_sha" "$caddy_target" \
+  "$expected_renderer_sha" "$renderer_target" |
+  sha256sum -c -
+rollback_needed=0
+sha256sum "$caddy_target" "$renderer_target"
+echo "Runtime asset mode $mode completed for $commit operation $operation_id; services were not restarted."

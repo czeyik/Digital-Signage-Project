@@ -1,7 +1,7 @@
 from django.conf import settings
 from django.contrib.auth import logout
 from django.db import connection
-from django.http import JsonResponse
+from django.http import HttpResponse, JsonResponse
 from django.shortcuts import redirect
 from django.utils import timezone
 
@@ -39,6 +39,26 @@ class HealthCheckMiddleware:
                     JsonResponse({"status": "unavailable"}, status=503)
                 )
             return apply_production_security_headers(JsonResponse({"status": "ready"}))
+        return self.get_response(request)
+
+
+class MediaUploadSizeLimitMiddleware:
+    """Reject declared oversized dashboard uploads before parsing multipart data."""
+
+    upload_path = "/media/upload/"
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.method == "POST" and request.path == self.upload_path:
+            content_length = request.META.get("CONTENT_LENGTH", "")
+            try:
+                declared_size = int(content_length)
+            except (TypeError, ValueError):
+                declared_size = 0
+            if declared_size > settings.MEDIA_MAX_REQUEST_BYTES:
+                return HttpResponse("Upload request is too large.", status=413)
         return self.get_response(request)
 
 

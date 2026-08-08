@@ -41,18 +41,96 @@ jobs:
         working-directory: backend
         run: python -m pip_audit --skip-editable
 
+  backend-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: signage
+          POSTGRES_USER: signage
+          POSTGRES_PASSWORD: postgres-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U signage -d signage"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install backend test dependencies
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip setuptools==83.0.0
+          python -m pip install --editable '.[dev]'
+      - name: PostgreSQL migrations and tests
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql://signage:postgres-ci-only@127.0.0.1:5432/signage
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
+          DJANGO_SETTINGS_MODULE: config.settings
+        run: |
+          python manage.py migrate --noinput
+          python manage.py makemigrations --check --dry-run
+          python -m pytest -p pytest_django.plugin
+
   android:
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - name: Build verification image
         run: docker build -f android-player/Dockerfile.build -t duducar-android-build android-player
-      - name: Android tests and Kotlin compile
-        run: >-
-          docker run --rm
-          -v "$PWD/android-player:/workspace"
-          -w /workspace duducar-android-build
-          ./gradlew testDebugUnitTest :app:compileDebugKotlin --no-daemon
+      - name: Android tests, lint, compile, APK, and fail-closed variants
+        run: |
+          docker run --rm \
+            --mount type=bind,source="$PWD/android-player",target=/source,readonly \
+            --tmpfs /workspace:exec,size=3g \
+            -e GRADLE_USER_HOME=/tmp/gradle-home \
+            -w /workspace duducar-android-build /bin/bash -lc '
+              set -eu
+              cp -a /source/. /workspace/
+              rm -rf /workspace/app/build /workspace/build /workspace/.gradle /workspace/.kotlin
+              ./gradlew testDevelopmentDebugUnitTest lintDevelopmentDebug :app:assembleDevelopmentDebug :app:compileDevelopmentDebugAndroidTestKotlin --no-daemon
+              if ./gradlew :app:assembleProductionRelease --no-daemon; then
+                echo "Unsigned or unconfigured production release unexpectedly succeeded" >&2
+                exit 1
+              fi
+              keytool -genkeypair -noprompt \
+                -keystore /tmp/dudu-ci-signing.jks \
+                -storepass ci-signing-only \
+                -keypass ci-signing-only \
+                -alias duducar-ci \
+                -keyalg RSA -keysize 3072 -validity 2 \
+                -dname "CN=DUDU CI,OU=Build Verification,O=DUDU Car,C=MY"
+              export DUDU_SIGNING_STORE_FILE=/tmp/dudu-ci-signing.jks
+              export DUDU_SIGNING_STORE_PASSWORD=ci-signing-only
+              export DUDU_SIGNING_KEY_ALIAS=duducar-ci
+              export DUDU_SIGNING_KEY_PASSWORD=ci-signing-only
+              ./gradlew lintProductionRelease :app:assembleProductionRelease \
+                -PproductionApiBaseUrl=https://api.marketing.duducaradmin.com/api/v1/ \
+                -PplayIntegrityProjectNumber=123456789012 \
+                -PpreviousProductionVersionCode=0 \
+                -PproductionVersionCode=1 \
+                -PproductionVersionName=1.0.0 \
+                --no-daemon
+              "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs \
+                app/build/outputs/apk/production/release/app-production-release.apk
+              if ./gradlew :app:assembleDevelopmentDebug -PdevelopmentApiBaseUrl=https://api.marketing.duducaradmin.com/api/v1/ --no-daemon; then
+                echo "Development build unexpectedly accepted the production API" >&2
+                exit 1
+              fi
+              if ./gradlew :app:assembleDevelopmentDebug -PdevelopmentApiBaseUrl=https://api.marketing.duducaradmin.com./api/v1/ --no-daemon; then
+                echo "Development build unexpectedly accepted trailing-dot production API" >&2
+                exit 1
+              fi
+            '
 
   terraform:
     runs-on: ubuntu-latest
@@ -73,8 +151,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Build backend image
-        run: docker build -t duducar-signage-backend:ci backend
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+      - name: Build production-architecture backend image
+        run: >-
+          docker buildx build
+          --platform linux/arm64
+          --load
+          -t duducar-signage-backend:ci
+          backend
+      - name: Inspect and exercise ARM64 image
+        run: |
+          architecture="$(docker image inspect --format '{{.Architecture}}' duducar-signage-backend:ci)"
+          if [ "$architecture" != "arm64" ]; then
+            echo "Expected arm64 image, received $architecture" >&2
+            exit 1
+          fi
+          docker run --rm --platform linux/arm64 \
+            -e DJANGO_SECRET_KEY=ci-container-check-secret \
+            duducar-signage-backend:ci \
+            python manage.py check
+          docker run --rm --platform linux/arm64 \
+            duducar-signage-backend:ci \
+            python -c "import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ('pip', 'setuptools', 'ensurepip'))"
       - name: Scan container
         uses: aquasecurity/trivy-action@v0.36.0
         with:

@@ -42,18 +42,28 @@ class ApiClient(private val credentials: CredentialStore) {
         authenticatedRequest("devices/heartbeat/", "POST", body)
 
     fun uploadBatch(body: JSONObject): JSONObject =
-        authenticatedRequest("devices/playback-batches/", "POST", body)
+        authenticatedRequest(
+            "devices/playback-batches/",
+            "POST",
+            body,
+            compressBody = true,
+        )
 
     fun uploadOperationalEvent(body: JSONObject): JSONObject =
         authenticatedRequest("devices/operational-events/", "POST", body)
 
-    private fun authenticatedRequest(path: String, method: String, body: JSONObject? = null): JSONObject {
+    private fun authenticatedRequest(
+        path: String,
+        method: String,
+        body: JSONObject? = null,
+        compressBody: Boolean = false,
+    ): JSONObject {
         if (accessToken == null) refreshAccessToken()
         return try {
-            request(path, method, body, authenticated = true)
+            request(path, method, body, authenticated = true, compressBody = compressBody)
         } catch (error: UnauthorizedException) {
             refreshAccessToken()
-            request(path, method, body, authenticated = true)
+            request(path, method, body, authenticated = true, compressBody = compressBody)
         }
     }
 
@@ -73,17 +83,28 @@ class ApiClient(private val credentials: CredentialStore) {
         method: String,
         body: JSONObject? = null,
         authenticated: Boolean,
+        compressBody: Boolean = false,
     ): JSONObject {
         val connection = URL(BuildConfig.API_BASE_URL + path).openConnection() as HttpURLConnection
         connection.requestMethod = method
         connection.connectTimeout = 15_000
         connection.readTimeout = 30_000
         connection.setRequestProperty("Accept", "application/json")
-        connection.setRequestProperty("Content-Type", "application/json")
+        connection.setRequestProperty("Content-Type", PlaybackBatchTransport.CONTENT_TYPE)
         if (authenticated) connection.setRequestProperty("Authorization", "Bearer $accessToken")
         if (body != null) {
             connection.doOutput = true
-            connection.outputStream.use { it.write(body.toString().toByteArray()) }
+            val payload = if (compressBody) {
+                connection.setRequestProperty(
+                    "Content-Encoding",
+                    PlaybackBatchTransport.CONTENT_ENCODING,
+                )
+                PlaybackBatchTransport.encodeJson(body.toString())
+            } else {
+                body.toString().toByteArray(Charsets.UTF_8)
+            }
+            connection.setFixedLengthStreamingMode(payload.size)
+            connection.outputStream.use { it.write(payload) }
         }
         val status = connection.responseCode
         if (status == 401 || status == 403) throw UnauthorizedException()

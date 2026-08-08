@@ -75,6 +75,15 @@ class DashboardUserForm(forms.ModelForm):
         model = User
         fields = ["email", "role", "is_active", "password"]
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # ModelForm assigns the optional form field back to instance.password
+        # during validation. Preserve the existing encoded hash when an owner
+        # follows the documented "leave blank" edit path.
+        self._original_password_hash = (
+            self.instance.password if self.instance.pk else ""
+        )
+
     def clean_password(self):
         password = self.cleaned_data.get("password")
         if password:
@@ -88,6 +97,8 @@ class DashboardUserForm(forms.ModelForm):
         password = self.cleaned_data.get("password")
         if password:
             user.set_password(password)
+        elif user.pk:
+            user.password = self._original_password_hash
         if commit:
             user.full_clean()
             user.save()

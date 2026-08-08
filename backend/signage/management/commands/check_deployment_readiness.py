@@ -75,11 +75,61 @@ class Command(BaseCommand):
             errors.append("Production media storage must use a private object bucket.")
         if component in {"all", "scheduled"} and not settings.PILOT_BACKUP_S3_BUCKET:
             errors.append("PILOT_BACKUP_S3_BUCKET is required for database backups.")
-        if component not in {"all", "web"}:
-            return
-        self._check_web_settings(errors)
+        if component in {"all", "scheduled"}:
+            self._check_backup_limits(errors)
+        if component in {"all", "web", "media-worker"}:
+            self._check_media_processing_limits(errors)
+        if component in {"all", "web"}:
+            self._check_web_settings(errors)
+
+    def _check_backup_limits(self, errors):
+        backup_limits = {
+            "PILOT_BACKUP_RETENTION_DAYS": settings.PILOT_BACKUP_RETENTION_DAYS,
+            "PILOT_BACKUP_MAX_LOCAL_ARCHIVES": (
+                settings.PILOT_BACKUP_MAX_LOCAL_ARCHIVES
+            ),
+        }
+        for name, value in backup_limits.items():
+            if not 1 <= value <= 30:
+                errors.append(f"{name} must be between 1 and 30.")
+
+    def _check_media_processing_limits(self, errors):
+        positive_settings = {
+            "MEDIA_MAX_IMAGE_PIXELS": settings.MEDIA_MAX_IMAGE_PIXELS,
+            "MEDIA_MAX_IMAGE_DIMENSION": settings.MEDIA_MAX_IMAGE_DIMENSION,
+            "MEDIA_CLAMAV_TIMEOUT_SECONDS": settings.MEDIA_CLAMAV_TIMEOUT_SECONDS,
+            "MEDIA_FFPROBE_TIMEOUT_SECONDS": settings.MEDIA_FFPROBE_TIMEOUT_SECONDS,
+            "MEDIA_FFMPEG_TIMEOUT_SECONDS": settings.MEDIA_FFMPEG_TIMEOUT_SECONDS,
+            "FRESHCLAM_TIMEOUT_SECONDS": settings.FRESHCLAM_TIMEOUT_SECONDS,
+            "MEDIA_WORKER_TIMEOUT_SECONDS": settings.MEDIA_WORKER_TIMEOUT_SECONDS,
+        }
+        for name, value in positive_settings.items():
+            if value < 1:
+                errors.append(f"{name} must be positive.")
+        minimum_request_bytes = (
+            settings.MEDIA_MAX_VIDEO_BYTES
+            + settings.MEDIA_UPLOAD_MULTIPART_ALLOWANCE_BYTES
+        )
+        if settings.MEDIA_MAX_REQUEST_BYTES < minimum_request_bytes:
+            errors.append(
+                "MEDIA_MAX_REQUEST_BYTES must allow the 50 MiB video limit plus "
+                "1 MiB of multipart overhead."
+            )
+        if settings.MEDIA_MAX_IMAGE_PIXELS > 25_000_000:
+            errors.append("MEDIA_MAX_IMAGE_PIXELS must not exceed 25000000.")
+        if settings.MEDIA_MAX_IMAGE_DIMENSION > 10_000:
+            errors.append("MEDIA_MAX_IMAGE_DIMENSION must not exceed 10000.")
+        if (
+            settings.MEDIA_WORKER_TIMEOUT_SECONDS
+            >= settings.MEDIA_PROCESSING_LEASE_SECONDS
+        ):
+            errors.append(
+                "MEDIA_WORKER_TIMEOUT_SECONDS must be shorter than "
+                "MEDIA_PROCESSING_LEASE_SECONDS."
+            )
 
     def _check_web_settings(self, errors):
+        self._check_playback_batch_limits(errors)
         required_hosts = {
             "marketing.duducaradmin.com",
             "api.marketing.duducaradmin.com",
@@ -145,6 +195,23 @@ class Command(BaseCommand):
         self._check_cloudfront_signing(errors)
         self._check_media_dispatch(errors)
 
+    def _check_playback_batch_limits(self, errors):
+        compressed = settings.PLAYBACK_BATCH_MAX_COMPRESSED_BYTES
+        decompressed = settings.PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES
+        if not 1 <= compressed <= 256 * 1024:
+            errors.append(
+                "PLAYBACK_BATCH_MAX_COMPRESSED_BYTES must be between 1 and 262144."
+            )
+        if not 1 <= decompressed <= 1024 * 1024:
+            errors.append(
+                "PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES must be between 1 and 1048576."
+            )
+        if compressed > decompressed:
+            errors.append(
+                "PLAYBACK_BATCH_MAX_COMPRESSED_BYTES must not exceed the "
+                "decompressed limit."
+            )
+
     def _check_cloudfront_signing(self, errors):
         domain = getattr(settings, "AWS_S3_CUSTOM_DOMAIN", "")
         key_id = getattr(settings, "AWS_CLOUDFRONT_KEY_ID", "")
@@ -201,12 +268,44 @@ class Command(BaseCommand):
         positive_settings = {
             "MEDIA_PROCESSING_LEASE_SECONDS": settings.MEDIA_PROCESSING_LEASE_SECONDS,
             "MEDIA_DISPATCH_RETRY_SECONDS": settings.MEDIA_DISPATCH_RETRY_SECONDS,
+            "MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS": (
+                settings.MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS
+            ),
             "MEDIA_MAX_DISPATCH_ATTEMPTS": settings.MEDIA_MAX_DISPATCH_ATTEMPTS,
             "MEDIA_RECONCILE_MAX_ASSETS": settings.MEDIA_RECONCILE_MAX_ASSETS,
+            "MEDIA_DISPATCH_MAX_CONCURRENT_TASKS": (
+                settings.MEDIA_DISPATCH_MAX_CONCURRENT_TASKS
+            ),
+            "MEDIA_DISPATCH_MAX_TASKS_PER_HOUR": (
+                settings.MEDIA_DISPATCH_MAX_TASKS_PER_HOUR
+            ),
+            "MEDIA_DISPATCH_STARTUP_GRACE_SECONDS": (
+                settings.MEDIA_DISPATCH_STARTUP_GRACE_SECONDS
+            ),
+            "MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS": (
+                settings.MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS
+            ),
+            "MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS": (
+                settings.MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS
+            ),
         }
         for name, value in positive_settings.items():
             if value < 1:
                 errors.append(f"{name} must be positive.")
+        if settings.MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS > 3600:
+            errors.append(
+                "MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS must not exceed 3600."
+            )
+        if settings.MEDIA_DISPATCH_MAX_CONCURRENT_TASKS > 2:
+            errors.append(
+                "MEDIA_DISPATCH_MAX_CONCURRENT_TASKS must not exceed the "
+                "pilot cap of 2."
+            )
+        if settings.MEDIA_DISPATCH_MAX_TASKS_PER_HOUR > 6:
+            errors.append(
+                "MEDIA_DISPATCH_MAX_TASKS_PER_HOUR must not exceed the "
+                "pilot budget cap of 6."
+            )
 
     def _check_development_settings(self, warnings):
         production_hosts = {
