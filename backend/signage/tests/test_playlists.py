@@ -1,8 +1,11 @@
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Barrier
 
 import pytest
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import close_old_connections, connection, connections
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -342,5 +345,193 @@ def test_unreferenced_media_binary_deletion_preserves_metadata():
     media.refresh_from_db()
     assert media.status == MediaAsset.Status.ARCHIVED
     assert media.business_name == "Example"
+    assert not media.source_file
+    assert not media.normalized_file
+
+
+@pytest.mark.django_db
+def test_scheduled_publication_rejects_global_window_overlap():
+    owner = User.objects.create_user(
+        "overlap-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("overlap.png", b"source"),
+        normalized_file=SimpleUploadedFile("overlap-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+    starts_at = next_monday_noon()
+    first = Playlist.objects.create(
+        name="Campaign A",
+        version=1,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    second = Playlist.objects.create(
+        name="Campaign B",
+        version=1,
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+    PlaylistItem.objects.create(playlist=first, media=media, position=1)
+    PlaylistItem.objects.create(playlist=second, media=media, position=1)
+    publish_playlist(first, owner)
+
+    with pytest.raises(ValidationError, match="already overlaps"):
+        publish_playlist(second, owner)
+
+    second.refresh_from_db()
+    assert second.status == Playlist.Status.DRAFT
+
+
+@pytest.mark.django_db(transaction=True)
+def test_postgres_serializes_concurrent_publications_for_one_window():
+    if connection.vendor != "postgresql":
+        pytest.skip("PostgreSQL-specific publication locking test")
+    owner = User.objects.create_user(
+        "concurrent-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("concurrent.png", b"source"),
+        normalized_file=SimpleUploadedFile("concurrent-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+    starts_at = next_monday_noon()
+    playlist_ids = []
+    for name in ("Concurrent A", "Concurrent B"):
+        playlist = Playlist.objects.create(
+            name=name,
+            version=1,
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(days=7),
+            created_by=owner,
+        )
+        PlaylistItem.objects.create(playlist=playlist, media=media, position=1)
+        playlist_ids.append(playlist.pk)
+
+    start_together = Barrier(2)
+
+    def publish(playlist_id):
+        close_old_connections()
+        try:
+            start_together.wait(timeout=5)
+            publish_playlist(
+                Playlist.objects.get(pk=playlist_id),
+                User.objects.get(pk=owner.pk),
+            )
+        except ValidationError:
+            return "rejected"
+        finally:
+            connections.close_all()
+        return "published"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(publish, playlist_ids))
+
+    assert sorted(outcomes) == ["published", "rejected"]
+    assert Playlist.objects.filter(status=Playlist.Status.PUBLISHED).count() == 1
+
+
+@pytest.mark.django_db
+def test_urgent_replacement_covers_only_current_window_and_preserves_schedules():
+    owner = User.objects.create_user(
+        "urgent-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("urgent.png", b"source"),
+        normalized_file=SimpleUploadedFile("urgent-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+    current_start = current_playlist_window_start()
+    future_start = current_start + timedelta(days=7)
+
+    def playlist(name, starts_at):
+        created = Playlist.objects.create(
+            name=name,
+            version=1,
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(days=7),
+            created_by=owner,
+        )
+        PlaylistItem.objects.create(playlist=created, media=media, position=1)
+        return created
+
+    current = playlist("Current schedule", current_start)
+    future = playlist("Future schedule", future_start)
+    urgent = playlist("Current emergency", current_start)
+    future_urgent = playlist("Future emergency", future_start)
+    publish_playlist(current, owner)
+    publish_playlist(future, owner)
+
+    publish_playlist(urgent, owner, urgent=True)
+
+    current.refresh_from_db()
+    future.refresh_from_db()
+    urgent.refresh_from_db()
+    assert current.status == Playlist.Status.PUBLISHED
+    assert future.status == Playlist.Status.PUBLISHED
+    assert urgent.status == Playlist.Status.PUBLISHED
+    assert urgent.is_urgent is True
+
+    with pytest.raises(ValidationError, match="current weekly window"):
+        publish_playlist(future_urgent, owner, urgent=True)
+
+
+@pytest.mark.django_db
+def test_media_dashboard_requires_explicit_binary_deletion_confirmation(
+    client,
+    tmp_path,
+    settings,
+):
+    settings.MEDIA_ROOT = tmp_path
+    owner = User.objects.create_user(
+        "delete-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("delete.png", b"source"),
+        normalized_file=SimpleUploadedFile("delete-ready.png", b"ready"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+    client.force_login(owner)
+    url = reverse("media-delete", args=[media.id])
+
+    assert client.post(url).status_code == 302
+    media.refresh_from_db()
+    assert media.status == MediaAsset.Status.READY
+    assert media.source_file
+    assert media.normalized_file
+
+    assert client.post(url, {"confirm": "delete"}).status_code == 302
+    media.refresh_from_db()
+    assert media.status == MediaAsset.Status.ARCHIVED
     assert not media.source_file
     assert not media.normalized_file

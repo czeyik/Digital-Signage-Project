@@ -234,6 +234,12 @@ resource "aws_iam_role_policy" "ec2_target_media_dispatch" {
         Resource = [aws_ecs_task_definition.ec2_target_worker[0].arn]
       },
       {
+        Sid      = "InspectIsolatedMediaTaskCapacity"
+        Effect   = "Allow"
+        Action   = ["ecs:ListTasks"]
+        Resource = ["*"]
+      },
+      {
         Sid      = "PassIsolatedMediaTaskRoles"
         Effect   = "Allow"
         Action   = ["iam:PassRole"]

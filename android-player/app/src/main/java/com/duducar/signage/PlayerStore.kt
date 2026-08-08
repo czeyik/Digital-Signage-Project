@@ -48,7 +48,11 @@ class PlayerStore(private val context: Context) :
     }
 
     fun putState(key: String, value: String) {
-        writableDatabase.insertWithOnConflict(
+        putState(writableDatabase, key, value)
+    }
+
+    private fun putState(database: SQLiteDatabase, key: String, value: String) {
+        database.insertWithOnConflict(
             "state",
             null,
             ContentValues().apply {
@@ -89,6 +93,62 @@ class PlayerStore(private val context: Context) :
         return enforceStoragePolicy(maxBytes, minimumFreeBytes, recordedAt)
     }
 
+    fun enqueueBatchAndClearPlaybackState(
+        batch: JSONObject,
+        maxBytes: Long,
+        minimumFreeBytes: Long,
+        recordedAt: String,
+    ): JSONObject? {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            database.insertWithOnConflict(
+                "pending_batches",
+                null,
+                ContentValues().apply {
+                    put("id", batch.getString("id"))
+                    put("payload", batch.toString())
+                    put("created_at", System.currentTimeMillis())
+                },
+                SQLiteDatabase.CONFLICT_IGNORE,
+            )
+            putState(database, "current_playback", "")
+            putState(database, "loop_results", "")
+            putState(database, "loop_started_at", "")
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+        return enforceStoragePolicy(maxBytes, minimumFreeBytes, recordedAt)
+    }
+
+    fun clearPlaybackState() {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            putState(database, "current_playback", "")
+            putState(database, "loop_results", "")
+            putState(database, "loop_started_at", "")
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    fun recordCheckpointLossAndClear(event: JSONObject) {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            enqueueOperationalEvent(database, event)
+            putState(database, "current_playback", "")
+            putState(database, "loop_results", "")
+            putState(database, "loop_started_at", "")
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
     fun pendingBatches(): List<Pair<String, JSONObject>> {
         val values = mutableListOf<Pair<String, JSONObject>>()
         readableDatabase.query(
@@ -112,9 +172,13 @@ class PlayerStore(private val context: Context) :
     }
 
     fun enqueueOperationalEvent(event: JSONObject) {
+        enqueueOperationalEvent(writableDatabase, event)
+    }
+
+    private fun enqueueOperationalEvent(database: SQLiteDatabase, event: JSONObject) {
         val id = event.optString("id").ifBlank { java.util.UUID.randomUUID().toString() }
         event.put("id", id)
-        writableDatabase.insertWithOnConflict(
+        database.insertWithOnConflict(
             "pending_operational_events",
             null,
             ContentValues().apply {
@@ -154,16 +218,14 @@ class PlayerStore(private val context: Context) :
         recordedAt: String,
     ): JSONObject? {
         writableDatabase.delete("pending_batches", "acknowledged = 1", null)
-        var queueBytes = pendingBatchBytes()
-        if (!StoragePolicy.shouldForceQueueLoss(
-                queueBytes,
-                context.filesDir.usableSpace,
-                maxBytes,
-                minimumFreeBytes,
-            )
-        ) {
-            return null
-        }
+        val queueBytes = pendingBatchBytes()
+        val removalTargetBytes = StoragePolicy.forcedQueueRemovalTargetBytes(
+            queueBytes = queueBytes,
+            usableBytes = context.filesDir.usableSpace,
+            maxQueueBytes = maxBytes,
+            minimumFreeBytes = minimumFreeBytes,
+        )
+        if (removalTargetBytes <= 0) return null
         var removed = 0
         var removedBytes = 0L
         val batchesToRemove = mutableListOf<Pair<String, Long>>()
@@ -178,28 +240,36 @@ class PlayerStore(private val context: Context) :
         ).use { cursor ->
             while (
                 cursor.moveToNext() &&
-                queueBytes > maxBytes * 3 / 4
+                removedBytes < removalTargetBytes
             ) {
                 val id = cursor.getString(0)
                 val bytes = cursor.getLong(1)
                 batchesToRemove += id to bytes
                 removed += 1
                 removedBytes += bytes
-                queueBytes -= bytes
             }
         }
         return if (batchesToRemove.isNotEmpty()) {
             val details = JSONObject()
                 .put("removed_batches", removed)
                 .put("estimated_removed_bytes", removedBytes)
-            enqueueOperationalEvent(
-                JSONObject()
-                    .put("kind", "forced_queue_loss")
-                    .put("recorded_at", recordedAt)
-                    .put("details", details),
-            )
-            batchesToRemove.forEach { (id, _) ->
-                writableDatabase.delete("pending_batches", "id = ?", arrayOf(id))
+                .put("target_removed_bytes", removalTargetBytes)
+            val database = writableDatabase
+            database.beginTransaction()
+            try {
+                batchesToRemove.forEach { (id, _) ->
+                    database.delete("pending_batches", "id = ?", arrayOf(id))
+                }
+                enqueueOperationalEvent(
+                    database,
+                    JSONObject()
+                        .put("kind", "forced_queue_loss")
+                        .put("recorded_at", recordedAt)
+                        .put("details", details),
+                )
+                database.setTransactionSuccessful()
+            } finally {
+                database.endTransaction()
             }
             details
         } else {

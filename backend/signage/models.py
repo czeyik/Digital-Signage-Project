@@ -7,7 +7,7 @@ from django.conf import settings
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -171,6 +171,8 @@ class UserManager(BaseUserManager):
         extra_fields.setdefault("role", User.Role.OWNER)
         if not extra_fields["is_staff"] or not extra_fields["is_superuser"]:
             raise ValueError("A superuser must have staff and superuser enabled.")
+        if extra_fields["role"] != User.Role.OWNER:
+            raise ValueError("A superuser must be an account owner.")
         return self.create_user(email, password, **extra_fields)
 
 
@@ -190,7 +192,12 @@ class User(AbstractUser):
         super().clean()
         if self.email and not self.email.lower().endswith("@duducar.co"):
             raise ValidationError({"email": "Use a @duducar.co email address."})
-        self.is_staff = True
+        # Django staff status grants access to the administration application.
+        # Marketing users use the purpose-built dashboard and must never inherit
+        # that broader surface merely because they have a dashboard account.
+        self.is_staff = self.is_owner
+        if not self.is_owner:
+            self.is_superuser = False
 
     @property
     def is_owner(self):
@@ -302,53 +309,87 @@ class Playlist(TimeStampedModel):
             )
         if self.pk:
             original = Playlist.objects.filter(pk=self.pk).first()
-            if original and original.status == self.Status.PUBLISHED:
-                changed = any(
-                    getattr(original, field) != getattr(self, field)
-                    for field in ("name", "version", "starts_at", "ends_at")
-                )
-                if changed:
-                    raise ValidationError("Published playlist versions are immutable.")
-                if (
-                    self.status != original.status
-                    and self.status != self.Status.CANCELLED
-                ):
-                    raise ValidationError(
-                        "Published playlists can only be cancelled by a correction."
-                    )
-                if self.status != self.Status.CANCELLED and self.superseded_by_id:
-                    raise ValidationError(
-                        "Only cancelled playlists can link to a replacement."
-                    )
+            if original:
+                self._validate_locked_version(original)
+
+    def _validate_locked_version(self, original):
+        """Permit only the one-way published-to-cancelled correction transition."""
+        locked_fields = (
+            "name",
+            "version",
+            "starts_at",
+            "ends_at",
+            "published_at",
+            "is_urgent",
+            "created_by_id",
+        )
+        locked_fields_changed = any(
+            getattr(original, field) != getattr(self, field) for field in locked_fields
+        )
+        if original.status == self.Status.CANCELLED:
+            changed = locked_fields_changed or (
+                self.status != original.status
+                or self.superseded_by_id != original.superseded_by_id
+            )
+            if changed:
+                raise ValidationError("Cancelled playlist versions are immutable.")
+            return
+        if original.status != self.Status.PUBLISHED:
+            return
+        if locked_fields_changed:
+            raise ValidationError("Published playlist versions are immutable.")
+        if self.status == self.Status.PUBLISHED:
+            if self.superseded_by_id != original.superseded_by_id:
+                raise ValidationError("Published playlist versions are immutable.")
+            return
+        if self.status != self.Status.CANCELLED or not self.superseded_by_id:
+            raise ValidationError(
+                "Published playlists can only be cancelled by a correction."
+            )
+        replacement = Playlist.objects.filter(pk=self.superseded_by_id).first()
+        if not replacement or any(
+            (
+                replacement.status != self.Status.PUBLISHED,
+                replacement.name != original.name,
+                replacement.version <= original.version,
+                replacement.starts_at != original.starts_at,
+                replacement.ends_at != original.ends_at,
+            )
+        ):
+            raise ValidationError(
+                "A correction must link to a newer published version of the same "
+                "playlist window."
+            )
 
     def save(self, *args, **kwargs):
         if self.pk:
             original = Playlist.objects.filter(pk=self.pk).first()
-            if original and original.status == self.Status.PUBLISHED:
-                immutable = (
-                    "name",
-                    "version",
-                    "starts_at",
-                    "ends_at",
-                    "is_urgent",
-                )
-                if any(
-                    getattr(original, field) != getattr(self, field)
-                    for field in immutable
+            if original:
+                self._validate_locked_version(original)
+                if original.status == self.Status.CANCELLED:
+                    raise ValidationError("Cancelled playlist versions are immutable.")
+                if (
+                    original.status == self.Status.PUBLISHED
+                    and self.status == self.Status.PUBLISHED
                 ):
                     raise ValidationError("Published playlist versions are immutable.")
                 if (
-                    self.status != original.status
-                    and self.status != self.Status.CANCELLED
+                    original.status == self.Status.PUBLISHED
+                    and self.status == self.Status.CANCELLED
+                    and kwargs.get("update_fields") is not None
+                    and not {"status", "superseded_by"}.issubset(
+                        set(kwargs["update_fields"])
+                    )
                 ):
                     raise ValidationError(
-                        "Published playlists can only be cancelled by a correction."
-                    )
-                if self.status != self.Status.CANCELLED and self.superseded_by_id:
-                    raise ValidationError(
-                        "Only cancelled playlists can link to a replacement."
+                        "A correction must update status and replacement together."
                     )
         return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.status in {self.Status.PUBLISHED, self.Status.CANCELLED}:
+            raise ValidationError("Published playlist versions cannot be deleted.")
+        return super().delete(*args, **kwargs)
 
     def __str__(self):
         return f"{self.name} v{self.version}"
@@ -511,19 +552,44 @@ class EnrollmentCode(TimeStampedModel):
 
     @classmethod
     def issue(cls, device, created_by):
-        raw = f"{secrets.randbelow(1_000_000):06d}"
-        enrollment = cls.objects.create(
-            device=device,
-            code_hash=token_hash(raw),
-            expires_at=timezone.now()
-            + timedelta(seconds=settings.ENROLLMENT_CODE_TTL_SECONDS),
-            created_by=created_by,
-        )
+        with transaction.atomic():
+            locked_device = Device.objects.select_for_update().get(pk=device.pk)
+            eligible_device = (
+                locked_device.status != Device.Status.DISABLED
+                and bool(locked_device.kiosk_pin_hash)
+                and locked_device.assignments.filter(
+                    unassigned_at__isnull=True
+                ).exists()
+            )
+            if not eligible_device:
+                raise ValidationError(
+                    "Enrollment requires an enabled, assigned device with a kiosk "
+                    "administrator PIN."
+                )
+            now = timezone.now()
+            cls.objects.filter(
+                device=locked_device,
+                used_at__isnull=True,
+            ).update(expires_at=now)
+            raw = f"{secrets.randbelow(1_000_000):06d}"
+            enrollment = cls.objects.create(
+                device=locked_device,
+                code_hash=token_hash(raw),
+                expires_at=now
+                + timedelta(seconds=settings.ENROLLMENT_CODE_TTL_SECONDS),
+                created_by=created_by,
+            )
         return enrollment, raw
 
     @property
     def is_usable(self):
-        return self.used_at is None and self.expires_at > timezone.now()
+        return (
+            self.used_at is None
+            and self.expires_at > timezone.now()
+            and bool(self.device.kiosk_pin_hash)
+            and self.device.status != Device.Status.DISABLED
+            and self.device.assignments.filter(unassigned_at__isnull=True).exists()
+        )
 
 
 class EnrollmentChallenge(TimeStampedModel):

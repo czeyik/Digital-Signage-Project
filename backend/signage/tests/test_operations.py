@@ -19,6 +19,13 @@ from config.settings import (
     secret_env_or_file,
     staticfiles_storage_backend,
 )
+from signage.management.commands.check_deployment_readiness import (
+    Command as ReadinessCommand,
+)
+from signage.management.commands.create_postgres_backup import BACKUP_PREFIX
+from signage.management.commands.create_postgres_backup import (
+    Command as PostgresBackupCommand,
+)
 from signage.models import HardwareQualification, User
 
 TEST_SECRET_KEY = secrets.token_urlsafe(32)
@@ -240,6 +247,42 @@ def test_postgres_backup_is_custom_format_validated_hashed_and_uploaded(
     assert not old_digest.exists()
 
 
+def test_local_postgres_backup_cache_is_capped_by_archive_count(tmp_path):
+    now = 1_900_000_000
+    for number in range(4):
+        archive = tmp_path / f"{BACKUP_PREFIX}-2026010{number + 1}T000000Z.dump"
+        digest = archive.with_suffix(".dump.sha256")
+        archive.write_bytes(f"archive-{number}".encode())
+        digest.write_text(f"digest-{number}", encoding="ascii")
+        os.utime(archive, (now + number, now + number))
+        os.utime(digest, (now + number, now + number))
+
+    PostgresBackupCommand()._prune_old_backups(
+        tmp_path,
+        retain_days=30_000,
+        max_local_archives=2,
+    )
+
+    assert len(list(tmp_path.glob(f"{BACKUP_PREFIX}-*.dump"))) == 2
+    assert len(list(tmp_path.glob(f"{BACKUP_PREFIX}-*.dump.sha256"))) == 2
+
+
+@override_settings(MEDIA_MAX_REQUEST_BYTES=100)
+def test_media_upload_request_size_is_rejected_before_authentication():
+    client = Client()
+
+    response = client.post(
+        "/media/upload/",
+        data=b"x",
+        content_type="application/octet-stream",
+        CONTENT_LENGTH="101",
+    )
+
+    assert response.status_code == 413
+    assert response["X-Content-Type-Options"] == "nosniff"
+    assert response["Content-Security-Policy"].startswith("default-src 'self'")
+
+
 @override_settings(
     DEBUG=True,
     DATABASES={"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": ":memory:"}},
@@ -253,6 +296,104 @@ def test_postgres_backup_is_custom_format_validated_hashed_and_uploaded(
 def test_production_readiness_fails_for_unsafe_environment():
     with pytest.raises(CommandError):
         call_command("check_deployment_readiness", environment="production")
+
+
+@override_settings(MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS=3601)
+def test_readiness_rejects_dispatch_reuse_beyond_ecs_safe_window():
+    errors = []
+
+    ReadinessCommand()._check_media_dispatch(errors)
+
+    assert (
+        "MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS must not exceed 3600." in errors
+    )
+
+
+@override_settings(
+    MEDIA_MAX_IMAGE_PIXELS=0,
+    MEDIA_MAX_IMAGE_DIMENSION=0,
+    MEDIA_CLAMAV_TIMEOUT_SECONDS=0,
+    MEDIA_FFPROBE_TIMEOUT_SECONDS=0,
+    MEDIA_FFMPEG_TIMEOUT_SECONDS=0,
+    FRESHCLAM_TIMEOUT_SECONDS=0,
+    MEDIA_WORKER_TIMEOUT_SECONDS=0,
+    MEDIA_DISPATCH_MAX_CONCURRENT_TASKS=0,
+    MEDIA_DISPATCH_MAX_TASKS_PER_HOUR=0,
+    MEDIA_DISPATCH_STARTUP_GRACE_SECONDS=0,
+    MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS=0,
+    MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS=0,
+    PLAYBACK_BATCH_MAX_COMPRESSED_BYTES=0,
+    PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES=0,
+    PILOT_BACKUP_RETENTION_DAYS=0,
+    PILOT_BACKUP_MAX_LOCAL_ARCHIVES=0,
+)
+def test_readiness_rejects_nonpositive_resource_and_timeout_limits():
+    errors = []
+    command = ReadinessCommand()
+
+    command._check_media_processing_limits(errors)
+    command._check_media_dispatch(errors)
+    command._check_playback_batch_limits(errors)
+    command._check_backup_limits(errors)
+
+    expected_names = {
+        "MEDIA_MAX_IMAGE_PIXELS",
+        "MEDIA_MAX_IMAGE_DIMENSION",
+        "MEDIA_CLAMAV_TIMEOUT_SECONDS",
+        "MEDIA_FFPROBE_TIMEOUT_SECONDS",
+        "MEDIA_FFMPEG_TIMEOUT_SECONDS",
+        "FRESHCLAM_TIMEOUT_SECONDS",
+        "MEDIA_WORKER_TIMEOUT_SECONDS",
+        "MEDIA_DISPATCH_MAX_CONCURRENT_TASKS",
+        "MEDIA_DISPATCH_MAX_TASKS_PER_HOUR",
+        "MEDIA_DISPATCH_STARTUP_GRACE_SECONDS",
+        "MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS",
+        "MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS",
+        "PLAYBACK_BATCH_MAX_COMPRESSED_BYTES",
+        "PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES",
+        "PILOT_BACKUP_RETENTION_DAYS",
+        "PILOT_BACKUP_MAX_LOCAL_ARCHIVES",
+    }
+    for name in expected_names:
+        assert any(name in error for error in errors)
+
+
+@override_settings(
+    MEDIA_MAX_REQUEST_BYTES=50 * 1024 * 1024,
+    MEDIA_MAX_IMAGE_PIXELS=25_000_001,
+    MEDIA_MAX_IMAGE_DIMENSION=10_001,
+    MEDIA_WORKER_TIMEOUT_SECONDS=1800,
+    MEDIA_PROCESSING_LEASE_SECONDS=1800,
+    MEDIA_DISPATCH_MAX_CONCURRENT_TASKS=3,
+    MEDIA_DISPATCH_MAX_TASKS_PER_HOUR=7,
+    PLAYBACK_BATCH_MAX_COMPRESSED_BYTES=256 * 1024 + 1,
+    PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES=1024 * 1024 + 1,
+    PILOT_BACKUP_RETENTION_DAYS=31,
+    PILOT_BACKUP_MAX_LOCAL_ARCHIVES=31,
+)
+def test_readiness_rejects_limits_outside_pilot_safety_ranges():
+    errors = []
+    command = ReadinessCommand()
+
+    command._check_media_processing_limits(errors)
+    command._check_media_dispatch(errors)
+    command._check_playback_batch_limits(errors)
+    command._check_backup_limits(errors)
+
+    expected_fragments = {
+        "50 MiB video limit plus 1 MiB",
+        "MEDIA_MAX_IMAGE_PIXELS must not exceed",
+        "MEDIA_MAX_IMAGE_DIMENSION must not exceed",
+        "MEDIA_WORKER_TIMEOUT_SECONDS must be shorter",
+        "pilot cap of 2",
+        "pilot budget cap of 6",
+        "PLAYBACK_BATCH_MAX_COMPRESSED_BYTES must be between",
+        "PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES must be between",
+        "PILOT_BACKUP_RETENTION_DAYS must be between 1 and 30",
+        "PILOT_BACKUP_MAX_LOCAL_ARCHIVES must be between 1 and 30",
+    }
+    for fragment in expected_fragments:
+        assert any(fragment in error for error in errors)
 
 
 @override_settings(

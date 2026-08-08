@@ -123,3 +123,32 @@ output "media_cloudfront_public_key_id" {
   description = "Public key ID used when the application signs CloudFront URLs."
   value       = try(aws_cloudfront_public_key.media[0].id, null)
 }
+
+output "production_runtime_asset_document" {
+  description = "SSM document for explicitly validated EC2 runtime asset updates."
+  value       = try(aws_ssm_document.ec2_runtime_assets[0].name, null)
+}
+
+output "production_runtime_asset_document_version" {
+  description = "Exact SSM document version to pin during runtime asset validation and installation."
+  value       = try(aws_ssm_document.ec2_runtime_assets[0].document_version, null)
+}
+
+output "production_runtime_asset_document_hash" {
+  description = "AWS-generated hash to pin during runtime asset validation and installation."
+  value       = try(aws_ssm_document.ec2_runtime_assets[0].hash, null)
+}
+
+output "production_runtime_asset_document_hash_type" {
+  description = "Hash algorithm for the pinned runtime asset SSM document."
+  value       = try(aws_ssm_document.ec2_runtime_assets[0].hash_type, null)
+}
+
+output "production_runtime_asset_sha256" {
+  description = "Reviewed SHA-256 values embedded in the runtime asset document."
+  value = {
+    caddyfile          = local.ec2_runtime_caddy_sha256
+    environment_render = local.ec2_runtime_renderer_sha256
+    operation_manager  = local.ec2_runtime_manager_sha256
+  }
+}

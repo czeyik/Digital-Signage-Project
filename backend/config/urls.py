@@ -1,12 +1,13 @@
 from django.conf import settings
 from django.conf.urls.static import static
-from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import include, path
 
+from signage.admin import owner_admin_site
 from signage.views import (
     AuditedLogoutView,
     SecureLoginView,
+    SecurePasswordResetConfirmView,
     SecurePasswordResetView,
     health_live,
     health_ready,
@@ -15,7 +16,7 @@ from signage.views import (
 urlpatterns = [
     path("health/live/", health_live, name="health-live"),
     path("health/ready/", health_ready, name="health-ready"),
-    path("admin/", admin.site.urls),
+    path("admin/", owner_admin_site.urls),
     path(
         "login/",
         SecureLoginView.as_view(),
@@ -40,7 +41,7 @@ urlpatterns = [
     ),
     path(
         "password-reset/<uidb64>/<token>/",
-        auth_views.PasswordResetConfirmView.as_view(
+        SecurePasswordResetConfirmView.as_view(
             template_name="registration/password_reset_confirm.html",
             success_url="/password-reset/complete/",
         ),

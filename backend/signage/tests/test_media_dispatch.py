@@ -4,6 +4,7 @@ from io import BytesIO, StringIO
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ReadTimeoutError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import CommandError, call_command
 from django.db import transaction
@@ -15,8 +16,12 @@ from signage.management.commands.process_media import Command as ProcessMediaCom
 from signage.management.commands.reconcile_media_processing import (
     Command as ReconcileMediaCommand,
 )
-from signage.media_dispatch import dispatch_media_processing, queue_media_processing
-from signage.models import Alert, MediaAsset, User
+from signage.media_dispatch import (
+    DISPATCH_BUDGET_KEY,
+    dispatch_media_processing,
+    queue_media_processing,
+)
+from signage.models import Alert, ApiThrottle, MediaAsset, User
 from signage.services import delete_media_binary, inspect_media
 
 ECS_DISPATCH_SETTINGS = {
@@ -68,13 +73,16 @@ def test_dispatch_runs_one_task_for_exact_asset_uuid(monkeypatch):
     calls = []
 
     class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": []}
+
         def run_task(self, **kwargs):
             calls.append(kwargs)
             return {"tasks": [{"taskArn": "task-arn"}], "failures": []}
 
     monkeypatch.setattr(
         "signage.media_dispatch.boto3.client",
-        lambda service, region_name=None: EcsClient(),
+        lambda service, region_name=None, config=None: EcsClient(),
     )
 
     assert dispatch_media_processing(asset.id) is True
@@ -83,6 +91,7 @@ def test_dispatch_runs_one_task_for_exact_asset_uuid(monkeypatch):
     assert asset.status == MediaAsset.Status.QUARANTINED
     assert asset.dispatch_attempts == 1
     assert asset.dispatched_at is not None
+    assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 1
     assert calls[0]["overrides"]["containerOverrides"][0]["command"] == [
         "sh",
         "worker-entrypoint.sh",
@@ -102,12 +111,15 @@ def test_dispatch_failure_keeps_quarantine_and_opens_generic_alert(monkeypatch):
     asset = create_asset()
 
     class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": []}
+
         def run_task(self, **kwargs):
             return {"tasks": [], "failures": [{"arn": "not-logged"}]}
 
     monkeypatch.setattr(
         "signage.media_dispatch.boto3.client",
-        lambda service, region_name=None: EcsClient(),
+        lambda service, region_name=None, config=None: EcsClient(),
     )
 
     assert dispatch_media_processing(asset.id) is False
@@ -117,6 +129,7 @@ def test_dispatch_failure_keeps_quarantine_and_opens_generic_alert(monkeypatch):
     assert asset.status == MediaAsset.Status.QUARANTINED
     assert asset.dispatch_attempts == 1
     assert asset.dispatched_at is None
+    assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 1
     assert str(asset.id) not in alert.message
     assert "not-logged" not in alert.message
 
@@ -129,12 +142,15 @@ def test_final_dispatch_failure_opens_terminal_alert(monkeypatch):
     )
 
     class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": []}
+
         def run_task(self, **kwargs):
             return {"tasks": [], "failures": [{"arn": "not-logged"}]}
 
     monkeypatch.setattr(
         "signage.media_dispatch.boto3.client",
-        lambda service, region_name=None: EcsClient(),
+        lambda service, region_name=None, config=None: EcsClient(),
     )
 
     assert dispatch_media_processing(asset.id) is False
@@ -143,6 +159,255 @@ def test_final_dispatch_failure_opens_terminal_alert(monkeypatch):
         code="media_processing_dispatch_exhausted",
         severity=Alert.Severity.CRITICAL,
     ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(
+    **ECS_DISPATCH_SETTINGS,
+    MEDIA_DISPATCH_MAX_CONCURRENT_TASKS=1,
+)
+def test_dispatch_concurrency_limit_defers_without_consuming_attempt(monkeypatch):
+    asset = create_asset()
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            if kwargs["desiredStatus"] == "RUNNING":
+                return {"taskArns": ["already-running"]}
+            return {"taskArns": []}
+
+        def run_task(self, **kwargs):
+            pytest.fail("capacity-limited upload must not start another task")
+
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: EcsClient(),
+    )
+
+    assert dispatch_media_processing(asset.id) is False
+
+    asset.refresh_from_db()
+    assert asset.dispatch_attempts == 0
+    assert asset.dispatched_at is None
+
+
+@pytest.mark.django_db
+@override_settings(
+    **ECS_DISPATCH_SETTINGS,
+    MEDIA_DISPATCH_MAX_CONCURRENT_TASKS=2,
+)
+def test_dispatch_combines_visible_and_recent_capacity_signals(monkeypatch):
+    asset = create_asset()
+    create_asset(title="Recent dispatch", dispatched_at=timezone.now())
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": ["older-active-task"]}
+
+        def run_task(self, **kwargs):
+            pytest.fail("combined capacity must defer the third task")
+
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: EcsClient(),
+    )
+
+    assert dispatch_media_processing(asset.id) is False
+
+    asset.refresh_from_db()
+    assert asset.dispatch_attempts == 0
+    assert asset.dispatched_at is None
+
+
+@pytest.mark.django_db
+@override_settings(
+    **ECS_DISPATCH_SETTINGS,
+    MEDIA_DISPATCH_MAX_TASKS_PER_HOUR=2,
+)
+def test_hourly_dispatch_budget_defers_without_consuming_attempt(monkeypatch):
+    asset = create_asset()
+    ApiThrottle.objects.create(
+        key_hash=DISPATCH_BUDGET_KEY,
+        attempts=2,
+        window_started_at=timezone.now(),
+    )
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            pytest.fail("hourly budget is checked before ECS capacity")
+
+        def run_task(self, **kwargs):
+            pytest.fail("budget-limited upload must not start another task")
+
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: EcsClient(),
+    )
+
+    assert dispatch_media_processing(asset.id) is False
+
+    asset.refresh_from_db()
+    assert asset.dispatch_attempts == 0
+    assert Alert.objects.filter(
+        code="media_processing_dispatch_budget_exhausted"
+    ).exists()
+
+
+@pytest.mark.django_db
+@override_settings(**ECS_DISPATCH_SETTINGS)
+def test_dispatch_rejects_response_with_task_and_failure(monkeypatch):
+    asset = create_asset()
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": []}
+
+        def run_task(self, **kwargs):
+            return {
+                "tasks": [{"taskArn": "ambiguous-partial-task"}],
+                "failures": [{"arn": "must-not-be-logged"}],
+            }
+
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: EcsClient(),
+    )
+
+    assert dispatch_media_processing(asset.id) is False
+
+    asset.refresh_from_db()
+    assert asset.dispatch_attempts == 1
+    assert asset.dispatched_at is None
+    assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 1
+    assert Alert.objects.filter(code="media_processing_dispatch_failed").exists()
+
+
+@pytest.mark.django_db
+@override_settings(**ECS_DISPATCH_SETTINGS)
+def test_ambiguous_run_task_retry_reuses_token_and_consumes_call_budget(monkeypatch):
+    asset = create_asset()
+    client_tokens = []
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": []}
+
+        def run_task(self, **kwargs):
+            client_tokens.append(kwargs["clientToken"])
+            if len(client_tokens) == 1:
+                raise ReadTimeoutError(endpoint_url="https://ecs.example.test")
+            return {"tasks": [{"taskArn": "same-idempotent-task"}], "failures": []}
+
+    client = EcsClient()
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: client,
+    )
+
+    assert dispatch_media_processing(asset.id) is False
+    asset.refresh_from_db()
+    assert asset.dispatch_attempts == 1
+    assert asset.dispatched_at is not None
+    assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 1
+
+    assert dispatch_media_processing(asset.id, bypass_backoff=True) is True
+
+    asset.refresh_from_db()
+    assert asset.dispatch_attempts == 1
+    assert client_tokens[0] == client_tokens[1]
+    assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 2
+    assert not ApiThrottle.objects.exclude(key_hash=DISPATCH_BUDGET_KEY).exists()
+
+
+@pytest.mark.django_db
+@override_settings(
+    **ECS_DISPATCH_SETTINGS,
+    MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS=900,
+)
+def test_expired_ambiguous_dispatch_advances_attempt_and_token(monkeypatch):
+    asset = create_asset()
+    client_tokens = []
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": []}
+
+        def run_task(self, **kwargs):
+            client_tokens.append(kwargs["clientToken"])
+            if len(client_tokens) == 1:
+                raise ReadTimeoutError(endpoint_url="https://ecs.example.test")
+            return {"tasks": [{"taskArn": "new-attempt-task"}], "failures": []}
+
+    client = EcsClient()
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: client,
+    )
+
+    assert dispatch_media_processing(asset.id) is False
+    dispatch_state = ApiThrottle.objects.exclude(
+        key_hash=DISPATCH_BUDGET_KEY
+    ).get()
+    dispatch_state.window_started_at = timezone.now() - timedelta(minutes=16)
+    dispatch_state.save(update_fields=["window_started_at"])
+
+    assert dispatch_media_processing(asset.id, bypass_backoff=True) is True
+
+    asset.refresh_from_db()
+    assert asset.dispatch_attempts == 2
+    assert client_tokens[0] != client_tokens[1]
+    assert client_tokens[0].endswith("-1")
+    assert client_tokens[1].endswith("-2")
+    assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 2
+    assert not ApiThrottle.objects.exclude(key_hash=DISPATCH_BUDGET_KEY).exists()
+
+
+@pytest.mark.django_db
+@override_settings(
+    **ECS_DISPATCH_SETTINGS,
+    MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS=900,
+)
+def test_expired_final_ambiguous_dispatch_moves_to_manual_review(monkeypatch):
+    asset = create_asset(
+        dispatch_attempts=ECS_DISPATCH_SETTINGS["MEDIA_MAX_DISPATCH_ATTEMPTS"] - 1
+    )
+    run_task_calls = 0
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": []}
+
+        def run_task(self, **kwargs):
+            nonlocal run_task_calls
+            run_task_calls += 1
+            raise ReadTimeoutError(endpoint_url="https://ecs.example.test")
+
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: EcsClient(),
+    )
+
+    assert dispatch_media_processing(asset.id) is False
+    dispatch_state = ApiThrottle.objects.exclude(
+        key_hash=DISPATCH_BUDGET_KEY
+    ).get()
+    dispatch_state.window_started_at = timezone.now() - timedelta(minutes=16)
+    dispatch_state.save(update_fields=["window_started_at"])
+
+    assert dispatch_media_processing(asset.id, bypass_backoff=True) is False
+
+    asset.refresh_from_db()
+    assert run_task_calls == 1
+    assert (
+        asset.dispatch_attempts
+        == ECS_DISPATCH_SETTINGS["MEDIA_MAX_DISPATCH_ATTEMPTS"]
+    )
+    assert asset.dispatched_at is None
+    assert Alert.objects.filter(
+        code="media_processing_dispatch_exhausted",
+        severity=Alert.Severity.CRITICAL,
+    ).exists()
+    assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 1
+    assert not ApiThrottle.objects.exclude(key_hash=DISPATCH_BUDGET_KEY).exists()
 
 
 @pytest.mark.django_db
@@ -312,12 +577,12 @@ def test_expired_worker_cannot_overwrite_newer_success(
     assert asset.status == MediaAsset.Status.READY
     assert asset.processing_token is None
     assert asset.normalized_file.name == winning_name
-    assert str(second_token) in winning_name
+    assert second_token.hex in winning_name
     stale_name = (
         Path("validated")
-        / str(asset.id)
-        / str(first_token)
-        / f"{asset.id}.png"
+        / asset.id.hex
+        / first_token.hex
+        / "media.png"
     )
     assert not (tmp_path / stale_name).exists()
 
@@ -357,8 +622,8 @@ def test_deletion_invalidates_worker_and_discards_its_staged_output(
     assert not asset.normalized_file
     stale_name = (
         Path("validated")
-        / str(asset.id)
-        / str(worker_token)
-        / f"{asset.id}.png"
+        / asset.id.hex
+        / worker_token.hex
+        / "media.png"
     )
     assert not (tmp_path / stale_name).exists()

@@ -5,8 +5,16 @@ from datetime import timedelta
 from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import get_user_model
+from django.contrib.auth import login as auth_login
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.views import LoginView, LogoutView, PasswordResetView
+from django.contrib.auth.views import (
+    INTERNAL_RESET_SESSION_TOKEN,
+    LoginView,
+    LogoutView,
+    PasswordChangeView,
+    PasswordResetConfirmView,
+    PasswordResetView,
+)
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import connection, transaction
 from django.db.models import Count, F, Q
@@ -15,6 +23,7 @@ from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_date
+from django.views.decorators.debug import sensitive_variables
 from django.views.decorators.http import require_http_methods, require_POST
 
 from .forms import (
@@ -58,6 +67,15 @@ def owner_required(user):
 
 def require_owner(request):
     owner_required(request.user)
+
+
+def render_one_time_secret(request, template_name, context):
+    """Render a newly generated secret without placing it in server-side state."""
+    response = render(request, template_name, context)
+    response["Cache-Control"] = "no-store, private, max-age=0"
+    response["Pragma"] = "no-cache"
+    response["Expires"] = "0"
+    return response
 
 
 class SecureLoginView(LoginView):
@@ -111,10 +129,24 @@ class SecureLoginView(LoginView):
         return super().form_invalid(form)
 
     def form_valid(self, form):
-        LoginThrottle.objects.filter(key_hash=self._key()).delete()
-        response = super().form_valid(form)
-        audit(self.request.user, "auth.login", self.request.user)
+        # Persist the required audit event before mutating the in-memory
+        # session. If audit storage is unavailable, no authenticated session
+        # may escape through SessionMiddleware after the failed request.
+        with transaction.atomic():
+            user = form.get_user()
+            LoginThrottle.objects.filter(key_hash=self._key()).delete()
+            audit(user, "auth.login", user)
+            response = super().form_valid(form)
         return response
+
+
+class SecureAdminLoginView(SecureLoginView):
+    """Apply dashboard throttling/auditing while admitting account owners only."""
+
+    def form_valid(self, form):
+        if not form.get_user().is_owner:
+            return self.form_invalid(form)
+        return super().form_valid(form)
 
 
 class AuditedLogoutView(LogoutView):
@@ -122,6 +154,56 @@ class AuditedLogoutView(LogoutView):
         if request.user.is_authenticated:
             audit(request.user, "auth.logout", request.user)
         return super().post(request, *args, **kwargs)
+
+
+class AuditedPasswordChangeView(PasswordChangeView):
+    def form_valid(self, form):
+        with transaction.atomic():
+            response = super().form_valid(form)
+            audit(self.request.user, "auth.password_change", self.request.user)
+        return response
+
+
+class InvalidPasswordResetToken(Exception):
+    """The reset token was consumed or expired before the password write."""
+
+
+@sensitive_variables("token", "raw_password")
+@transaction.atomic
+def _complete_password_reset(user_id, token, raw_password, token_generator):
+    """Consume one reset token while holding the user row lock."""
+    user_model = get_user_model()
+    user = user_model.objects.select_for_update().get(pk=user_id)
+    if not token_generator.check_token(user, token):
+        raise InvalidPasswordResetToken
+    user.set_password(raw_password)
+    user.save(update_fields=["password"])
+    audit(None, "auth.password_reset", user)
+    return user
+
+
+class SecurePasswordResetConfirmView(PasswordResetConfirmView):
+    """Make reset-token consumption single-use and transactionally audited."""
+
+    def form_valid(self, form):
+        session_token = self.request.session.get(INTERNAL_RESET_SESSION_TOKEN)
+        try:
+            user = _complete_password_reset(
+                self.user.pk,
+                session_token,
+                form.cleaned_data["new_password1"],
+                self.token_generator,
+            )
+        except (InvalidPasswordResetToken, get_user_model().DoesNotExist):
+            self.request.session.pop(INTERNAL_RESET_SESSION_TOKEN, None)
+            self.validlink = False
+            return self.render_to_response(self.get_context_data())
+
+        self.user = user
+        self.request.session.pop(INTERNAL_RESET_SESSION_TOKEN, None)
+        if self.post_reset_login:
+            auth_login(self.request, user, self.post_reset_login_backend)
+        return redirect(self.get_success_url())
 
 
 class SecurePasswordResetView(PasswordResetView):
@@ -249,6 +331,9 @@ def media_list(request):
 @require_POST
 def media_delete(request, media_id):
     asset = get_object_or_404(MediaAsset, pk=media_id)
+    if request.POST.get("confirm") != "delete":
+        messages.error(request, "Confirm binary deletion before continuing.")
+        return redirect("media-list")
     try:
         delete_media_binary(asset, request.user)
     except ValidationError as exc:
@@ -440,14 +525,19 @@ def device_list(request):
 
 @login_required
 @require_http_methods(["GET", "POST"])
+@transaction.atomic
 def device_create(request):
     require_owner(request)
     form = DeviceProvisioningForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         device = form.save()
         audit(request.user, "device.provision", device)
-        messages.success(request, "Device, driver, and vehicle assignment created.")
-        return redirect("device-list")
+        raw_pin = issue_kiosk_pin(device, request.user)
+        return render_one_time_secret(
+            request,
+            "signage/kiosk_pin.html",
+            {"device": device.label, "pin": raw_pin},
+        )
     return render(
         request,
         "signage/form.html",
@@ -457,12 +547,21 @@ def device_create(request):
 
 @login_required
 @require_http_methods(["GET", "POST"])
+@transaction.atomic
 def device_reassign(request, device_id):
     require_owner(request)
-    device = get_object_or_404(Device, pk=device_id)
+    devices = (
+        Device.objects.select_for_update()
+        if request.method == "POST"
+        else Device.objects
+    )
+    device = get_object_or_404(devices, pk=device_id)
     form = DeviceReassignmentForm(request.POST or None)
     if request.method == "POST" and form.is_valid():
         form.save(device)
+        EnrollmentCode.objects.filter(device=device, used_at__isnull=True).update(
+            expires_at=timezone.now()
+        )
         audit(request.user, "device.reassign", device)
         messages.success(
             request,
@@ -478,41 +577,55 @@ def device_reassign(request, device_id):
 
 @login_required
 @require_POST
+@transaction.atomic
 def issue_enrollment(request, device_id):
-    device = get_object_or_404(Device, pk=device_id)
+    device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
+    if device.status == Device.Status.DISABLED:
+        messages.error(request, "Reactivate the device before enrollment.")
+        return redirect("device-list")
     if not device.assignments.filter(unassigned_at__isnull=True).exists():
         messages.error(request, "Assign a car and driver before enrollment.")
         return redirect("device-list")
+    if not device.kiosk_pin_hash:
+        messages.error(
+            request,
+            "The account owner must set the kiosk administrator PIN before enrollment.",
+        )
+        return redirect("device-list")
+    _, raw_code = EnrollmentCode.issue(device, request.user)
+    audit(request.user, "device.enrollment_code.issue", device)
+    return render_one_time_secret(
+        request,
+        "signage/enrollment_code.html",
+        {"device": device.label, "code": raw_code},
+    )
+
+
+@login_required
+@require_POST
+@transaction.atomic
+def device_pin_reset(request, device_id):
+    require_owner(request)
+    device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
     EnrollmentCode.objects.filter(device=device, used_at__isnull=True).update(
         expires_at=timezone.now()
     )
-    _, raw_code = EnrollmentCode.issue(device, request.user)
-    audit(request.user, "device.enrollment_code.issue", device)
-    request.session["one_time_enrollment_code"] = {
-        "device": device.label,
-        "code": raw_code,
-    }
-    return redirect("enrollment-code")
-
-
-@login_required
-@require_POST
-def device_pin_reset(request, device_id):
-    require_owner(request)
-    device = get_object_or_404(Device, pk=device_id)
     raw_pin = issue_kiosk_pin(device, request.user)
-    request.session["one_time_kiosk_pin"] = {
-        "device": device.label,
-        "pin": raw_pin,
-    }
-    messages.success(request, "Kiosk administrator PIN reset.")
-    return redirect("kiosk-pin")
+    return render_one_time_secret(
+        request,
+        "signage/kiosk_pin.html",
+        {"device": device.label, "pin": raw_pin},
+    )
 
 
 @login_required
 @require_POST
+@transaction.atomic
 def device_disable(request, device_id):
-    device = get_object_or_404(Device, pk=device_id)
+    device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
+    EnrollmentCode.objects.filter(device=device, used_at__isnull=True).update(
+        expires_at=timezone.now()
+    )
     disable_device(device, request.user)
     messages.success(
         request,
@@ -532,25 +645,29 @@ def device_reactivate(request, device_id):
 
 @login_required
 def enrollment_code(request):
-    code = request.session.pop("one_time_enrollment_code", None)
-    if not code:
-        return redirect("device-list")
-    return render(request, "signage/enrollment_code.html", code)
+    # Legacy releases persisted this raw secret in database-backed sessions.
+    # Drop it without redisplaying it; current releases render only in the POST
+    # response that creates the code.
+    request.session.pop("one_time_enrollment_code", None)
+    return redirect("device-list")
 
 
 @login_required
 def kiosk_pin(request):
     require_owner(request)
-    pin = request.session.pop("one_time_kiosk_pin", None)
-    if not pin:
-        return redirect("device-list")
-    return render(request, "signage/kiosk_pin.html", pin)
+    request.session.pop("one_time_kiosk_pin", None)
+    return redirect("device-list")
 
 
 @login_required
 @require_POST
+@transaction.atomic
 def acknowledge_alert(request, alert_id):
-    alert = get_object_or_404(Alert, pk=alert_id, acknowledged_at__isnull=True)
+    alert = get_object_or_404(
+        Alert.objects.select_for_update(),
+        pk=alert_id,
+        acknowledged_at__isnull=True,
+    )
     alert.acknowledged_at = timezone.now()
     alert.acknowledged_by = request.user
     alert.save(update_fields=["acknowledged_at", "acknowledged_by", "updated_at"])
@@ -572,9 +689,14 @@ def alert_list(request):
 
 
 @login_required
+@transaction.atomic
 def settings_edit(request):
     require_owner(request)
-    settings_object = PlatformSettings.load()
+    settings_object = (
+        PlatformSettings.objects.select_for_update().get_or_create(singleton_id=1)[0]
+        if request.method == "POST"
+        else PlatformSettings.load()
+    )
     form = PlatformSettingsForm(request.POST or None, instance=settings_object)
     if request.method == "POST" and form.is_valid():
         form.save()
@@ -600,10 +722,16 @@ def user_list(request):
 
 @login_required
 @require_http_methods(["GET", "POST"])
+@transaction.atomic
 def user_edit(request, user_id=None):
     require_owner(request)
     model = get_user_model()
-    user_object = get_object_or_404(model, pk=user_id) if user_id else model()
+    users = (
+        model.objects.select_for_update()
+        if request.method == "POST"
+        else model.objects
+    )
+    user_object = get_object_or_404(users, pk=user_id) if user_id else model()
     form = DashboardUserForm(request.POST or None, instance=user_object)
     if request.method == "POST" and form.is_valid():
         saved = form.save()

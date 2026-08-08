@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import uuid
+import warnings
 from datetime import timedelta
 from pathlib import Path
 
@@ -169,10 +170,26 @@ def sniff_image_mime(path):
         raise ValidationError("Image filename extension does not match its content.")
     from PIL import Image
 
-    with Image.open(path) as image:
-        if image.format not in {"JPEG", "PNG"}:
-            raise ValidationError("Image decoder did not confirm JPEG or PNG content.")
-        image.verify()
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                if image.format not in {"JPEG", "PNG"}:
+                    raise ValidationError(
+                        "Image decoder did not confirm JPEG or PNG content."
+                    )
+                width, height = image.size
+                if (
+                    width < 1
+                    or height < 1
+                    or width > settings.MEDIA_MAX_IMAGE_DIMENSION
+                    or height > settings.MEDIA_MAX_IMAGE_DIMENSION
+                    or width * height > settings.MEDIA_MAX_IMAGE_PIXELS
+                ):
+                    raise ValidationError("Image dimensions exceed the safe limit.")
+                image.verify()
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValidationError("Image dimensions exceed the safe limit.") from exc
     return detected
 
 
@@ -188,21 +205,25 @@ def sniff_video_mime(path):
 
 
 def run_ffprobe(path):
-    probe = subprocess.run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration,format_name:stream=codec_type,codec_name,width,height",
-            "-of",
-            "json",
-            str(path),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration,format_name:stream=codec_type,codec_name,width,height",
+                "-of",
+                "json",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=settings.MEDIA_FFPROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValidationError("Video inspection timed out.") from exc
     return json.loads(probe.stdout)
 
 
@@ -229,21 +250,121 @@ def validate_normalized_video(path):
     duration_ms = round(float(details["format"]["duration"]) * 1000)
     if duration_ms > 15_000:
         raise ValidationError("Normalized output exceeds the 15-second limit.")
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-v",
-            "error",
-            "-i",
-            str(path),
-            "-f",
-            "null",
-            "-",
-        ],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-f",
+                "null",
+                "-",
+            ],
+            check=True,
+            capture_output=True,
+            timeout=settings.MEDIA_FFMPEG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValidationError("Normalized video validation timed out.") from exc
     return duration_ms
+
+
+def scan_quarantined_source(path, require_malware_scanner=True):
+    """Scan the source before any image or video decoder sees untrusted bytes."""
+    scanner = shutil.which("clamscan")
+    if require_malware_scanner and not scanner:
+        raise ValidationError("Malware scanner is unavailable.")
+    if not scanner:
+        return
+    scan_command = [scanner, "--no-summary"]
+    database = os.getenv("CLAMAV_DATABASE_DIR", "")
+    if database:
+        scan_command.extend(["--database", database])
+    try:
+        result = subprocess.run(
+            [*scan_command, str(path)],
+            check=False,
+            capture_output=True,
+            timeout=settings.MEDIA_CLAMAV_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ValidationError("Malware scan timed out.") from exc
+    if result.returncode == 1:
+        raise ValidationError("Malware was detected in the upload.")
+    if result.returncode != 0:
+        raise ValidationError("Malware scan failed.")
+
+
+def normalize_image(source, detected_mime):
+    """Fully decode and re-encode a bounded 1080p image on a black canvas."""
+    from PIL import Image
+
+    output = source.with_name(f"{source.stem}-normalized{source.suffix.lower()}")
+    decoded = None
+    canvas = None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source) as image:
+                width, height = image.size
+                if (
+                    width < 1
+                    or height < 1
+                    or width > settings.MEDIA_MAX_IMAGE_DIMENSION
+                    or height > settings.MEDIA_MAX_IMAGE_DIMENSION
+                    or width * height > settings.MEDIA_MAX_IMAGE_PIXELS
+                ):
+                    raise ValidationError("Image dimensions exceed the safe limit.")
+                image.load()
+                decoded = image.convert("RGBA")
+
+        normalized_size = (
+            settings.MEDIA_NORMALIZED_IMAGE_WIDTH,
+            settings.MEDIA_NORMALIZED_IMAGE_HEIGHT,
+        )
+        decoded.thumbnail(normalized_size, Image.Resampling.LANCZOS)
+        canvas = Image.new("RGB", normalized_size, "black")
+        position = (
+            (normalized_size[0] - decoded.width) // 2,
+            (normalized_size[1] - decoded.height) // 2,
+        )
+        canvas.paste(decoded, position, decoded)
+        if detected_mime == "image/jpeg":
+            canvas.save(output, format="JPEG", quality=90, optimize=True)
+        else:
+            canvas.save(output, format="PNG", optimize=True)
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValidationError("Image dimensions exceed the safe limit.") from exc
+    finally:
+        if decoded is not None:
+            decoded.close()
+        if canvas is not None:
+            canvas.close()
+
+    if output.stat().st_size > settings.MEDIA_MAX_IMAGE_BYTES:
+        raise ValidationError("Normalized image exceeds the 10 MB limit.")
+    validate_normalized_image(output, detected_mime)
+    return output
+
+
+def validate_normalized_image(path, expected_mime):
+    """Test a normalized image with a second complete decode before publication."""
+    from PIL import Image
+
+    detected_mime = sniff_image_mime(path)
+    if detected_mime != expected_mime:
+        raise ValidationError("Normalized image type changed unexpectedly.")
+    with Image.open(path) as image:
+        image.load()
+        if image.size != (
+            settings.MEDIA_NORMALIZED_IMAGE_WIDTH,
+            settings.MEDIA_NORMALIZED_IMAGE_HEIGHT,
+        ):
+            raise ValidationError("Normalized image dimensions are invalid.")
+        if image.mode != "RGB":
+            raise ValidationError("Normalized image must use RGB pixels.")
 
 
 def copy_source_to_temporary_file(asset, directory):
@@ -261,11 +382,14 @@ def copy_source_to_temporary_file(asset, directory):
 
 
 def normalized_media_name(asset, source_path, processing_token):
-    if asset.kind == MediaAsset.Kind.VIDEO:
-        filename = f"{asset.id}-normalized.mp4"
-    else:
-        filename = f"{asset.id}{source_path.suffix.lower()}"
-    return f"{asset.id}/{processing_token}/{filename}"
+    suffix = (
+        ".mp4"
+        if asset.kind == MediaAsset.Kind.VIDEO
+        else source_path.suffix.lower()
+    )
+    # FileField defaults to max_length=100. UUID hex still preserves the complete
+    # asset and processing-attempt identities while keeping the S3 key below it.
+    return f"{asset.id.hex}/{processing_token.hex}/media{suffix}"
 
 
 @transaction.atomic
@@ -366,20 +490,23 @@ def inspect_media(asset, require_malware_scanner=True):
     try:
         with tempfile.TemporaryDirectory() as temporary:
             source = copy_source_to_temporary_file(asset, temporary)
+            source_size = source.stat().st_size
+            if asset.kind == MediaAsset.Kind.IMAGE:
+                if source_size > settings.MEDIA_MAX_IMAGE_BYTES:
+                    raise ValidationError("Image exceeds the 10 MB limit.")
+            elif source_size > settings.MEDIA_MAX_VIDEO_BYTES:
+                raise ValidationError("Video exceeds the 50 MB limit.")
+
+            scan_quarantined_source(source, require_malware_scanner)
+
             if asset.kind == MediaAsset.Kind.IMAGE:
                 detected = sniff_image_mime(source)
-                if source.stat().st_size > settings.MEDIA_MAX_IMAGE_BYTES:
-                    raise ValidationError("Image exceeds the 10 MB limit.")
-                from PIL import Image
-
-                with Image.open(source) as image:
-                    asset.width, asset.height = image.size
-                output = source
+                output = normalize_image(source, detected)
+                asset.width = settings.MEDIA_NORMALIZED_IMAGE_WIDTH
+                asset.height = settings.MEDIA_NORMALIZED_IMAGE_HEIGHT
                 asset.duration_ms = 10_000
             else:
                 detected = sniff_video_mime(source)
-                if source.stat().st_size > settings.MEDIA_MAX_VIDEO_BYTES:
-                    raise ValidationError("Video exceeds the 50 MB limit.")
                 details = run_ffprobe(source)
                 duration_ms = round(float(details["format"]["duration"]) * 1000)
                 if duration_ms > 15_000:
@@ -395,44 +522,34 @@ def inspect_media(asset, require_malware_scanner=True):
                 asset.height = video_stream["height"]
                 asset.duration_ms = duration_ms
                 output = source.with_name(f"{source.stem}-normalized.mp4")
-                subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-y",
-                        "-i",
-                        str(source),
-                        "-an",
-                        "-vf",
-                        (
-                            "scale=1920:1080:force_original_aspect_ratio=decrease,"
-                            "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black"
-                        ),
-                        "-c:v",
-                        "libx264",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-movflags",
-                        "+faststart",
-                        str(output),
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
+                try:
+                    subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(source),
+                            "-an",
+                            "-vf",
+                            (
+                                "scale=1920:1080:force_original_aspect_ratio=decrease,"
+                                "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:black"
+                            ),
+                            "-c:v",
+                            "libx264",
+                            "-pix_fmt",
+                            "yuv420p",
+                            "-movflags",
+                            "+faststart",
+                            str(output),
+                        ],
+                        check=True,
+                        capture_output=True,
+                        timeout=settings.MEDIA_FFMPEG_TIMEOUT_SECONDS,
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    raise ValidationError("Video normalization timed out.") from exc
                 asset.duration_ms = validate_normalized_video(output)
-
-            scanner = shutil.which("clamscan")
-            if require_malware_scanner and not scanner:
-                raise ValidationError("Malware scanner is unavailable.")
-            if scanner:
-                scan_command = [scanner, "--no-summary"]
-                database = os.getenv("CLAMAV_DATABASE_DIR", "")
-                if database:
-                    scan_command.extend(["--database", database])
-                subprocess.run(
-                    [*scan_command, str(source)],
-                    check=True,
-                    capture_output=True,
-                )
             digest = hashlib.sha256()
             with output.open("rb") as handle:
                 for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -473,7 +590,11 @@ def publish_playlist(playlist, actor, urgent=False):
         raise ValidationError("Only a draft playlist can be published.")
     locked.full_clean()
     items = list(locked.items.select_related("media"))
-    limits = PlatformSettings.load()
+    # Serialize every publication through the singleton so two transactions
+    # cannot both observe an empty schedule window and publish overlapping rows.
+    limits, _ = PlatformSettings.objects.select_for_update().get_or_create(
+        singleton_id=1
+    )
     if not items:
         raise ValidationError("A playlist cannot be empty.")
     if len(items) > limits.playlist_max_entries:
@@ -483,19 +604,47 @@ def publish_playlist(playlist, actor, urgent=False):
     duration = sum(item.media.duration_ms for item in items) / 1000
     if duration > limits.playlist_max_duration_seconds:
         raise ValidationError("Playlist exceeds the configured duration limit.")
-    superseded = list(
+
+    now = timezone.now()
+    if urgent and not (locked.starts_at <= now < locked.ends_at):
+        raise ValidationError(
+            "An urgent replacement must cover the current weekly window."
+        )
+
+    overlapping = (
         Playlist.objects.select_for_update()
         .filter(
+            status=Playlist.Status.PUBLISHED,
+            starts_at__lt=locked.ends_at,
+            ends_at__gt=locked.starts_at,
+        )
+        .exclude(pk=locked.pk)
+    )
+    superseded = list(
+        overlapping.filter(
             name=locked.name,
             version__lt=locked.version,
             starts_at=locked.starts_at,
             ends_at=locked.ends_at,
-            status=Playlist.Status.PUBLISHED,
+            is_urgent=urgent,
         )
-        .exclude(pk=locked.pk)
     )
+    conflicts = overlapping.filter(is_urgent=urgent).exclude(
+        pk__in=[previous.pk for previous in superseded]
+    )
+    if conflicts.exists():
+        if urgent:
+            raise ValidationError(
+                "An urgent replacement is already published for this weekly window; "
+                "create its next version to correct it."
+            )
+        raise ValidationError(
+            "A published scheduled playlist already overlaps this weekly window; "
+            "create its next version to correct it."
+        )
+
     locked.status = Playlist.Status.PUBLISHED
-    locked.published_at = timezone.now()
+    locked.published_at = now
     locked.is_urgent = urgent
     locked.save(update_fields=["status", "published_at", "is_urgent", "updated_at"])
     for previous in superseded:

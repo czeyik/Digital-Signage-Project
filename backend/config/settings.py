@@ -107,12 +107,13 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "signage.middleware.HealthCheckMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "signage.middleware.ProductionSecurityHeadersMiddleware",
+    "signage.middleware.MediaUploadSizeLimitMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "signage.middleware.SessionIdleTimeoutMiddleware",
-    "signage.middleware.ProductionSecurityHeadersMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -258,6 +259,15 @@ DEVICE_EVENT_QUEUE_BYTES = int(
     os.getenv("DEVICE_EVENT_QUEUE_BYTES", str(500 * 1024**2))
 )
 DEVICE_MIN_FREE_BYTES = int(os.getenv("DEVICE_MIN_FREE_BYTES", str(2 * 1024**3)))
+# Proof-of-play batches contain no binaries and are capped independently on both
+# sides of gzip decompression. Production readiness prevents raising these pilot
+# boundaries without a reviewed code change.
+PLAYBACK_BATCH_MAX_COMPRESSED_BYTES = int(
+    os.getenv("PLAYBACK_BATCH_MAX_COMPRESSED_BYTES", str(256 * 1024))
+)
+PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES = int(
+    os.getenv("PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES", str(1024 * 1024))
+)
 PLAY_INTEGRITY_PROJECT_NUMBER = os.getenv("PLAY_INTEGRITY_PROJECT_NUMBER", "")
 PLAY_INTEGRITY_PACKAGE_NAME = os.getenv(
     "PLAY_INTEGRITY_PACKAGE_NAME", "com.duducar.signage"
@@ -270,6 +280,33 @@ PLAY_INTEGRITY_MAX_TOKEN_AGE_SECONDS = int(
 )
 MEDIA_MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MEDIA_MAX_VIDEO_BYTES = 50 * 1024 * 1024
+MEDIA_MAX_IMAGE_PIXELS = int(os.getenv("MEDIA_MAX_IMAGE_PIXELS", "25000000"))
+MEDIA_MAX_IMAGE_DIMENSION = int(os.getenv("MEDIA_MAX_IMAGE_DIMENSION", "10000"))
+MEDIA_NORMALIZED_IMAGE_WIDTH = 1920
+MEDIA_NORMALIZED_IMAGE_HEIGHT = 1080
+MEDIA_UPLOAD_MULTIPART_ALLOWANCE_BYTES = 1024 * 1024
+# Leave enough room for the multipart envelope while rejecting unexpectedly large
+# request bodies before Django parses or stores an upload. Caddy enforces the same
+# 51 MiB boundary at the public edge.
+MEDIA_MAX_REQUEST_BYTES = int(
+    os.getenv(
+        "MEDIA_MAX_REQUEST_BYTES",
+        str(MEDIA_MAX_VIDEO_BYTES + MEDIA_UPLOAD_MULTIPART_ALLOWANCE_BYTES),
+    )
+)
+MEDIA_CLAMAV_TIMEOUT_SECONDS = int(
+    os.getenv("MEDIA_CLAMAV_TIMEOUT_SECONDS", "120")
+)
+MEDIA_FFPROBE_TIMEOUT_SECONDS = int(
+    os.getenv("MEDIA_FFPROBE_TIMEOUT_SECONDS", "30")
+)
+MEDIA_FFMPEG_TIMEOUT_SECONDS = int(
+    os.getenv("MEDIA_FFMPEG_TIMEOUT_SECONDS", "300")
+)
+FRESHCLAM_TIMEOUT_SECONDS = int(os.getenv("FRESHCLAM_TIMEOUT_SECONDS", "120"))
+MEDIA_WORKER_TIMEOUT_SECONDS = int(
+    os.getenv("MEDIA_WORKER_TIMEOUT_SECONDS", "1200")
+)
 MEDIA_PROCESSING_DISPATCH_BACKEND = os.getenv(
     "MEDIA_PROCESSING_DISPATCH_BACKEND", "disabled"
 ).lower()
@@ -279,6 +316,24 @@ MEDIA_PROCESSING_LEASE_SECONDS = int(
 MEDIA_DISPATCH_RETRY_SECONDS = int(os.getenv("MEDIA_DISPATCH_RETRY_SECONDS", "600"))
 MEDIA_MAX_DISPATCH_ATTEMPTS = int(os.getenv("MEDIA_MAX_DISPATCH_ATTEMPTS", "5"))
 MEDIA_RECONCILE_MAX_ASSETS = int(os.getenv("MEDIA_RECONCILE_MAX_ASSETS", "25"))
+MEDIA_DISPATCH_MAX_CONCURRENT_TASKS = int(
+    os.getenv("MEDIA_DISPATCH_MAX_CONCURRENT_TASKS", "2")
+)
+MEDIA_DISPATCH_MAX_TASKS_PER_HOUR = int(
+    os.getenv("MEDIA_DISPATCH_MAX_TASKS_PER_HOUR", "6")
+)
+MEDIA_DISPATCH_STARTUP_GRACE_SECONDS = int(
+    os.getenv("MEDIA_DISPATCH_STARTUP_GRACE_SECONDS", "120")
+)
+MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS = int(
+    os.getenv("MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS", "900")
+)
+MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS = int(
+    os.getenv("MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS", "5")
+)
+MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS = int(
+    os.getenv("MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS", "10")
+)
 # The USD 30 topology retains ECS only for isolated, on-demand Fargate media
 # tasks; it does not run a continuous worker service.
 ECS_MEDIA_REGION = os.getenv(
@@ -291,7 +346,12 @@ ECS_MEDIA_SUBNET_IDS = env_csv("ECS_MEDIA_SUBNET_IDS")
 ECS_MEDIA_SECURITY_GROUP_IDS = env_csv("ECS_MEDIA_SECURITY_GROUP_IDS")
 ECS_MEDIA_ASSIGN_PUBLIC_IP = env_bool("ECS_MEDIA_ASSIGN_PUBLIC_IP", False)
 PILOT_BACKUP_ROOT = os.getenv("PILOT_BACKUP_ROOT", str(BASE_DIR / "backups"))
-PILOT_BACKUP_RETENTION_DAYS = int(os.getenv("PILOT_BACKUP_RETENTION_DAYS", "30"))
+# S3 lifecycle rules remain the authoritative 30-day retention layer. The local
+# copy shares the pilot's 32 GB data volume and is deliberately only a short cache.
+PILOT_BACKUP_RETENTION_DAYS = int(os.getenv("PILOT_BACKUP_RETENTION_DAYS", "3"))
+PILOT_BACKUP_MAX_LOCAL_ARCHIVES = int(
+    os.getenv("PILOT_BACKUP_MAX_LOCAL_ARCHIVES", "3")
+)
 PILOT_BACKUP_S3_BUCKET = os.getenv("PILOT_BACKUP_S3_BUCKET", "")
 
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND")

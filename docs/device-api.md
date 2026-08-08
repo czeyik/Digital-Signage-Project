@@ -34,11 +34,12 @@ optional temperature state.
 
 Accepts an idempotent loop batch containing one result per playlist entry.
 Duplicate batch IDs are acknowledged without creating duplicate evidence.
-Disabled devices cannot submit playback.
+The Android player sends the exact JSON document with
+`Content-Type: application/json` and `Content-Encoding: gzip`; retries retain
+the same batch and event IDs. Disabled devices cannot submit playback.
 
 ## Security
 
 Use TLS only. Never log bearer or refresh tokens. Server authorization derives
 the device from the access token and ignores any client-supplied device or
 assignment identity.
-

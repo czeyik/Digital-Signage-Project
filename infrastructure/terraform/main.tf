@@ -39,7 +39,10 @@ locals {
     { name = "AWS_STORAGE_BUCKET_NAME", value = aws_s3_bucket.media.bucket },
     { name = "AWS_S3_REGION_NAME", value = var.aws_region },
     { name = "PILOT_BACKUP_S3_BUCKET", value = aws_s3_bucket.backups.bucket },
-    { name = "PILOT_BACKUP_RETENTION_DAYS", value = "30" },
+    # S3 keeps 30 days via lifecycle; the shared 32 GB host volume keeps a
+    # bounded three-archive scratch cache after each verified upload.
+    { name = "PILOT_BACKUP_RETENTION_DAYS", value = "3" },
+    { name = "PILOT_BACKUP_MAX_LOCAL_ARCHIVES", value = "3" },
     { name = "REQUIRED_APP_VERSION", value = var.required_app_version },
     { name = "PLAY_INTEGRITY_PROJECT_NUMBER", value = var.play_integrity_project_number },
     { name = "PLAY_INTEGRITY_PACKAGE_NAME", value = "com.duducar.signage" },
@@ -47,6 +50,22 @@ locals {
     { name = "MEDIA_DISPATCH_RETRY_SECONDS", value = tostring(var.media_dispatch_retry_seconds) },
     { name = "MEDIA_MAX_DISPATCH_ATTEMPTS", value = tostring(var.media_max_dispatch_attempts) },
     { name = "MEDIA_RECONCILE_MAX_ASSETS", value = tostring(var.media_reconcile_max_assets) },
+    { name = "MEDIA_MAX_REQUEST_BYTES", value = "53477376" },
+    { name = "MEDIA_MAX_IMAGE_PIXELS", value = "25000000" },
+    { name = "MEDIA_MAX_IMAGE_DIMENSION", value = "10000" },
+    { name = "MEDIA_CLAMAV_TIMEOUT_SECONDS", value = "120" },
+    { name = "MEDIA_FFPROBE_TIMEOUT_SECONDS", value = "30" },
+    { name = "MEDIA_FFMPEG_TIMEOUT_SECONDS", value = "300" },
+    { name = "FRESHCLAM_TIMEOUT_SECONDS", value = "120" },
+    { name = "MEDIA_WORKER_TIMEOUT_SECONDS", value = "1200" },
+    { name = "PLAYBACK_BATCH_MAX_COMPRESSED_BYTES", value = "262144" },
+    { name = "PLAYBACK_BATCH_MAX_DECOMPRESSED_BYTES", value = "1048576" },
+    { name = "MEDIA_DISPATCH_MAX_CONCURRENT_TASKS", value = "2" },
+    { name = "MEDIA_DISPATCH_MAX_TASKS_PER_HOUR", value = "6" },
+    { name = "MEDIA_DISPATCH_STARTUP_GRACE_SECONDS", value = "120" },
+    { name = "MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS", value = "900" },
+    { name = "MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS", value = "5" },
+    { name = "MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS", value = "10" },
     { name = "EMAIL_BACKEND", value = "django.core.mail.backends.smtp.EmailBackend" },
     { name = "EMAIL_HOST", value = var.smtp_host },
     { name = "EMAIL_PORT", value = tostring(var.smtp_port) },
@@ -386,7 +405,9 @@ resource "aws_s3_bucket_lifecycle_configuration" "backups" {
     status = "Enabled"
     filter {}
     expiration { days = 30 }
-    noncurrent_version_expiration { noncurrent_days = 30 }
+    # Current-version expiration first makes the payload noncurrent. Remove it
+    # on the next lifecycle pass instead of retaining it for another 30 days.
+    noncurrent_version_expiration { noncurrent_days = 1 }
   }
 }
 

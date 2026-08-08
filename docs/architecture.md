@@ -51,8 +51,12 @@ Production is live in `ap-southeast-5` with this USD 30/month target topology:
   dedicated worker security group, and operator access through Session Manager;
 - private S3 media and backups encrypted with the project KMS key;
 - CloudFront origin access control and signed URLs for validated media;
-- one bounded ARM Fargate task per media-processing dispatch, with no
-  continuously running worker; and
+- one bounded ARM Fargate task per media-processing dispatch. After the
+  reviewed Terraform and web-image release that introduces dispatch caps, it
+  is limited to two active tasks and six `RunTask` calls per hour (including
+  failed or ambiguous calls); an ambiguous result reuses its idempotency token
+  for at most 15 minutes before consuming a new attempt, with no continuously
+  running worker; and
 - daily logical PostgreSQL backups plus a DLM policy scheduled to retain 30
   encrypted data-volume snapshots.
 

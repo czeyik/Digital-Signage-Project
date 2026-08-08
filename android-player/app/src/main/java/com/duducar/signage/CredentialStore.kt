@@ -37,6 +37,56 @@ class CredentialStore(context: Context) {
         return PinVerifier.verify(pin, verifier)
     }
 
+    fun hasKioskPinVerifier(): Boolean =
+        !preferences.getString("kiosk_pin_verifier", "").isNullOrBlank()
+
+    fun pinLockoutRemainingMs(nowEpochMs: Long): Long =
+        KioskAdminPolicy.remainingLockoutMs(pinThrottleState(), nowEpochMs)
+
+    fun recordFailedPinAttempt(nowEpochMs: Long): Long {
+        val state = KioskAdminPolicy.afterFailure(pinThrottleState(), nowEpochMs)
+        preferences.edit()
+            .putInt("kiosk_pin_failed_attempts", state.failedAttempts)
+            .putLong("kiosk_pin_locked_until", state.lockedUntilEpochMs)
+            .commit()
+        return KioskAdminPolicy.remainingLockoutMs(state, nowEpochMs)
+    }
+
+    fun clearPinFailures() {
+        preferences.edit()
+            .remove("kiosk_pin_failed_attempts")
+            .remove("kiosk_pin_locked_until")
+            .commit()
+    }
+
+    fun beginAdminSession(nowEpochMs: Long, nowElapsedMs: Long) {
+        preferences.edit()
+            .putLong(
+                "kiosk_admin_session_until",
+                nowEpochMs + KioskAdminPolicy.SESSION_DURATION_MS,
+            )
+            .putLong(
+                "kiosk_admin_session_elapsed_until",
+                nowElapsedMs + KioskAdminPolicy.SESSION_DURATION_MS,
+            )
+            .commit()
+    }
+
+    fun adminSessionRemainingMs(nowEpochMs: Long, nowElapsedMs: Long): Long =
+        KioskAdminPolicy.remainingSessionMs(
+            preferences.getLong("kiosk_admin_session_until", 0L),
+            preferences.getLong("kiosk_admin_session_elapsed_until", 0L),
+            nowEpochMs,
+            nowElapsedMs,
+        )
+
+    fun endAdminSession() {
+        preferences.edit()
+            .remove("kiosk_admin_session_until")
+            .remove("kiosk_admin_session_elapsed_until")
+            .commit()
+    }
+
     fun refreshToken(): String? {
         val ciphertext = preferences.getString("refresh_ciphertext", null) ?: return null
         val iv = preferences.getString("refresh_iv", null) ?: return null
@@ -65,4 +115,9 @@ class CredentialStore(context: Context) {
             generateKey()
         }
     }
+
+    private fun pinThrottleState(): PinThrottleState = PinThrottleState(
+        failedAttempts = preferences.getInt("kiosk_pin_failed_attempts", 0),
+        lockedUntilEpochMs = preferences.getLong("kiosk_pin_locked_until", 0L),
+    )
 }

@@ -17,4 +17,4 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /tmp/cmdline-tools.zip
 
 WORKDIR /workspace
-CMD ["./gradlew", ":app:compileDebugKotlin", "--no-daemon"]
+CMD ["./gradlew", ":app:compileDevelopmentDebugKotlin", "--no-daemon"]
