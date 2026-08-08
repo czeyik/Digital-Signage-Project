@@ -30,14 +30,22 @@ provided:
   --no-daemon
 ```
 
-The checked JVM tests cover enrollment, manifest activation/restart, power and
-mode gates, storage, queue loss, PIN verification, PIN throttling, the bounded
-administrator session, monotonic server-corrected time, proof recovery, and gzip
-proof-batch encoding. Instrumentation sources verify merged-manifest backup,
-receiver exposure, and the date/time device-owner restriction; compiling them
-is CI-safe, but executing them still requires an Android 12+ emulator or tablet.
-Hardware behavior still requires the qualification checklist on the selected
-display model.
+The checked JVM tests cover enrollment, manifest activation/restart,
+battery-powered playback with no external-power gate, planned-shutdown state,
+storage, queue loss, PIN verification, PIN throttling, the bounded
+administrator session, monotonic server-corrected time, proof recovery,
+abnormal-exit diagnostic mapping/idempotency, and gzip proof-batch encoding.
+Instrumentation sources currently verify merged-manifest backup configuration,
+absence of static boot/power receivers, administrator-relock receiver exposure,
+the date/time device-owner restriction, atomic checkpoint/batch persistence,
+and planned-shutdown marker/event durability. They do not exercise
+`MainActivity`'s visible non-PIN shutdown confirmation, neutral stopped screen,
+no-automatic-resume behavior, or the visible non-PIN **Resume DUDU**
+confirmation after launch. Those flows
+must be executed on an Android 12+ emulator and again during exact-device
+qualification. Physical battery behavior, physical shutdown/recovery, and
+Android-13 exit-reason behavior still require the qualification checklist on
+the selected display model.
 
 CI additionally generates a disposable test-only keystore, builds and lints the
 configured minified `productionRelease`, and verifies its APK signature. This

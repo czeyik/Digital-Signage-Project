@@ -95,6 +95,40 @@ def open_alert(device, code, severity, message):
 
 
 @transaction.atomic
+def open_or_escalate_alert(device, code, severity, message):
+    """Open one device alert or raise its severity without auto-resolving it.
+
+    The device-row lock serializes concurrent heartbeats and fleet-health runs
+    for the same device, including the case where no unresolved alert exists
+    yet.  A later warning must never lower an already critical alert.
+    """
+
+    if device is not None:
+        Device.objects.select_for_update().get(pk=device.pk)
+    alert = (
+        Alert.objects.select_for_update()
+        .filter(device=device, code=code, acknowledged_at__isnull=True)
+        .order_by("created_at")
+        .first()
+    )
+    if alert is None:
+        return Alert.objects.create(
+            device=device,
+            code=code,
+            severity=severity,
+            message=message,
+        ), True
+    if (
+        severity == Alert.Severity.CRITICAL
+        and alert.severity != Alert.Severity.CRITICAL
+    ):
+        alert.severity = severity
+        alert.message = message
+        alert.save(update_fields=["severity", "message", "updated_at"])
+    return alert, False
+
+
+@transaction.atomic
 def issue_kiosk_pin(device, actor):
     raw_pin = f"{secrets.randbelow(1_000_000):06d}"
     locked = Device.objects.select_for_update().get(pk=device.pk)

@@ -69,8 +69,10 @@ The pilot has three roles:
   owner.
 - **Marketing user:** Manages media, playlists, devices, alerts, reports, and
   CSV exports.
-- **Driver:** Has no dashboard access. A driver may interrupt playback by
-  disconnecting vehicle power or using the display's physical power control.
+- **Driver:** Has no dashboard access. Any physical user may use the visible,
+  deliberately non-PIN-protected **Prepare for shutdown** control, then use the
+  approved tablet's documented physical power-off method. That control is not
+  dashboard or administrator access.
 
 Public registration is forbidden. Create the initial account through a one-time
 deployment command. Dashboard accounts must use `@duducar.co` email addresses.
@@ -167,22 +169,34 @@ the pilot.
 
 ## Android Player Behavior
 
-- Operate as a locked, non-interactive, landscape kiosk.
+- Operate as a locked, landscape kiosk. The visible **Prepare for shutdown**
+  control is the sole intentional non-administrator interaction.
 - Hide Android navigation, block screenshots where supported, and prevent
   device sleep during playback.
-- Start automatically when approved hardware receives vehicle power.
-- Play advertising only while external vehicle power is available.
-- On a battery-backed tablet, stop playback and record external-power loss
-  immediately, then let Android or device policy handle shutdown.
-- On a battery-free display, infer power loss from the heartbeat gap and next
-  startup because no event can be written after power disappears.
-- Treat unexpected power loss as an estimated interruption. Warn after 10
-  unexpected losses within 24 hours or one interruption exceeding 24 hours.
-  These are operational warnings, not proof of driver misconduct.
+- Support only approved battery-backed Android tablets. The battery-free
+  display path is not part of this pilot.
+- Play advertising while the tablet itself has power, including battery power
+  while parked or disconnected from vehicle power. Do not gate playback,
+  screen-on behavior, or synchronization on external vehicle-power detection.
+- A normal visible **Prepare for shutdown** button must be available without a
+  PIN. After confirmation, interrupt the current item, queue its result, show
+  a neutral shutdown-ready screen, and remain stopped until a physical user
+  confirms the visible non-PIN **Resume DUDU** action. Restoring the launcher,
+  activity, or lifecycle alone must not resume advertising. There is no
+  five-minute automatic resume.
+- The user then follows the exact approved tablet's documented physical
+  power-off method. After battery depletion or a reboot, recovery is best
+  effort: staff unlock and launch DUDU to reach the shutdown-ready screen, then
+  confirm **Resume DUDU** before playback can resume.
+- Do not label an interruption as a confirmed vehicle-power loss or driver
+  misconduct. On Android 13, after a successful manifest sync anchors server
+  time (on that sync or a later one), inspect historical process-exit reasons
+  and queue idempotent non-sensitive diagnostic operational events for abnormal
+  application exits.
 - After restart, begin the interrupted playlist item again from its start, then
   continue the loop.
-- Record an interrupted result when the app restarts after crashing or losing
-  power mid-item.
+- Record an interrupted result when the app restarts after crashing, an
+  unplanned shutdown, or another mid-item interruption.
 - Skip a failing current item immediately without showing a blank screen,
   record the failure, and continue the active playlist.
 - Ship neutral DUDU fallback media inside the app. Do not count fallback media
@@ -193,10 +207,10 @@ the pilot.
 - Install pilot application updates manually by company staff through
   sideloading.
 
-Drivers have no in-app pause control, pause reason, or scheduled shift. Physical
-power interruption may be indefinite. Consequently, report confirmed powered
-and app-active time separately from estimated operating time, and do not present
-offline time as proof of driver misconduct.
+There is no ordinary in-app pause control, pause reason, or scheduled shift.
+The deliberately available shutdown flow is the exception described above.
+Offline time and an interruption do not prove driver misconduct, vehicle
+operation, vehicle occupancy, external power, or audience exposure.
 
 ## Device Enrollment And Assignment
 
@@ -261,9 +275,11 @@ a result for every playlist entry:
 - Whether the event was captured offline and uploaded later
 
 Only fully completed advertisements count as contractual plays. A completed
-image must remain continuously visible for its full 10 seconds, excluding power
-loss. A completed video must reach its natural end within an implementation-
-defined, tested playback tolerance.
+image must remain continuously visible for its full 10 seconds. A completed
+video must reach its natural end within an implementation-defined, tested
+playback tolerance. A completed advertisement counts whether it played while
+the tablet was battery-powered or parked; that evidence does not prove vehicle
+operation, occupancy, external power, or audience exposure.
 
 Detect duplicate batches and events so reconnects cannot double-count plays.
 Once accepted by the server, playback evidence is immutable; corrections must
@@ -282,14 +298,24 @@ are neither independently audited nor tamper-proof.
 
 - Send a heartbeat every 30 minutes.
 - Mark a device offline after 60 minutes without a heartbeat.
-- Show offline status immediately, but create the offline alert only after 48
-  hours.
+- Show offline status in the fleet view without inferring why the device is
+  unavailable.
 - Keep alerts open until a dashboard user acknowledges them.
 - Show a prominent unresolved-alert summary and fleet-status counts on the
   dashboard home page.
-- Report battery level, charging state, external-power state, reliable screen
-  state, available storage, app version, Android version, temperature when
-  available, active playlist, last successful sync, and last playback.
+- New player heartbeats report battery level, reliable screen state, available
+  storage, app version, Android version, temperature when available, active
+  playlist, last successful sync, and last playback. They do not report
+  external-power or charging state. The server may retain legacy heartbeat
+  fields during an APK rollout, but those values are not health-policy inputs.
+- At battery `<=20%`, open a `low_battery` warning. At `<=10%`, escalate that
+  same unresolved alert to critical. Neither threshold stops advertising.
+- Use the server-received heartbeat time for availability: at 24 hours without
+  one, open a `device_unavailable` warning; at 48 hours, escalate that same
+  unresolved alert to critical.
+- On Android 13, receive idempotent abnormal-application-exit diagnostics. At
+  three distinct abnormal events received in a rolling 24 hours, open a
+  `repeated_abnormal_app_exit` warning.
 - Alert when free storage falls below 2 GB.
 - Alert after any three advertisement failures on one device.
 - Alert when a device differs from the required application version.
@@ -405,12 +431,18 @@ Approved hardware must:
 
 - Run Android 12 or newer and support tested device-owner/lock-task
   provisioning without a paid MDM service.
-- Reliably start when vehicle power is supplied.
+- Be battery-backed and safely sustain the documented battery-powered playback
+  and charging/runtime path.
 - Expose a reliable physical screen-on state.
-- Behave according to the documented battery-backed or battery-free power-loss
-  path.
+- Pass the documented non-PIN planned-shutdown, physical power-off, and
+  staff-unlock/launch-to-shutdown-ready/**Resume DUDU** recovery path.
+  Automatic restart after vehicle power is supplied is not a release
+  requirement.
+- Report a reliable battery percentage for health thresholds and, on Android
+  13 where supported, recover and report the documented abnormal-exit
+  diagnostics.
 - Meet suitable operating-temperature and direct-sunlight requirements.
-- Include appropriate battery safeguards when a battery exists.
+- Include appropriate battery safeguards.
 - Support company rules preventing devices from being left inside parked cars.
 - Operate safely from the vehicle power supply with an approved mount and power
   adapter.
@@ -458,10 +490,11 @@ pilot requires automated or documented tests for:
 - Offline playback, server-corrected time, delayed event upload, queue limits,
   acknowledgement, and forced-loss reporting
 - Per-item completion results, loop batching, duplicate ingestion, crash and
-  power-loss interruption, and seven-day report finalization
+  planned-shutdown or unplanned-interruption recovery, and seven-day report
+  finalization
 - Device reassignment history, disablement, and explicit reactivation
 - Heartbeat, offline, missing-sync, storage, failure, version, temperature, and
-  unexpected-power-loss alert thresholds
+  battery, abnormal-app-exit, and device-unavailability alert thresholds
 - One-year retention, driver anonymization, immutable records, and CSV privacy
 - Backup restoration and development/production isolation
 - Physical hardware power, heat, screen-state, kiosk, and startup behavior

@@ -2,6 +2,7 @@ package com.duducar.signage
 
 import android.app.Activity
 import android.app.ActivityManager
+import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -49,33 +50,27 @@ class MainActivity : Activity() {
     private var currentStartedElapsedMs: Long? = null
     private var currentStartedBootCount: Int? = null
     private var currentResultId: String? = null
+    private var visiblePlaybackMedia = false
     private val loopResults = mutableListOf<PlaybackResult>()
     private var loopStartedAt: Instant? = null
-    private var powerReceiverRegistered = false
+    private var shutdownReceiverRegistered = false
     private var activityResumed = false
     private var resumeAfterAdminRelock = false
     private var playbackRecoveryBlocked = false
+    private var shutdownPrepared = false
 
     private val adminRelock = Runnable { endAdminSession(bringToFront = true) }
 
-    private val powerReceiver = object : BroadcastReceiver() {
+    private val shutdownReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            updateKeepScreenOn(intent.action == Intent.ACTION_POWER_CONNECTED)
-            if (playbackRecoveryBlocked) {
-                showStatus(getString(R.string.playback_recovery_failed))
-                return
-            }
-            if (intent.action == Intent.ACTION_POWER_DISCONNECTED) {
-                interruptCurrent("external_power_lost")
-                stopPlayback()
-                if (!hasActiveAdminSession()) {
-                    showStatus(getString(R.string.maintenance))
-                }
-            } else if (
-                intent.action == Intent.ACTION_POWER_CONNECTED &&
-                !hasActiveAdminSession()
-            ) {
-                synchronizeAndPlay()
+            if (intent.action == Intent.ACTION_SHUTDOWN) {
+                // Android allows only a very short receiver window during
+                // shutdown. This performs a local marker update only; it must
+                // never start a request or playback from this broadcast.
+                // ApplicationExitInfo timestamps use Android's wall-clock
+                // coordinate, so local shutdown markers use that same clock.
+                // API event timestamps remain server-corrected elsewhere.
+                store.markPlannedShutdownOrderly(System.currentTimeMillis())
             }
         }
     }
@@ -94,16 +89,34 @@ class MainActivity : Activity() {
         serverClock = ServerClock(this)
         integrity = IntegrityClient(this)
         activeManifest = cache.activeManifest()
+        shutdownPrepared = store.hasPlannedShutdownMarker()
         val checkpointRecovered = recoverInterruptedPlayback()
         playbackRecoveryBlocked = !checkpointRecovered
         configureAdminControls()
-        registerPowerReceiver()
+        configureShutdownControls()
+        registerShutdownReceiver()
         updateKeepScreenOn()
 
         if (!checkpointRecovered) {
             credentials.endAdminSession()
             enterLockedKiosk()
             showStatus(getString(R.string.playback_recovery_failed))
+            return
+        }
+
+        if (isShutdownPrepared()) {
+            credentials.endAdminSession()
+            if (!enterLockedKiosk()) {
+                showStatus(
+                    if (BuildConfig.IS_PRODUCTION) {
+                        getString(R.string.device_owner_required)
+                    } else {
+                        getString(R.string.kiosk_policy_failed)
+                    },
+                )
+                return
+            }
+            showShutdownReady()
             return
         }
 
@@ -167,21 +180,111 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun registerPowerReceiver() {
-        val filter = IntentFilter().apply {
-            addAction(Intent.ACTION_POWER_CONNECTED)
-            addAction(Intent.ACTION_POWER_DISCONNECTED)
+    private fun configureShutdownControls() {
+        binding.prepareShutdownButton.setOnClickListener {
+            requestShutdownPreparation()
         }
+        binding.resumeDuduButton.setOnClickListener {
+            requestResumeAfterShutdown()
+        }
+    }
+
+    private fun registerShutdownReceiver() {
+        val filter = IntentFilter(Intent.ACTION_SHUTDOWN)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(powerReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(shutdownReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(powerReceiver, filter)
+            registerReceiver(shutdownReceiver, filter)
         }
-        powerReceiverRegistered = true
+        shutdownReceiverRegistered = true
+    }
+
+    private fun requestShutdownPreparation() {
+        if (isShutdownPrepared() || hasActiveAdminSession()) return
+        AlertDialog.Builder(this)
+            .setTitle(R.string.prepare_shutdown_title)
+            .setMessage(R.string.prepare_shutdown_message)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.prepare_shutdown_confirm) { _, _ ->
+                prepareForShutdown()
+            }
+            .show()
+    }
+
+    private fun prepareForShutdown() {
+        if (isShutdownPrepared()) {
+            showShutdownReady()
+            return
+        }
+        // Snapshot this before taking the event timestamp. If an anchor arrives
+        // concurrently just after the snapshot, rebasing an already-safe value
+        // is harmless; the reverse ordering could leave an unsafe local value
+        // untracked forever.
+        val hadTrustedServerAnchor = serverClock.hasTrustedAnchor()
+        val recordedAt = serverClock.now()
+        val marker = PlannedShutdownMarker(
+            id = UUID.randomUUID().toString(),
+            preparedAtEpochMs = System.currentTimeMillis(),
+            requiresTrustedTimestampRebase =
+                ShutdownPreparationPolicy.requiresTrustedTimestampRebase(
+                    hadTrustedServerAnchor,
+                ),
+        )
+        val event = JSONObject()
+            .put("id", marker.id)
+            .put("kind", "planned_shutdown")
+            .put("recorded_at", recordedAt.toString())
+            .put("details", JSONObject())
+        try {
+            val created = store.preparePlannedShutdown(marker, event)
+            shutdownPrepared = true
+            operationsHandler.removeCallbacksAndMessages(null)
+            if (created) {
+                interruptCurrent("planned_shutdown")
+            } else {
+                stopPlayback()
+            }
+            showShutdownReady()
+        } catch (_: Exception) {
+            showStatus(getString(R.string.shutdown_prepare_failed))
+        }
+    }
+
+    private fun requestResumeAfterShutdown() {
+        if (!isShutdownPrepared()) return
+        AlertDialog.Builder(this)
+            .setTitle(R.string.resume_dudu_title)
+            .setMessage(R.string.resume_dudu_message)
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.resume_dudu_confirm) { _, _ ->
+                resumeAfterPreparedShutdown()
+            }
+            .show()
+    }
+
+    private fun resumeAfterPreparedShutdown() {
+        store.clearPlannedShutdownMarker()
+        shutdownPrepared = false
+        binding.shutdownReady.visibility = View.GONE
+        if (!enterLockedKiosk()) {
+            showStatus(
+                if (BuildConfig.IS_PRODUCTION) {
+                    getString(R.string.device_owner_required)
+                } else {
+                    getString(R.string.kiosk_policy_failed)
+                },
+            )
+            return
+        }
+        resumeConfiguredMode()
     }
 
     private fun resumeConfiguredMode() {
+        if (!ShutdownPreparationPolicy.shouldResumeAutomatically(isShutdownPrepared())) {
+            showShutdownReady()
+            return
+        }
         if (playbackRecoveryBlocked) {
             showStatus(getString(R.string.playback_recovery_failed))
             return
@@ -203,7 +306,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        if (powerReceiverRegistered) unregisterReceiver(powerReceiver)
+        if (shutdownReceiverRegistered) unregisterReceiver(shutdownReceiver)
         playbackHandler.removeCallbacksAndMessages(null)
         operationsHandler.removeCallbacksAndMessages(null)
         adminHandler.removeCallbacksAndMessages(null)
@@ -216,6 +319,11 @@ class MainActivity : Activity() {
         activityResumed = true
         if (!::credentials.isInitialized) return
         updateKeepScreenOn()
+        if (isShutdownPrepared()) {
+            credentials.endAdminSession()
+            if (enterLockedKiosk()) showShutdownReady()
+            return
+        }
         if (hasActiveAdminSession()) {
             showAdminSessionControls()
         } else {
@@ -265,6 +373,7 @@ class MainActivity : Activity() {
     }
 
     private fun startAdminSession(nowEpochMs: Long) {
+        if (isShutdownPrepared()) return
         if (!adminRelockScheduler.mayScheduleExactAlarm()) {
             binding.adminError.text = getString(R.string.exact_alarm_required)
             return
@@ -309,6 +418,8 @@ class MainActivity : Activity() {
         binding.adminUnlock.visibility = View.GONE
         binding.enrollment.visibility = View.GONE
         binding.status.visibility = View.GONE
+        binding.prepareShutdown.visibility = View.GONE
+        binding.shutdownReady.visibility = View.GONE
         binding.adminControls.visibility = View.VISIBLE
         adminHandler.removeCallbacks(adminRelock)
         adminHandler.postDelayed(adminRelock, remaining)
@@ -355,6 +466,8 @@ class MainActivity : Activity() {
             return
         }
         binding.status.visibility = View.GONE
+        binding.shutdownReady.visibility = View.GONE
+        showPrepareShutdownControl()
         binding.enrollment.visibility = View.VISIBLE
         binding.enrollButton.setOnClickListener {
             if (!EnrollmentPolicy.mayEnroll(BuildConfig.IS_PRODUCTION, kioskPolicies.isDeviceOwner())) {
@@ -385,7 +498,12 @@ class MainActivity : Activity() {
                         integrityToken,
                     )
                     serverClock.update(response.getString("server_time"))
+                    store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
                     runOnUiThread {
+                        if (isShutdownPrepared()) {
+                            showShutdownReady()
+                            return@runOnUiThread
+                        }
                         binding.enrollment.visibility = View.GONE
                         binding.enrollmentError.text = ""
                         synchronizeAndPlay()
@@ -402,6 +520,10 @@ class MainActivity : Activity() {
     }
 
     private fun synchronizeAndPlay() {
+        if (isShutdownPrepared()) {
+            showShutdownReady()
+            return
+        }
         if (playbackRecoveryBlocked) {
             showStatus(getString(R.string.playback_recovery_failed))
             return
@@ -412,26 +534,26 @@ class MainActivity : Activity() {
             showStatus(getString(R.string.device_owner_required))
             return
         }
-        if (!hasExternalPower()) {
-            interruptCurrent("external_power_unavailable")
-            showStatus(getString(R.string.maintenance))
-            return
-        }
         executor.execute {
             try {
-                flushPendingBatches()
                 val response = api.manifest()
                 serverClock.update(response.getString("server_time"))
+                // A shutdown prepared before this first trusted anchor is
+                // durable locally, but must receive this trusted timestamp
+                // before the FIFO operational queue can be uploaded.
+                store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
+                collectHistoricalExitDiagnostics()
+                flushPendingBatches()
                 when (response.getString("mode")) {
                     "maintenance" -> runOnUiThread {
-                        if (hasActiveAdminSession()) return@runOnUiThread
+                        if (hasActiveAdminSession() || isShutdownPrepared()) return@runOnUiThread
                         markSuccessfulSync()
                         store.putState("device_mode", "maintenance")
                         interruptCurrent("device_disabled")
                         showStatus(getString(R.string.maintenance))
                     }
                     "fallback" -> runOnUiThread {
-                        if (hasActiveAdminSession()) return@runOnUiThread
+                        if (hasActiveAdminSession() || isShutdownPrepared()) return@runOnUiThread
                         markSuccessfulSync()
                         store.putState("device_mode", "fallback")
                         interruptCurrent("fallback_mode")
@@ -441,7 +563,9 @@ class MainActivity : Activity() {
                         val manifest = response.getJSONObject("playlist")
                         if (cache.prepare(manifest)) {
                             runOnUiThread {
-                                if (hasActiveAdminSession()) return@runOnUiThread
+                                if (hasActiveAdminSession() || isShutdownPrepared()) {
+                                    return@runOnUiThread
+                                }
                                 val sameManifest = PlaybackTransitionPolicy.sameManifest(
                                     activeManifest?.optString("id"),
                                     activeManifest?.optInt("version"),
@@ -479,7 +603,7 @@ class MainActivity : Activity() {
                         } else {
                             recordReplacementFailure(manifest, "preparation")
                             runOnUiThread {
-                                if (!hasActiveAdminSession()) {
+                                if (!hasActiveAdminSession() && !isShutdownPrepared()) {
                                     continuePreviousPlaylistAfterReplacementFailure()
                                 }
                             }
@@ -488,18 +612,14 @@ class MainActivity : Activity() {
                 }
             } catch (_: Exception) {
                 runOnUiThread {
-                    if (hasActiveAdminSession()) return@runOnUiThread
-                    if (!hasExternalPower()) {
-                        showStatus(getString(R.string.maintenance))
-                    } else {
-                        when (store.state("device_mode")) {
-                            "maintenance" -> showStatus(getString(R.string.maintenance))
-                            "fallback" -> showFallback()
-                            else -> {
-                                activeManifest = cache.activeManifest()
-                                ensurePlaybackStarted()
-                                if (activeManifest == null) showFallback()
-                            }
+                    if (hasActiveAdminSession() || isShutdownPrepared()) return@runOnUiThread
+                    when (store.state("device_mode")) {
+                        "maintenance" -> showStatus(getString(R.string.maintenance))
+                        "fallback" -> showFallback()
+                        else -> {
+                            activeManifest = cache.activeManifest()
+                            ensurePlaybackStarted()
+                            if (activeManifest == null) showFallback()
                         }
                     }
                 }
@@ -522,6 +642,10 @@ class MainActivity : Activity() {
     }
 
     private fun continuePreviousPlaylistAfterReplacementFailure() {
+        if (isShutdownPrepared()) {
+            showShutdownReady()
+            return
+        }
         activeManifest = cache.activeManifest() ?: activeManifest
         if (activeManifest == null) {
             store.putState("device_mode", "fallback")
@@ -533,12 +657,11 @@ class MainActivity : Activity() {
     }
 
     private fun ensurePlaybackStarted() {
-        if (playbackRecoveryBlocked) return
+        if (playbackRecoveryBlocked || isShutdownPrepared()) return
         val storedMode = store.state("device_mode")
         val effectiveMode = storedMode ?: if (activeManifest != null) "play" else null
         if (
             PlaybackTransitionPolicy.shouldStart(
-                hasExternalPower = hasExternalPower(),
                 mode = effectiveMode,
                 hasActiveManifest = activeManifest != null,
                 playbackActive = currentResultId != null,
@@ -552,7 +675,7 @@ class MainActivity : Activity() {
     private fun playCurrent() {
         if (
             playbackRecoveryBlocked ||
-            !hasExternalPower() ||
+            isShutdownPrepared() ||
             hasActiveAdminSession() ||
             currentResultId != null
         ) return
@@ -595,6 +718,8 @@ class MainActivity : Activity() {
         binding.adminControls.visibility = View.GONE
         binding.enrollment.visibility = View.GONE
         binding.status.visibility = View.GONE
+        binding.shutdownReady.visibility = View.GONE
+        showPrepareShutdownControl()
         if (file == null) {
             if (recordCurrent("failed", "missing_file", 0)) advance()
             return
@@ -608,6 +733,8 @@ class MainActivity : Activity() {
             }
             binding.image.setImageBitmap(bitmap)
             binding.image.visibility = View.VISIBLE
+            visiblePlaybackMedia = true
+            updateKeepScreenOn()
             playbackHandler.postDelayed({
                 if (
                     currentResultId == playbackId &&
@@ -619,6 +746,8 @@ class MainActivity : Activity() {
         } else {
             binding.image.visibility = View.GONE
             binding.video.visibility = View.VISIBLE
+            visiblePlaybackMedia = true
+            updateKeepScreenOn()
             binding.video.setVideoPath(file.path)
             binding.video.setOnCompletionListener {
                 if (
@@ -664,6 +793,8 @@ class MainActivity : Activity() {
         currentStartedAt = null
         currentStartedElapsedMs = null
         currentStartedBootCount = null
+        visiblePlaybackMedia = false
+        updateKeepScreenOn()
         loopResults += result
         persistLoopResults()
         store.putState("current_playback", "")
@@ -789,6 +920,11 @@ class MainActivity : Activity() {
     }
 
     private fun flushPendingBatches() {
+        // Never send a queue headed by an event timestamped from an
+        // unanchored device clock. This also covers a process death between a
+        // successful clock update and the normal sync-path rebasing call.
+        if (!serverClock.hasTrustedAnchor()) return
+        store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
         store.pendingOperationalEvents().forEach { (id, payload) ->
             try {
                 api.uploadOperationalEvent(payload)
@@ -808,18 +944,18 @@ class MainActivity : Activity() {
     }
 
     private fun sendHeartbeat() {
+        if (isShutdownPrepared()) return
         executor.execute {
+            if (isShutdownPrepared()) return@execute
             val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
-            val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+            val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100)?.takeIf { it > 0 } ?: 100
             val temperatureTenths =
                 battery?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0
             val batteryPercent = if (level != null && level >= 0) level * 100 / scale else null
             val body = JSONObject()
                 .put("recorded_at", serverClock.now().toString())
                 .put("screen_on", getSystemService(android.os.PowerManager::class.java).isInteractive)
-                .put("external_power", hasExternalPower())
-                .put("charging", hasExternalPower())
                 .put("battery_percent", batteryPercent)
                 .put(
                     "temperature_celsius",
@@ -845,22 +981,32 @@ class MainActivity : Activity() {
 
     private fun scheduleOperations() {
         operationsHandler.removeCallbacksAndMessages(null)
+        if (isShutdownPrepared()) return
         val heartbeat = object : Runnable {
             override fun run() {
+                if (isShutdownPrepared()) return
                 sendHeartbeat()
-                operationsHandler.postDelayed(this, 30 * 60 * 1000L)
+                if (!isShutdownPrepared()) {
+                    operationsHandler.postDelayed(this, 30 * 60 * 1000L)
+                }
             }
         }
         val sync = object : Runnable {
             override fun run() {
+                if (isShutdownPrepared()) return
                 synchronizeAndPlay()
-                operationsHandler.postDelayed(this, 60 * 60 * 1000L)
+                if (!isShutdownPrepared()) {
+                    operationsHandler.postDelayed(this, 60 * 60 * 1000L)
+                }
             }
         }
         val midnightSync = object : Runnable {
             override fun run() {
+                if (isShutdownPrepared()) return
                 synchronizeAndPlay()
-                operationsHandler.postDelayed(this, 24 * 60 * 60 * 1000L)
+                if (!isShutdownPrepared()) {
+                    operationsHandler.postDelayed(this, 24 * 60 * 60 * 1000L)
+                }
             }
         }
         operationsHandler.post(heartbeat)
@@ -877,14 +1023,13 @@ class MainActivity : Activity() {
         store.putState("last_successful_sync_at", serverClock.now().toString())
     }
 
-    private fun hasExternalPower(): Boolean {
-        val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
-        val plugged = battery?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0
-        return plugged != 0
-    }
-
-    private fun updateKeepScreenOn(externalPower: Boolean = hasExternalPower()) {
-        if (ExternalPowerPolicy.shouldKeepScreenAwake(externalPower)) {
+    private fun updateKeepScreenOn() {
+        if (
+            ScreenAwakePolicy.shouldKeepScreenAwake(
+                playbackActive = currentResultId != null && !isShutdownPrepared(),
+                visibleMedia = visiblePlaybackMedia,
+            )
+        ) {
             window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         } else {
             window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -903,21 +1048,115 @@ class MainActivity : Activity() {
         binding.video.stopPlayback()
         binding.video.visibility = View.GONE
         binding.image.visibility = View.GONE
+        visiblePlaybackMedia = false
+        updateKeepScreenOn()
     }
 
     private fun showStatus(message: String) {
         stopPlayback()
         binding.enrollment.visibility = View.GONE
+        binding.shutdownReady.visibility = View.GONE
         binding.status.text = message
         binding.status.visibility = View.VISIBLE
+        showPrepareShutdownControl()
     }
 
     private fun showFallback() {
         stopPlayback()
         binding.enrollment.visibility = View.GONE
+        binding.shutdownReady.visibility = View.GONE
         binding.status.visibility = View.GONE
         binding.image.setImageResource(R.drawable.dudu_fallback)
         binding.image.visibility = View.VISIBLE
+        updateKeepScreenOn()
+        showPrepareShutdownControl()
+    }
+
+    private fun showShutdownReady() {
+        stopPlayback()
+        binding.adminUnlock.visibility = View.GONE
+        binding.adminControls.visibility = View.GONE
+        binding.enrollment.visibility = View.GONE
+        binding.status.visibility = View.GONE
+        binding.prepareShutdown.visibility = View.GONE
+        binding.shutdownReady.visibility = View.VISIBLE
+        hideSystemUi()
+    }
+
+    private fun showPrepareShutdownControl() {
+        binding.prepareShutdown.visibility =
+            if (!isShutdownPrepared() && !hasActiveAdminSession()) View.VISIBLE else View.GONE
+    }
+
+    private fun isShutdownPrepared(): Boolean =
+        shutdownPrepared || store.hasPlannedShutdownMarker()
+
+    private fun collectHistoricalExitDiagnostics() {
+        if (
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                !ExitHistoryPolicy.shouldCollectDiagnostics(serverClock.hasTrustedAnchor())
+        ) {
+            return
+        }
+        val history = try {
+            getSystemService(ActivityManager::class.java)
+                .getHistoricalProcessExitReasons(packageName, 0, 0)
+        } catch (_: Exception) {
+            return
+        }
+        val entries = history.map { info ->
+            ExitHistoryEntry(
+                timestampMs = info.timestamp,
+                androidReason = info.reason,
+            )
+        }
+        val installationIdentity = store.exitHistoryInstallationIdentity()
+        val cursor = store.exitHistoryCursor()
+        val unprocessedEntries = ExitHistoryPolicy.unprocessedEntries(
+            installationIdentity = installationIdentity,
+            entries = entries,
+            cursor = cursor,
+        )
+        if (unprocessedEntries.isEmpty()) return
+        val now = serverClock.now()
+        val localNowEpochMs = System.currentTimeMillis()
+        val shutdownMarkers = listOfNotNull(
+            store.plannedShutdownMarker(),
+            // This is deliberately separate from the active marker. A
+            // confirmed Resume DUDU removes the stopped-state gate but must
+            // retain the orderly observation long enough to classify the
+            // preceding process exit correctly.
+            store.recentOrderlyPlannedShutdownMarker(localNowEpochMs),
+        )
+        val events = unprocessedEntries.mapNotNull { entry ->
+            val reason = ExitHistoryPolicy.abnormalReason(
+                androidReason = entry.androidReason,
+                supportsFreezerTermination = true,
+            ) ?: return@mapNotNull null
+            if (shutdownMarkers.any { marker ->
+                    ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                        marker = marker,
+                        exitTimestampMs = entry.timestampMs,
+                        nowEpochMs = localNowEpochMs,
+                    )
+                }
+            ) {
+                return@mapNotNull null
+            }
+            JSONObject()
+                .put("id", ExitHistoryPolicy.stableEventId(installationIdentity, entry))
+                .put("kind", "abnormal_app_exit")
+                .put("recorded_at", now.toString())
+                .put("details", JSONObject().put("reason", reason))
+        }
+        store.enqueueOperationalEventsAndAdvanceExitHistoryCursor(
+            events = events,
+            cursor = ExitHistoryPolicy.advanceCursor(
+                installationIdentity = installationIdentity,
+                cursor = cursor,
+                entries = entries,
+            ),
+        )
     }
 
     private fun hideSystemUi() {
@@ -1013,7 +1252,9 @@ class MainActivity : Activity() {
                             currentBootCount = serverClock.currentBootCount(),
                         ),
                         status = "interrupted",
-                        failureReason = "app_restart_or_power_loss",
+                        failureReason = ShutdownPreparationPolicy.recoveredInterruptionReason(
+                            store.plannedShutdownMarker(),
+                        ),
                     )
                 }
                 checkpointIndex = restoredIndex

@@ -1,5 +1,6 @@
 package com.duducar.signage
 
+import android.app.ApplicationExitInfo
 import java.io.ByteArrayInputStream
 import java.util.zip.GZIPInputStream
 import org.junit.Assert.assertEquals
@@ -73,7 +74,6 @@ class PlayerPoliciesTest {
         assertTrue(PlaybackTransitionPolicy.sameManifest("weekly", 4, "weekly", 4))
         assertTrue(
             PlaybackTransitionPolicy.shouldStart(
-                hasExternalPower = true,
                 mode = "play",
                 hasActiveManifest = true,
                 playbackActive = false,
@@ -82,7 +82,6 @@ class PlayerPoliciesTest {
         )
         assertFalse(
             PlaybackTransitionPolicy.shouldStart(
-                hasExternalPower = true,
                 mode = "play",
                 hasActiveManifest = true,
                 playbackActive = true,
@@ -92,10 +91,9 @@ class PlayerPoliciesTest {
     }
 
     @Test
-    fun reconnectAndReactivationStayFailClosedUntilEveryConditionIsReady() {
-        assertFalse(
+    fun playbackStartsWhenTheManifestIsReadyWithoutAnExternalPowerCondition() {
+        assertTrue(
             PlaybackTransitionPolicy.shouldStart(
-                hasExternalPower = false,
                 mode = "play",
                 hasActiveManifest = true,
                 playbackActive = false,
@@ -104,7 +102,6 @@ class PlayerPoliciesTest {
         )
         assertFalse(
             PlaybackTransitionPolicy.shouldStart(
-                hasExternalPower = true,
                 mode = "maintenance",
                 hasActiveManifest = true,
                 playbackActive = false,
@@ -113,7 +110,6 @@ class PlayerPoliciesTest {
         )
         assertFalse(
             PlaybackTransitionPolicy.shouldStart(
-                hasExternalPower = true,
                 mode = "play",
                 hasActiveManifest = true,
                 playbackActive = false,
@@ -189,9 +185,25 @@ class PlayerPoliciesTest {
     }
 
     @Test
-    fun externalPowerAloneKeepsThePlaybackWindowAwake() {
-        assertTrue(ExternalPowerPolicy.shouldKeepScreenAwake(hasExternalPower = true))
-        assertFalse(ExternalPowerPolicy.shouldKeepScreenAwake(hasExternalPower = false))
+    fun onlyVisibleActiveMediaKeepsThePlaybackWindowAwake() {
+        assertTrue(
+            ScreenAwakePolicy.shouldKeepScreenAwake(
+                playbackActive = true,
+                visibleMedia = true,
+            ),
+        )
+        assertFalse(
+            ScreenAwakePolicy.shouldKeepScreenAwake(
+                playbackActive = true,
+                visibleMedia = false,
+            ),
+        )
+        assertFalse(
+            ScreenAwakePolicy.shouldKeepScreenAwake(
+                playbackActive = false,
+                visibleMedia = true,
+            ),
+        )
     }
 
     @Test
@@ -244,7 +256,7 @@ class PlayerPoliciesTest {
     }
 
     @Test
-    fun playbackRecoveryResumesTheCorrectEntryWithoutCountingPoweredOffTime() {
+    fun playbackRecoveryResumesTheCorrectEntryWithoutCountingDowntime() {
         val entries = listOf("first", "second", "third")
         assertEquals(
             1,
@@ -289,6 +301,121 @@ class PlayerPoliciesTest {
             it.readText()
         }
         assertEquals(json, decoded)
+    }
+
+    @Test
+    fun plannedShutdownSuppressesOnlyTheMatchingOrderlyExitAndPreservesRecoveryReason() {
+        val marker = PlannedShutdownMarker(
+            id = "a7a8934a-3f69-4d30-83da-55f963a24dcd",
+            preparedAtEpochMs = 1_000,
+            orderlyShutdownAtEpochMs = 2_000,
+        )
+
+        assertTrue(
+            ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                marker = marker,
+                exitTimestampMs = 2_000,
+                nowEpochMs = 2_001,
+            ),
+        )
+        assertTrue(
+            ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                marker = marker,
+                exitTimestampMs = 2_000 + ShutdownPreparationPolicy.ORDERLY_EXIT_MATCH_WINDOW_MS,
+                nowEpochMs = 2_000 + ShutdownPreparationPolicy.ABNORMAL_EXIT_SUPPRESSION_WINDOW_MS,
+            ),
+        )
+        assertFalse(
+            ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                marker = marker,
+                exitTimestampMs = 1_999,
+                nowEpochMs = 2_001,
+            ),
+        )
+        assertFalse(
+            ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                marker = marker,
+                exitTimestampMs = 2_000 + ShutdownPreparationPolicy.ORDERLY_EXIT_MATCH_WINDOW_MS + 1,
+                nowEpochMs = 2_001,
+            ),
+        )
+        val resumedMarker = marker.copy(resumedAtEpochMs = 2_010)
+        assertTrue(
+            ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                marker = resumedMarker,
+                exitTimestampMs = 2_010,
+                nowEpochMs = 2_011,
+            ),
+        )
+        assertFalse(
+            ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                marker = resumedMarker,
+                exitTimestampMs = 2_011,
+                nowEpochMs = 2_011,
+            ),
+        )
+        assertFalse(
+            ShutdownPreparationPolicy.shouldSuppressAbnormalExit(
+                marker = marker,
+                exitTimestampMs = 2_000,
+                nowEpochMs = 2_000 + ShutdownPreparationPolicy.ABNORMAL_EXIT_SUPPRESSION_WINDOW_MS + 1,
+            ),
+        )
+        assertEquals(
+            "planned_shutdown",
+            ShutdownPreparationPolicy.recoveredInterruptionReason(marker),
+        )
+        assertEquals(
+            "app_restart_or_unexpected_exit",
+            ShutdownPreparationPolicy.recoveredInterruptionReason(null),
+        )
+        assertFalse(ShutdownPreparationPolicy.shouldResumeAutomatically(true))
+        assertTrue(ShutdownPreparationPolicy.shouldResumeAutomatically(false))
+        assertTrue(ShutdownPreparationPolicy.requiresTrustedTimestampRebase(false))
+        assertFalse(ShutdownPreparationPolicy.requiresTrustedTimestampRebase(true))
+    }
+
+    @Test
+    fun exitHistoryIsPerInstallDeterministicAndAdvancesWithoutReplayingTheCursor() {
+        val installationA = "f0e647d0-e625-4c68-ad1a-a9aed0c7f90e"
+        val installationB = "f6de5efd-4c45-4d68-8550-9f6455a02ec7"
+        val crash = ExitHistoryEntry(1_000, ApplicationExitInfo.REASON_CRASH)
+        val anr = ExitHistoryEntry(2_000, ApplicationExitInfo.REASON_ANR)
+        val crashId = ExitHistoryPolicy.stableEventId(installationA, crash)
+
+        assertFalse(ExitHistoryPolicy.shouldCollectDiagnostics(false))
+        assertTrue(ExitHistoryPolicy.shouldCollectDiagnostics(true))
+        assertEquals(crashId, ExitHistoryPolicy.stableEventId(installationA, crash))
+        assertFalse(crashId == ExitHistoryPolicy.stableEventId(installationB, crash))
+        assertEquals("crash", ExitHistoryPolicy.abnormalReason(crash.androidReason, false))
+        assertEquals("anr", ExitHistoryPolicy.abnormalReason(anr.androidReason, false))
+        assertEquals(
+            "freezer_termination",
+            ExitHistoryPolicy.abnormalReason(
+                ApplicationExitInfo.REASON_FREEZER,
+                supportsFreezerTermination = true,
+            ),
+        )
+        assertEquals(
+            null,
+            ExitHistoryPolicy.abnormalReason(
+                ApplicationExitInfo.REASON_FREEZER,
+                supportsFreezerTermination = false,
+            ),
+        )
+
+        val cursor = ExitHistoryCursor(1_000, setOf(crashId))
+        assertEquals(
+            listOf(anr),
+            ExitHistoryPolicy.unprocessedEntries(installationA, listOf(crash, anr), cursor),
+        )
+        assertEquals(
+            ExitHistoryCursor(
+                timestampMs = 2_000,
+                identitiesAtTimestamp = setOf(ExitHistoryPolicy.stableEventId(installationA, anr)),
+            ),
+            ExitHistoryPolicy.advanceCursor(installationA, cursor, listOf(crash, anr)),
+        )
     }
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

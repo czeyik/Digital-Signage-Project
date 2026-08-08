@@ -16,7 +16,10 @@ from signage.models import (
     DeviceAccessToken,
     DeviceAssignment,
     DeviceCredential,
+    DeviceHeartbeat,
+    DeviceOperationalEvent,
     Driver,
+    HardwareQualification,
     MediaAsset,
     PlaybackBatch,
     Playlist,
@@ -35,6 +38,33 @@ def post_playback_batch(client, payload, access, **headers):
         HTTP_AUTHORIZATION=f"Bearer {access}",
         HTTP_CONTENT_ENCODING="gzip",
         **headers,
+    )
+
+
+def post_heartbeat(client, access, **extra):
+    payload = {
+        "recorded_at": timezone.now().isoformat(),
+        "screen_on": True,
+        "free_storage_bytes": 3 * 1024 * 1024 * 1024,
+        "app_version": "0.1.0",
+        "android_version": "13",
+        "playback_active": True,
+    }
+    payload.update(extra)
+    return client.post(
+        reverse("device-heartbeat"),
+        payload,
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access}",
+    )
+
+
+def post_operational_event(client, access, payload):
+    return client.post(
+        reverse("device-operational-event"),
+        payload,
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access}",
     )
 
 
@@ -105,6 +135,49 @@ def provisioned_device():
 
 
 @pytest.mark.django_db
+@override_settings(DEPLOYMENT_ENV="production")
+def test_production_sync_requires_a_current_approved_hardware_qualification(
+    client, provisioned_device
+):
+    device, _, _, access = provisioned_device
+    headers = {"HTTP_AUTHORIZATION": f"Bearer {access}"}
+
+    absent_qualification = client.get(reverse("device-sync"), **headers)
+    assert absent_qualification.status_code == 200
+    assert absent_qualification.json()["mode"] == "maintenance"
+
+    owner = User.objects.get(role=User.Role.OWNER)
+    qualification = HardwareQualification(
+        model_name="Qualified Canary Tablet",
+        firmware_version="pilot-1",
+        android_version="13",
+        tested_by=owner,
+        test_date=timezone.localdate(),
+        evidence_reference="restricted/hardware/qualified-canary-tablet",
+        approved_for_pilot=True,
+        **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
+    )
+    qualification.save()
+    device.hardware_qualification = qualification
+    device.save(update_fields=["hardware_qualification", "updated_at"])
+
+    qualified = client.get(reverse("device-sync"), **headers)
+    assert qualified.status_code == 200
+    assert qualified.json()["mode"] == "play"
+
+    qualification.approved_for_pilot = False
+    qualification.save()
+    maintenance = client.get(reverse("device-sync"), **headers)
+
+    assert maintenance.status_code == 200
+    assert maintenance.json()["mode"] == "maintenance"
+    device.refresh_from_db()
+    assert device.status == Device.Status.ACTIVE
+    assert device.last_sync_at is not None
+    assert DeviceCredential.objects.get(device=device).revoked_at is None
+
+
+@pytest.mark.django_db
 def test_valid_gzip_playback_batch_is_idempotent(client, provisioned_device):
     device, playlist, item, access = provisioned_device
     batch_id = str(uuid.uuid4())
@@ -136,8 +209,16 @@ def test_valid_gzip_playback_batch_is_idempotent(client, provisioned_device):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "external_power_lost",
+        "planned_shutdown",
+        "app_restart_or_unexpected_exit",
+    ],
+)
 def test_playback_batch_accepts_a_known_interruption_category(
-    client, provisioned_device
+    client, provisioned_device, reason
 ):
     _, playlist, item, access = provisioned_device
     payload = playback_payload(playlist, item)
@@ -145,7 +226,7 @@ def test_playback_batch_accepts_a_known_interruption_category(
         {
             "duration_ms": 1_000,
             "status": "interrupted",
-            "failure_reason": "external_power_lost",
+            "failure_reason": reason,
         }
     )
 
@@ -154,7 +235,7 @@ def test_playback_batch_accepts_a_known_interruption_category(
     assert response.status_code == 201
     event = PlaybackBatch.objects.get().events.get()
     assert event.status == "interrupted"
-    assert event.failure_reason == "external_power_lost"
+    assert event.failure_reason == reason
 
 
 @pytest.mark.django_db
@@ -749,24 +830,185 @@ def test_operational_event_upload_is_idempotent(client, provisioned_device):
         "recorded_at": timezone.now().isoformat(),
         "details": {"removed_batches": 1},
     }
-    headers = {"HTTP_AUTHORIZATION": f"Bearer {access}"}
-
-    first = client.post(
-        reverse("device-operational-event"),
-        payload,
-        content_type="application/json",
-        **headers,
-    )
-    replay = client.post(
-        reverse("device-operational-event"),
-        payload,
-        content_type="application/json",
-        **headers,
+    first = post_operational_event(client, access, payload)
+    replay = post_operational_event(client, access, payload)
+    altered_replay = post_operational_event(
+        client,
+        access,
+        {**payload, "details": {"removed_batches": 2}},
     )
 
     assert first.status_code == 201
     assert replay.status_code == 200
     assert replay.json()["duplicate"] is True
+    assert altered_replay.status_code == 400
+
+
+@pytest.mark.django_db
+def test_new_operational_event_kinds_require_their_strict_details(
+    client, provisioned_device
+):
+    _, _, _, access = provisioned_device
+    recorded_at = timezone.now().isoformat()
+
+    planned = post_operational_event(
+        client,
+        access,
+        {
+            "id": str(uuid.uuid4()),
+            "kind": "planned_shutdown",
+            "recorded_at": recorded_at,
+            "details": {},
+        },
+    )
+    abnormal_responses = [
+        post_operational_event(
+            client,
+            access,
+            {
+                "id": str(uuid.uuid4()),
+                "kind": "abnormal_app_exit",
+                "recorded_at": recorded_at,
+                "details": {"reason": reason},
+            },
+        )
+        for reason in (
+            "crash",
+            "native_crash",
+            "anr",
+            "initialization_failure",
+            "low_memory",
+            "excessive_resource_usage",
+            "freezer_termination",
+        )
+    ]
+    missing_planned_details = post_operational_event(
+        client,
+        access,
+        {
+            "id": str(uuid.uuid4()),
+            "kind": "planned_shutdown",
+            "recorded_at": recorded_at,
+        },
+    )
+    invalid_planned = post_operational_event(
+        client,
+        access,
+        {
+            "id": str(uuid.uuid4()),
+            "kind": "planned_shutdown",
+            "recorded_at": recorded_at,
+            "details": {"reason": "operator"},
+        },
+    )
+    invalid_abnormal = post_operational_event(
+        client,
+        access,
+        {
+            "id": str(uuid.uuid4()),
+            "kind": "abnormal_app_exit",
+            "recorded_at": recorded_at,
+            "details": {"reason": "unknown", "trace": "do-not-store"},
+        },
+    )
+
+    assert planned.status_code == 201
+    assert all(response.status_code == 201 for response in abnormal_responses)
+    assert missing_planned_details.status_code == 400
+    assert invalid_planned.status_code == 400
+    assert invalid_abnormal.status_code == 400
+    assert DeviceOperationalEvent.objects.filter(
+        kind=DeviceOperationalEvent.Kind.PLANNED_SHUTDOWN
+    ).count() == 1
+
+
+@pytest.mark.django_db
+def test_heartbeat_preserves_legacy_power_telemetry_and_allows_nulls(
+    client, provisioned_device
+):
+    device, _, _, access = provisioned_device
+
+    legacy = post_heartbeat(
+        client,
+        access,
+        external_power=True,
+        charging=False,
+    )
+    legacy_inverse = post_heartbeat(
+        client,
+        access,
+        external_power=False,
+        charging=True,
+    )
+    omitted = post_heartbeat(client, access)
+    explicit_null = post_heartbeat(
+        client,
+        access,
+        external_power=None,
+        charging=None,
+    )
+
+    assert legacy.status_code == 200
+    assert legacy_inverse.status_code == 200
+    assert omitted.status_code == 200
+    assert explicit_null.status_code == 200
+    heartbeats = list(DeviceHeartbeat.objects.order_by("id"))
+    assert (heartbeats[0].external_power, heartbeats[0].charging) == (True, False)
+    assert (heartbeats[1].external_power, heartbeats[1].charging) == (False, True)
+    assert (heartbeats[2].external_power, heartbeats[2].charging) == (None, None)
+    assert (heartbeats[3].external_power, heartbeats[3].charging) == (None, None)
+    device.refresh_from_db()
+    assert device.last_seen_at == heartbeats[-1].received_at
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("external_power", "false"),
+        ("external_power", 1),
+        ("charging", "true"),
+        ("charging", 0),
+    ],
+)
+def test_heartbeat_rejects_non_boolean_power_telemetry(
+    client, provisioned_device, field, value
+):
+    _, _, _, access = provisioned_device
+
+    response = post_heartbeat(client, access, **{field: value})
+
+    assert response.status_code == 400
+    assert field in str(response.json()["error"]["detail"])
+    assert not DeviceHeartbeat.objects.exists()
+
+
+@pytest.mark.django_db
+def test_low_battery_alert_opens_and_escalates_without_auto_deescalation(
+    client, provisioned_device
+):
+    device, _, _, access = provisioned_device
+
+    assert post_heartbeat(client, access, battery_percent=21).status_code == 200
+    assert not Alert.objects.filter(device=device, code="low_battery").exists()
+
+    assert post_heartbeat(client, access, battery_percent=20).status_code == 200
+    alert = Alert.objects.get(device=device, code="low_battery")
+    assert alert.severity == Alert.Severity.WARNING
+
+    assert post_heartbeat(client, access, battery_percent=10).status_code == 200
+    alert.refresh_from_db()
+    assert alert.severity == Alert.Severity.CRITICAL
+    assert Alert.objects.filter(
+        device=device,
+        code="low_battery",
+        acknowledged_at__isnull=True,
+    ).count() == 1
+
+    assert post_heartbeat(client, access, battery_percent=15).status_code == 200
+    alert.refresh_from_db()
+    assert alert.severity == Alert.Severity.CRITICAL
+    assert alert.acknowledged_at is None
 
 
 @pytest.mark.django_db
