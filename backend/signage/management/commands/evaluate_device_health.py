@@ -1,18 +1,13 @@
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
+from django.db.models import Max
 from django.utils import timezone
 
-from signage.models import Alert, Device, PlaybackEvent
+from signage.models import Alert, Device, DeviceOperationalEvent, PlaybackEvent
+from signage.services import open_alert, open_or_escalate_alert
 
-
-def open_alert(device, code, severity, message):
-    Alert.objects.get_or_create(
-        device=device,
-        code=code,
-        acknowledged_at__isnull=True,
-        defaults={"severity": severity, "message": message},
-    )
+ABNORMAL_APP_EXIT_KIND = DeviceOperationalEvent.Kind.ABNORMAL_APP_EXIT
 
 
 class Command(BaseCommand):
@@ -20,15 +15,32 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         now = timezone.now()
-        for device in Device.objects.all():
-            if not device.last_seen_at or device.last_seen_at < now - timedelta(
-                hours=48
-            ):
-                open_alert(
+        active_devices = Device.objects.filter(status=Device.Status.ACTIVE).annotate(
+            latest_credential_issued_at=Max("credentials__created_at")
+        )
+        for device in active_devices:
+            # ``last_seen_at`` is set from DeviceHeartbeat.received_at, never
+            # from device-provided timestamps. A newly activated device with no
+            # heartbeat gets a server-side grace period from credential issue;
+            # that is not counted as a heartbeat and only avoids a stale
+            # provisioning record raising an immediate alert.
+            last_heartbeat_at = (
+                device.last_seen_at
+                or device.latest_credential_issued_at
+                or device.created_at
+            )
+            unavailable_for = now - last_heartbeat_at
+            if unavailable_for >= timedelta(hours=24):
+                critical = unavailable_for >= timedelta(hours=48)
+                open_or_escalate_alert(
                     device,
-                    "offline_48h",
-                    Alert.Severity.CRITICAL,
-                    "Device has been offline for more than 48 hours.",
+                    "device_unavailable",
+                    Alert.Severity.CRITICAL
+                    if critical
+                    else Alert.Severity.WARNING,
+                    "Device has not sent a heartbeat for 48 hours."
+                    if critical
+                    else "Device has not sent a heartbeat for 24 hours.",
                 )
             if not device.last_sync_at or device.last_sync_at < now - timedelta(days=1):
                 severity = (
@@ -75,27 +87,17 @@ class Command(BaseCommand):
                     Alert.Severity.WARNING,
                     "Device reported at least three advertisement failures.",
                 )
-            power_losses = PlaybackEvent.objects.filter(
-                batch__device=device,
-                status=PlaybackEvent.Status.INTERRUPTED,
-                failure_reason__in=[
-                    "external_power_lost",
-                    "app_restart_or_power_loss",
-                ],
-                started_at__gte=now - timedelta(hours=24),
+            abnormal_app_exits = DeviceOperationalEvent.objects.filter(
+                device=device,
+                kind=ABNORMAL_APP_EXIT_KIND,
+                received_at__gte=now - timedelta(hours=24),
             )
-            if power_losses.count() >= 10:
+            if abnormal_app_exits.values("id").distinct().count() >= 3:
                 open_alert(
                     device,
-                    "repeated_power_loss",
+                    "repeated_abnormal_app_exit",
                     Alert.Severity.WARNING,
-                    "Device reported at least 10 power losses within 24 hours.",
-                )
-            if power_losses.filter(duration_ms__gte=24 * 60 * 60 * 1000).exists():
-                open_alert(
-                    device,
-                    "long_power_interruption",
-                    Alert.Severity.WARNING,
-                    "Device reported a power interruption longer than 24 hours.",
+                    "Device reported at least three abnormal application exits "
+                    "within 24 hours.",
                 )
         self.stdout.write(self.style.SUCCESS("Fleet health evaluated."))

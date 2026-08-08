@@ -10,4 +10,15 @@
     <string name="open_android_settings">Open Android settings</string>
     <string name="relock_now">Relock now</string>
     <string name="exact_alarm_required">Administrator access is unavailable until exact-alarm scheduling is granted during staff provisioning.</string>
+    <string name="prepare_shutdown">Prepare for shutdown</string>
+    <string name="prepare_shutdown_title">Prepare this display for shutdown?</string>
+    <string name="prepare_shutdown_message">Advertising will stop. Use this tablet’s documented physical power-off method after the shutdown-ready screen appears.</string>
+    <string name="prepare_shutdown_confirm">Prepare shutdown</string>
+    <string name="shutdown_prepare_failed">Shutdown preparation could not be saved safely. Keep this display powered on and contact DUDU support.</string>
+    <string name="shutdown_ready_title">Ready for physical shutdown</string>
+    <string name="shutdown_ready_message">Advertising is stopped. Use this tablet’s documented physical power-off method. This display will remain stopped until Resume DUDU is deliberately selected.</string>
+    <string name="resume_dudu">Resume DUDU</string>
+    <string name="resume_dudu_title">Resume DUDU advertising?</string>
+    <string name="resume_dudu_message">This deliberately clears the shutdown-ready state and checks for the current playlist.</string>
+    <string name="resume_dudu_confirm">Resume advertising</string>
 </resources>

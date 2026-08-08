@@ -27,8 +27,28 @@ Returns server time and one of:
 
 `POST devices/heartbeat/`
 
-Accepts screen, external-power, battery, storage, application, Android, and
-optional temperature state.
+Accepts the server-corrected recorded time, screen state, battery percentage,
+storage, application and Android versions, optional temperature, active
+playlist, sync state, and playback state. New APKs omit `external_power` and
+`charging`: advertising and health policy do not depend on either value. The
+server accepts and preserves those legacy fields during a phased APK rollout,
+but does not use them to infer vehicle power, vehicle operation, occupancy, or
+audience exposure.
+
+`POST devices/operational-events/`
+
+Accepts an idempotent event UUID, recorded time, kind, and non-sensitive
+details. The battery-backed policy adds exactly these diagnostics:
+
+- `planned_shutdown` with `details` equal to `{}` after a user confirms the
+  visible **Prepare for shutdown** action.
+- `abnormal_app_exit` with `details` containing exactly `reason`, whose value
+  is one of `crash`, `native_crash`, `anr`, `initialization_failure`,
+  `low_memory`, `excessive_resource_usage`, or `freezer_termination`.
+
+Do not send stack traces, free-form process data, personal data, or power-state
+claims in an operational event. The server uses received time and distinct event
+IDs when evaluating repeated abnormal exits.
 
 `POST devices/playback-batches/`
 

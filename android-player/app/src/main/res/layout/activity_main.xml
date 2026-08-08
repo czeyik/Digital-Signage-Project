@@ -31,6 +31,56 @@
         android:textStyle="bold" />
 
     <LinearLayout
+        android:id="@+id/prepareShutdown"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="24dp"
+        android:background="#F7F8F4"
+        android:padding="8dp">
+
+        <Button
+            android:id="@+id/prepareShutdownButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/prepare_shutdown" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/shutdownReady"
+        android:layout_width="620dp"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:background="#F7F8F4"
+        android:orientation="vertical"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/shutdown_ready_title"
+            android:textColor="#10271E"
+            android:textSize="28sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="@string/shutdown_ready_message"
+            android:textColor="#10271E"
+            android:textSize="20sp" />
+
+        <Button
+            android:id="@+id/resumeDuduButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="@string/resume_dudu" />
+    </LinearLayout>
+
+    <LinearLayout
         android:id="@+id/enrollment"
         android:layout_width="520dp"
         android:layout_height="wrap_content"

@@ -1,6 +1,8 @@
 package com.duducar.signage
 
+import android.app.ApplicationExitInfo
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
 import java.security.MessageDigest
 import java.util.zip.GZIPOutputStream
 import javax.crypto.SecretKeyFactory
@@ -105,8 +107,147 @@ object EnrollmentPolicy {
         !isProduction || isDeviceOwner
 }
 
-object ExternalPowerPolicy {
-    fun shouldKeepScreenAwake(hasExternalPower: Boolean): Boolean = hasExternalPower
+object ScreenAwakePolicy {
+    fun shouldKeepScreenAwake(
+        playbackActive: Boolean,
+        visibleMedia: Boolean,
+    ): Boolean = playbackActive && visibleMedia
+}
+
+data class PlannedShutdownMarker(
+    val id: String,
+    val preparedAtEpochMs: Long,
+    val orderlyShutdownAtEpochMs: Long? = null,
+    // Present only on the non-blocking marker retained after an explicit
+    // Resume DUDU confirmation. It prevents a later, unrelated crash from
+    // being classified as the preceding orderly shutdown.
+    val resumedAtEpochMs: Long? = null,
+    // When a shutdown is prepared before the first server-time anchor, its
+    // queued event must be rebased before upload so a bad device clock cannot
+    // make that FIFO record look implausibly far in the future to the API.
+    val requiresTrustedTimestampRebase: Boolean = false,
+)
+
+object ShutdownPreparationPolicy {
+    const val ABNORMAL_EXIT_SUPPRESSION_WINDOW_MS = 24L * 60 * 60 * 1000
+    const val ORDERLY_EXIT_MATCH_WINDOW_MS = 5L * 60 * 1000
+
+    fun shouldSuppressAbnormalExit(
+        marker: PlannedShutdownMarker,
+        exitTimestampMs: Long,
+        nowEpochMs: Long,
+    ): Boolean {
+        val orderlyShutdownAt = marker.orderlyShutdownAtEpochMs ?: return false
+        val markerAge = nowEpochMs - orderlyShutdownAt
+        val lastMatchingExitAt = minOf(
+            orderlyShutdownAt + ORDERLY_EXIT_MATCH_WINDOW_MS,
+            marker.resumedAtEpochMs ?: Long.MAX_VALUE,
+        )
+        return exitTimestampMs >= orderlyShutdownAt &&
+            exitTimestampMs <= lastMatchingExitAt &&
+            marker.preparedAtEpochMs <= orderlyShutdownAt &&
+            markerAge in 0..ABNORMAL_EXIT_SUPPRESSION_WINDOW_MS
+    }
+
+    fun recoveredInterruptionReason(marker: PlannedShutdownMarker?): String =
+        if (marker != null) "planned_shutdown" else "app_restart_or_unexpected_exit"
+
+    fun shouldResumeAutomatically(hasShutdownMarker: Boolean): Boolean = !hasShutdownMarker
+
+    fun requiresTrustedTimestampRebase(hasTrustedServerAnchor: Boolean): Boolean =
+        !hasTrustedServerAnchor
+}
+
+data class ExitHistoryEntry(
+    val timestampMs: Long,
+    val androidReason: Int,
+)
+
+data class ExitHistoryCursor(
+    val timestampMs: Long = -1,
+    val identitiesAtTimestamp: Set<String> = emptySet(),
+)
+
+object ExitHistoryPolicy {
+    fun shouldCollectDiagnostics(hasTrustedServerAnchor: Boolean): Boolean =
+        hasTrustedServerAnchor
+
+    fun abnormalReason(
+        androidReason: Int,
+        supportsFreezerTermination: Boolean,
+    ): String? = when (androidReason) {
+        ApplicationExitInfo.REASON_CRASH -> "crash"
+        ApplicationExitInfo.REASON_CRASH_NATIVE -> "native_crash"
+        ApplicationExitInfo.REASON_ANR -> "anr"
+        ApplicationExitInfo.REASON_INITIALIZATION_FAILURE -> "initialization_failure"
+        ApplicationExitInfo.REASON_LOW_MEMORY -> "low_memory"
+        ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE -> "excessive_resource_usage"
+        ApplicationExitInfo.REASON_FREEZER -> if (supportsFreezerTermination) {
+            "freezer_termination"
+        } else {
+            null
+        }
+        else -> null
+    }
+
+    fun stableEventId(
+        installationIdentity: String,
+        entry: ExitHistoryEntry,
+    ): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(
+            "duducar-abnormal-exit-v1|$installationIdentity|${entry.timestampMs}|${entry.androidReason}"
+                .toByteArray(Charsets.UTF_8),
+        )
+        val uuidBytes = digest.copyOfRange(0, 16)
+        uuidBytes[6] = ((uuidBytes[6].toInt() and 0x0f) or 0x50).toByte()
+        uuidBytes[8] = ((uuidBytes[8].toInt() and 0x3f) or 0x80).toByte()
+        val buffer = ByteBuffer.wrap(uuidBytes)
+        return java.util.UUID(buffer.long, buffer.long).toString()
+    }
+
+    fun unprocessedEntries(
+        installationIdentity: String,
+        entries: Collection<ExitHistoryEntry>,
+        cursor: ExitHistoryCursor,
+    ): List<ExitHistoryEntry> = entries
+        .asSequence()
+        .filter { it.timestampMs >= 0 }
+        .filter {
+            it.timestampMs > cursor.timestampMs ||
+                (
+                    it.timestampMs == cursor.timestampMs &&
+                        stableEventId(installationIdentity, it) !in cursor.identitiesAtTimestamp
+                    )
+        }
+        .sortedWith(
+            compareBy<ExitHistoryEntry> { it.timestampMs }
+                .thenBy { stableEventId(installationIdentity, it) },
+        )
+        .toList()
+
+    fun advanceCursor(
+        installationIdentity: String,
+        cursor: ExitHistoryCursor,
+        entries: Collection<ExitHistoryEntry>,
+    ): ExitHistoryCursor {
+        val validEntries = entries.filter { it.timestampMs >= 0 }
+        val latestTimestamp = validEntries.maxOfOrNull { it.timestampMs } ?: return cursor
+        val latestIdentities = validEntries
+            .asSequence()
+            .filter { it.timestampMs == latestTimestamp }
+            .map { stableEventId(installationIdentity, it) }
+            .toSet()
+        return when {
+            latestTimestamp > cursor.timestampMs -> ExitHistoryCursor(
+                timestampMs = latestTimestamp,
+                identitiesAtTimestamp = latestIdentities,
+            )
+            latestTimestamp == cursor.timestampMs -> cursor.copy(
+                identitiesAtTimestamp = cursor.identitiesAtTimestamp + latestIdentities,
+            )
+            else -> cursor
+        }
+    }
 }
 
 data class ServerClockAnchor(
@@ -132,7 +273,7 @@ object CorrectedClockPolicy {
         } else {
             // Device-owner policy blocks manual date/time changes. After a
             // reboot elapsedRealtime resets, so the protected wall clock is
-            // the only available way to account for powered-off time.
+            // the only available way to account for the downtime.
             (currentWallEpochMs - anchor.wallEpochMs).coerceAtLeast(0)
         }
         return if (Long.MAX_VALUE - anchor.serverEpochMs < elapsed) {
@@ -177,8 +318,8 @@ object PlaybackRecoveryPolicy {
     ) {
         currentElapsedRealtimeMs - startedElapsedRealtimeMs
     } else {
-        // The exact interruption point is unknowable after a power loss or
-        // reboot. Reporting zero is safer than counting powered-off time.
+        // The exact interruption point is unknowable after a device reboot.
+        // Reporting zero is safer than counting downtime as playback.
         0
     }
 }
@@ -211,14 +352,12 @@ object PlaybackTransitionPolicy {
     ): Boolean = !hasActiveManifest || (urgent && !sameManifest)
 
     fun shouldStart(
-        hasExternalPower: Boolean,
         mode: String?,
         hasActiveManifest: Boolean,
         playbackActive: Boolean,
         adminSessionActive: Boolean,
     ): Boolean =
-        hasExternalPower &&
-            mode == "play" &&
+        mode == "play" &&
             hasActiveManifest &&
             !playbackActive &&
             !adminSessionActive

@@ -22,8 +22,10 @@ class ServerClock(context: Context) {
             .commit()
     }
 
+    fun hasTrustedAnchor(): Boolean = preferences.contains("server_anchor_epoch_ms")
+
     fun now(): Instant {
-        if (preferences.contains("server_anchor_epoch_ms")) {
+        if (hasTrustedAnchor()) {
             val anchor = ServerClockAnchor(
                 serverEpochMs = preferences.getLong("server_anchor_epoch_ms", 0),
                 wallEpochMs = preferences.getLong("wall_anchor_epoch_ms", 0),

@@ -59,9 +59,24 @@ class HardwareQualification(TimeStampedModel):
         help_text="Internal path or ticket containing photos, logs, and test notes.",
     )
     device_owner_lock_task_passed = models.BooleanField(default=False)
-    boot_on_power_passed = models.BooleanField(default=False)
+    # These two historic results describe the retired vehicle-power policy.  They
+    # remain for auditability but cannot qualify hardware under the battery-backed
+    # policy.
+    legacy_boot_on_vehicle_power_passed = models.BooleanField(
+        default=False,
+        editable=False,
+    )
     screen_state_passed = models.BooleanField(default=False)
-    power_loss_path_passed = models.BooleanField(default=False)
+    legacy_external_power_loss_path_passed = models.BooleanField(
+        default=False,
+        editable=False,
+    )
+    battery_backed_playback_passed = models.BooleanField(default=False)
+    battery_runtime_passed = models.BooleanField(default=False)
+    battery_level_telemetry_passed = models.BooleanField(default=False)
+    planned_shutdown_flow_passed = models.BooleanField(default=False)
+    physical_shutdown_recovery_passed = models.BooleanField(default=False)
+    abnormal_exit_recovery_passed = models.BooleanField(default=False)
     playback_12h_passed = models.BooleanField(default=False)
     image_aspect_passed = models.BooleanField(default=False)
     cache_capacity_passed = models.BooleanField(default=False)
@@ -78,9 +93,13 @@ class HardwareQualification(TimeStampedModel):
 
     REQUIRED_PASS_FIELDS = (
         "device_owner_lock_task_passed",
-        "boot_on_power_passed",
         "screen_state_passed",
-        "power_loss_path_passed",
+        "battery_backed_playback_passed",
+        "battery_runtime_passed",
+        "battery_level_telemetry_passed",
+        "planned_shutdown_flow_passed",
+        "physical_shutdown_recovery_passed",
+        "abnormal_exit_recovery_passed",
         "playback_12h_passed",
         "image_aspect_passed",
         "cache_capacity_passed",
@@ -650,8 +669,8 @@ class DeviceHeartbeat(models.Model):
     recorded_at = models.DateTimeField(default=timezone.now)
     received_at = models.DateTimeField(auto_now_add=True)
     screen_on = models.BooleanField()
-    external_power = models.BooleanField()
-    charging = models.BooleanField()
+    external_power = models.BooleanField(null=True, blank=True)
+    charging = models.BooleanField(null=True, blank=True)
     battery_percent = models.PositiveSmallIntegerField(null=True, blank=True)
     free_storage_bytes = models.PositiveBigIntegerField()
     temperature_celsius = models.DecimalField(
@@ -741,6 +760,8 @@ class DeviceOperationalEvent(models.Model):
     class Kind(models.TextChoices):
         FORCED_QUEUE_LOSS = "forced_queue_loss", "Forced queue data loss"
         REPLACEMENT_FAILED = "replacement_failed", "Replacement validation failed"
+        PLANNED_SHUTDOWN = "planned_shutdown", "Planned shutdown"
+        ABNORMAL_APP_EXIT = "abnormal_app_exit", "Abnormal application exit"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     device = models.ForeignKey(
@@ -750,6 +771,14 @@ class DeviceOperationalEvent(models.Model):
     recorded_at = models.DateTimeField()
     received_at = models.DateTimeField(auto_now_add=True)
     details = models.JSONField(default=dict)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["device", "kind", "-received_at"],
+                name="signage_devop_kind_recv_idx",
+            )
+        ]
 
     def save(self, *args, **kwargs):
         if not self._state.adding:

@@ -1,4 +1,5 @@
 import hashlib
+import importlib
 import os
 import secrets
 import subprocess
@@ -8,6 +9,7 @@ from io import StringIO
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from django.apps import apps as django_apps
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.management import CommandError, call_command
 from django.test import Client, override_settings
@@ -82,6 +84,74 @@ def test_hardware_approval_records_approved_timestamp():
     qualification.save()
 
     assert qualification.approved_at is not None
+
+
+@pytest.mark.django_db
+def test_hardware_legacy_power_results_cannot_satisfy_new_battery_gates():
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    pass_fields = {field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS}
+    pass_fields["battery_runtime_passed"] = False
+    qualification = HardwareQualification(
+        model_name="Legacy Example 10",
+        firmware_version="1.0",
+        android_version="13",
+        tested_by=owner,
+        test_date=date.today(),
+        evidence_reference="internal://hardware/legacy-example-10",
+        approved_for_pilot=True,
+        legacy_boot_on_vehicle_power_passed=True,
+        legacy_external_power_loss_path_passed=True,
+        **pass_fields,
+    )
+
+    with pytest.raises(ValidationError, match="battery runtime passed"):
+        qualification.save()
+
+    assert "legacy_boot_on_vehicle_power_passed" not in (
+        HardwareQualification.REQUIRED_PASS_FIELDS
+    )
+    assert "legacy_external_power_loss_path_passed" not in (
+        HardwareQualification.REQUIRED_PASS_FIELDS
+    )
+    assert not HardwareQualification._meta.get_field(
+        "legacy_boot_on_vehicle_power_passed"
+    ).editable
+    assert not HardwareQualification._meta.get_field(
+        "legacy_external_power_loss_path_passed"
+    ).editable
+
+
+@pytest.mark.django_db
+def test_battery_policy_migration_invalidates_existing_hardware_approval():
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    qualification = HardwareQualification(
+        model_name="Previously Approved 10",
+        firmware_version="1.0",
+        android_version="13",
+        tested_by=owner,
+        test_date=date.today(),
+        evidence_reference="internal://hardware/previously-approved-10",
+        approved_for_pilot=True,
+        **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
+    )
+    qualification.save()
+    migration = importlib.import_module(
+        "signage.migrations.0010_battery_backed_player_policy"
+    )
+
+    migration.invalidate_legacy_hardware_approvals(django_apps, None)
+
+    qualification.refresh_from_db()
+    assert qualification.approved_for_pilot is False
+    assert qualification.approved_at is None
 
 
 def test_staticfiles_storage_matches_runtime_mode():

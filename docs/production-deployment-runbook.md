@@ -118,6 +118,18 @@ reach the dashboard. Record that preflight in the change record; do not infer
 it from a database user count or a marketing-user login. The migration cannot
 restore marketing administrator flags or the terminated sessions.
 
+Before applying `0010_battery_backed_player_policy`, record in the change
+record the count and identities of active devices linked to qualifications that
+will become legacy/unapproved. Confirm, in the reviewed release and during the
+maintenance window, that each affected device receives `maintenance` from sync
+until its exact model and firmware are requalified under the battery-backed
+criteria; enrollment-only qualification checks are insufficient for an
+already-active credential. Also list unresolved historical alert codes from the
+retired power-loss policy (including `repeated_power_loss` and
+`long_power_interruption`) and have an authorized dashboard user manually
+triage and acknowledge them where appropriate. Preserve the historical alerts
+as evidence; do not silently close or delete them during the migration.
+
 ```sh
 sudo /usr/local/sbin/duducar-command migrate
 sudo /usr/local/sbin/duducar-command grant-runtime
@@ -150,9 +162,13 @@ approve the `HardwareQualification` record for the exact model and firmware,
 then link it when provisioning the device. The production enrollment-challenge
 endpoint rejects unqualified devices even if their integrity verdict passes.
 
-Do not infer kiosk, power, screen, temperature, or thermal support from an
-emulator or phone. If `MEETS_DEVICE_INTEGRITY` cannot be obtained on the exact
-tablet, leave vehicle enrollment disabled and launch only the dashboard/API.
+Do not infer kiosk, battery-backed playback, planned shutdown, screen,
+temperature, or thermal support from an emulator or phone. The exact model and
+firmware must pass the current battery-backed criteria, including battery
+runtime/telemetry, planned shutdown, physical shutdown/recovery, and
+abnormal-exit recovery; legacy auto-boot and vehicle-power-loss results do not
+qualify a new record. If `MEETS_DEVICE_INTEGRITY` cannot be obtained on the
+exact tablet, leave vehicle enrollment disabled and launch only the dashboard/API.
 
 ## Production rehearsal
 
@@ -169,13 +185,24 @@ tablet, leave vehicle enrollment disabled and launch only the dashboard/API.
 5. Publish a weekly playlist and verify missing-replacement warning behavior.
 6. Provision an assigned device linked to its approved hardware qualification,
    generate a 15-minute code, and enroll the release-signed APK.
-7. Verify atomic sync, hashes, playback, fallback, heartbeat, proof upload,
-   report filters, finalization state, and CSV privacy.
+7. Verify atomic sync, hashes, playback, fallback, the battery-backed heartbeat
+   contract (new APKs omit external-power and charging telemetry), proof upload,
+   report filters, finalization state, and CSV privacy. Confirm reports do not
+   claim vehicle operation, occupancy, external power, or audience exposure.
 8. Verify replayed, expired, forged, and wrong-hash integrity enrollment fails
    without consuming a valid code.
-9. Rehearse offline sync/upload, interrupted or corrupt downloads, power loss,
+9. Rehearse offline sync/upload, interrupted or corrupt downloads, external
+   cable/vehicle-power disconnection while battery playback continues,
    server-clock offset, urgent and normal replacement, disable/reactivate,
-   low-storage forced-loss recording, kiosk escape, and PIN reset.
+   low-storage forced-loss recording, kiosk escape, and PIN reset. Exercise
+   `<=20%`/`<=10%` low-battery escalation without stopping advertising; the
+   visible non-PIN **Prepare for shutdown** confirmation, neutral stopped
+   screen, and visible non-PIN **Resume DUDU** confirmation. Merely restoring
+   the launcher, activity, or lifecycle must not restart advertising. Rehearse
+   the documented physical shutdown and staff-unlock/launch procedure; Android
+   13 abnormal-exit diagnostics where applicable; and controlled
+   server-received-heartbeat checks for the 24-hour warning and 48-hour
+   critical `device_unavailable` escalation.
 10. Confirm one complete loop appears exactly once and only fully completed
     advertisements count as contractual plays.
 11. Verify all five systemd timers, the logical-backup alert, host disk and
@@ -210,9 +237,12 @@ same release key.
 
 The canary may start only when production readiness, CI, vulnerability review,
 SMTP, private S3/CloudFront media processing, integrity rejection tests,
-exact-hardware qualification, offline/power/replacement/disablement tests,
-proof idempotency, current backup and restore evidence, notification delivery,
-and the USD 30 estimate all pass.
+exact-hardware qualification, offline/battery-backed-playback/planned-
+shutdown/abnormal-exit/replacement/disablement tests, proof idempotency,
+current backup and restore evidence, notification delivery, and the USD 30
+estimate all pass. A completed battery-powered or parked play counts, but it is
+not evidence of vehicle operation, occupancy, external power, or audience
+exposure.
 
 If integrity, hardware, restore, private-media, notification, budget, or
 proof-idempotency gates fail, keep production vehicle enrollment disabled. A

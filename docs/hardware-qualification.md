@@ -7,24 +7,55 @@ for each tested model/firmware. Do not mark `approved_for_pilot` until every
 required and failure test has passed and the evidence reference points to the
 supporting photos, logs, and notes.
 
+The `legacy_boot_on_vehicle_power_passed` and
+`legacy_external_power_loss_path_passed` fields preserve results from the
+retired vehicle-power policy and do **not** qualify a new record. A new record
+must instead pass the corresponding criteria for
+`battery_backed_playback_passed`, `battery_runtime_passed`,
+`battery_level_telemetry_passed`, `planned_shutdown_flow_passed`,
+`physical_shutdown_recovery_passed`, and `abnormal_exit_recovery_passed`, as
+well as the existing kiosk, screen, media, network, thermal, safety, and
+recovery criteria.
+
 ## Required
 
 - Android 12 or newer with current security updates
-- 10-inch landscape display and built-in 4G LTE
+- Battery-backed 10-inch landscape display and built-in 4G LTE
 - Device-owner provisioning and lock-task mode work after factory reset
 - Navigation and status controls cannot escape the kiosk
-- DUDU remains the persistent Home application after reboot and power reconnect
+- DUDU remains the persistent Home application while the tablet is unlocked
 - Safe boot, secondary-user creation, app force-stop/control, overlay windows,
   manual date/time changes, physical-media mounting, and USB file transfer are
   blocked by the recorded device-owner policy
 - Physical screen-on state is available and matches visual inspection
-- Application starts automatically after vehicle power is connected
-- Locked boot exposes no credential-protected player state; playback starts
-  after the first unlock and ordinary `BOOT_COMPLETED`
-- Battery-backed model reports power loss before playback stops, and the DUDU
-  window releases its keep-screen-on request so Android/device policy can sleep
-  or shut down the tablet
-- Battery-free model restarts reliably and permits heartbeat-gap inference
+- Locked boot exposes no credential-protected player state. After a planned
+  shutdown and battery depletion/reboot, staff unlock and launch DUDU to reach
+  the shutdown-ready screen; playback resumes only after the visible non-PIN
+  **Resume DUDU** confirmation, not from launcher or lifecycle restoration
+- **Battery-backed playback:** advertising continues without interruption when
+  external vehicle or cable power is disconnected; playback and keep-screen-on
+  behavior do not depend on external-power detection
+- **Battery runtime:** record battery protection, charging behavior, and a
+  safe representative runtime/charging test suitable for the intended duty
+  period
+- **Battery-level telemetry:** Android reports a reliable 0–100 percent value
+  and a controlled `<=20%` then `<=10%` test reaches the dashboard as the same
+  `low_battery` warning then critical alert without stopping advertising
+- **Planned shutdown flow:** a normal visible **Prepare for shutdown** button
+  requires confirmation but no administrator PIN, records the interrupted item,
+  shows a neutral shutdown-ready screen, and remains stopped with no five-minute
+  automatic resume; only the visible non-PIN **Resume DUDU** confirmation may
+  restart advertising
+- **Physical shutdown recovery:** the exact documented physical power-off
+  method is safe and reproducible; after battery depletion/reboot, staff can
+  unlock and launch DUDU to reach the shutdown-ready screen, then deliberately
+  confirm **Resume DUDU**. This is best-effort recovery, not a claim of
+  automatic vehicle-power boot
+- **Abnormal-exit recovery:** an unexpected app exit produces no false completed
+  play and recovers safely. On Android 13+, verify each supported historical
+  process-exit reason is queued idempotently as an `abnormal_app_exit`
+  diagnostic; on Android 12, record the platform limitation and verify the
+  recovery behavior
 - H.264 1080p playback is smooth for a continuous 12-hour test
 - JPEG and PNG display correctly without cropping
 - 10 GB cache and 500 MB evidence queue fit with at least 2 GB free
@@ -36,12 +67,27 @@ supporting photos, logs, and notes.
 
 ## Failure Tests
 
-- Disconnect power during every media type.
+- Disconnect external vehicle or cable power during every media type. Playback
+  must continue on battery, and no external-power or charging telemetry may be
+  required for the result.
+- At a safely controlled battery level, verify `<=20%` creates a `low_battery`
+  warning and `<=10%` escalates that same unresolved alert to critical; neither
+  threshold may stop playback.
+- Use **Prepare for shutdown** during an item, confirm it without a PIN, and
+  verify one interrupted result, a neutral shutdown-ready screen, no automatic
+  five-minute resume, and no restart until the visible non-PIN **Resume DUDU**
+  confirmation. Merely relaunching or restoring DUDU must not restart playback.
+- Follow the model-specific physical power-off instructions, then test a
+  battery-depletion/reboot recovery: staff unlock and launch DUDU to reach the
+  shutdown-ready screen, then confirm **Resume DUDU** before it resumes. Do not
+  claim or test automatic restart when vehicle power returns.
 - Disconnect data during download, activation, playback, and event upload.
 - Kill the DUDU process immediately before and after an item completes and at a
   loop boundary. Confirm the interrupted/orphaned loop is queued exactly once,
   every entry has a result, and playback resumes at the correct entry without
-  counting powered-off time as played time.
+  counting unplayed time as played time. On Android 13+, verify the expected
+  non-sensitive abnormal-exit diagnostic is queued with a stable event ID and
+  is not double-counted after retry or restart.
 - Corrupt a cached file and confirm the current playlist continues.
 - Attempt kiosk escape through reboot, notifications, USB, accessibility,
   safe mode, and physical buttons.
@@ -76,4 +122,7 @@ supporting photos, logs, and notes.
 
 Do not leave displays inside parked vehicles. Operations must define removal,
 storage, inspection, damaged-battery isolation, and incident procedures before
-the pilot begins.
+the pilot begins. A fully completed advertisement while the tablet is
+battery-powered or parked still counts as a completed play, but it proves
+neither vehicle operation, vehicle occupancy, external power, nor audience
+exposure.

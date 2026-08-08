@@ -36,7 +36,12 @@ from .models import (
     Playlist,
     token_hash,
 )
-from .services import enforce_api_throttle, open_alert, throttle_wait
+from .services import (
+    enforce_api_throttle,
+    open_alert,
+    open_or_escalate_alert,
+    throttle_wait,
+)
 
 MAX_DEVICE_TIMESTAMP_FUTURE_SKEW = timedelta(minutes=5)
 MAX_PLAYBACK_EVENT_DURATION_MS = 2_147_483_647
@@ -47,16 +52,29 @@ PLAYBACK_FAILURE_REASONS_BY_STATUS = {
         {
             "administrator_session",
             "app_restart_or_power_loss",
+            "app_restart_or_unexpected_exit",
             "device_disabled",
             "device_owner_removed",
             "external_power_lost",
             "external_power_unavailable",
             "fallback_mode",
             "loop_interrupted_before_entry",
+            "planned_shutdown",
             "urgent_playlist_replacement",
         }
     ),
 }
+ABNORMAL_APP_EXIT_REASONS = frozenset(
+    {
+        "crash",
+        "native_crash",
+        "anr",
+        "initialization_failure",
+        "low_memory",
+        "excessive_resource_usage",
+        "freezer_termination",
+    }
+)
 
 
 class PlaybackBatchPayloadTooLarge(exceptions.APIException):
@@ -170,6 +188,22 @@ def parse_required_datetime(value, field):
             {field: "Timestamp is too far ahead of server time."}
         )
     return parsed
+
+
+def optional_json_boolean(data, field):
+    """Return an optional JSON boolean without truthiness coercion.
+
+    Legacy players send power telemetry, while the battery-backed player omits
+    it.  Treating arbitrary values such as the string ``"false"`` as truthy
+    would corrupt the historic telemetry retained during that transition.
+    """
+
+    value = data.get(field)
+    if value is None:
+        return None
+    if type(value) is not bool:
+        raise serializers.ValidationError({field: "Use a JSON boolean or null."})
+    return value
 
 
 def device_for(request):
@@ -460,7 +494,19 @@ def sync_manifest(request):
         device.last_sync_at = timezone.now()
         device.save(update_fields=["last_sync_at", "updated_at"])
 
-    if device.status == Device.Status.DISABLED:
+    missing_approved_hardware = (
+        settings.DEPLOYMENT_ENV == "production"
+        and device.status == Device.Status.ACTIVE
+        and not (
+            device.hardware_qualification_id
+            and device.hardware_qualification.approved_for_pilot
+        )
+    )
+    if device.status == Device.Status.DISABLED or missing_approved_hardware:
+        # Keep credentials and telemetry intact. A qualification can be
+        # re-approved after fresh physical evidence is recorded, while this
+        # server-side decision immediately prevents cached advertising from
+        # continuing after the next sync.
         mark_successful_sync()
         return Response(
             {
@@ -583,8 +629,8 @@ def heartbeat(request):
         device=device,
         recorded_at=recorded_at,
         screen_on=bool(request.data.get("screen_on")),
-        external_power=bool(request.data.get("external_power")),
-        charging=bool(request.data.get("charging")),
+        external_power=optional_json_boolean(request.data, "external_power"),
+        charging=optional_json_boolean(request.data, "charging"),
         battery_percent=battery_percent,
         free_storage_bytes=free_storage,
         temperature_celsius=temperature,
@@ -595,7 +641,9 @@ def heartbeat(request):
         last_successful_sync_at=last_sync,
         last_playback_at=last_playback,
     )
-    device.last_seen_at = timezone.now()
+    # This is deliberately the server receipt timestamp, not the device's
+    # corrected wall-clock timestamp supplied in ``recorded_at``.
+    device.last_seen_at = hb.received_at
     device.app_version = hb.app_version
     device.android_version = hb.android_version
     device.current_playlist = active_playlist
@@ -623,6 +671,16 @@ def heartbeat(request):
                 "severity": Alert.Severity.WARNING,
                 "message": "Device has less than 2 GB of free storage.",
             },
+        )
+    if battery_percent is not None and battery_percent <= 20:
+        critical = battery_percent <= 10
+        open_or_escalate_alert(
+            device,
+            "low_battery",
+            Alert.Severity.CRITICAL if critical else Alert.Severity.WARNING,
+            "Device battery is at or below 10%."
+            if critical
+            else "Device battery is at or below 20%.",
         )
     if app_version and app_version != settings.REQUIRED_APP_VERSION:
         Alert.objects.get_or_create(
@@ -655,6 +713,41 @@ def heartbeat(request):
     return Response({"accepted": True, "server_time": timezone.now()})
 
 
+def validate_operational_event_details(kind, data):
+    details_provided = "details" in data
+    details = data.get("details", {})
+    if not isinstance(details, dict):
+        raise serializers.ValidationError({"details": "Details must be a JSON object."})
+    if kind == DeviceOperationalEvent.Kind.PLANNED_SHUTDOWN:
+        if not details_provided or details != {}:
+            raise serializers.ValidationError(
+                {"details": "Planned shutdown details must be exactly an empty object."}
+            )
+    elif kind == DeviceOperationalEvent.Kind.ABNORMAL_APP_EXIT:
+        if set(details) != {"reason"}:
+            raise serializers.ValidationError(
+                {
+                    "details": (
+                        "Abnormal application exit details must contain only a reason."
+                    )
+                }
+            )
+        reason = details["reason"]
+        if not isinstance(reason, str) or reason not in ABNORMAL_APP_EXIT_REASONS:
+            raise serializers.ValidationError(
+                {"details.reason": "Use a recognized abnormal exit reason."}
+            )
+    return details
+
+
+def operational_event_matches(existing, *, kind, recorded_at, details):
+    return (
+        existing.kind == kind
+        and existing.recorded_at == recorded_at
+        and existing.details == details
+    )
+
+
 @api_view(["POST"])
 def operational_event(request):
     device = device_for(request)
@@ -669,23 +762,44 @@ def operational_event(request):
         raise serializers.ValidationError(
             "A valid operational event ID is required."
         ) from exc
+    recorded_at = parse_required_datetime(
+        request.data.get("recorded_at"), "recorded_at"
+    )
+    details = validate_operational_event_details(kind, request.data)
     existing = DeviceOperationalEvent.objects.filter(pk=event_id).first()
     if existing:
         if existing.device_id != device.id:
             raise exceptions.PermissionDenied("Operational event identifier collision.")
-        return Response({"accepted": True, "duplicate": True, "id": str(event_id)})
+        if operational_event_matches(
+            existing,
+            kind=kind,
+            recorded_at=recorded_at,
+            details=details,
+        ):
+            return Response({"accepted": True, "duplicate": True, "id": str(event_id)})
+        raise serializers.ValidationError(
+            "Operational event identifier was already used for different evidence."
+        )
     try:
         event = DeviceOperationalEvent.objects.create(
             id=event_id,
             device=device,
             kind=kind,
-            recorded_at=parse_required_datetime(
-                request.data.get("recorded_at"), "recorded_at"
-            ),
-            details=request.data.get("details", {}),
+            recorded_at=recorded_at,
+            details=details,
         )
     except IntegrityError:
-        if DeviceOperationalEvent.objects.filter(pk=event_id, device=device).exists():
+        raced_event = DeviceOperationalEvent.objects.filter(pk=event_id).first()
+        if raced_event and raced_event.device_id != device.id:
+            raise exceptions.PermissionDenied(
+                "Operational event identifier collision."
+            ) from None
+        if raced_event and operational_event_matches(
+            raced_event,
+            kind=kind,
+            recorded_at=recorded_at,
+            details=details,
+        ):
             return Response(
                 {"accepted": True, "duplicate": True, "id": str(event_id)}
             )
