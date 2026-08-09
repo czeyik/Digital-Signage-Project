@@ -1,0 +1,17 @@
+[Service]
+DynamicUser=yes
+ExecStart=/usr/lib/systemd/systemd-socket-proxyd --connections-max=16 172.31.0.10:__RECOVERY_CADDY_PORT__
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_INET
+IPAddressDeny=any
+IPAddressAllow=172.31.0.10/32

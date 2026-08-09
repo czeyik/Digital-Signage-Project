@@ -61,6 +61,8 @@ locals {
     file("${path.module}/runtime/render-recovery-runtime-env"),
     file("${path.module}/runtime/duducar-recovery-stack"),
     file("${path.module}/runtime/duducar-recovery-restore"),
+    file("${path.module}/runtime/duducar-recovery-loopback-proxy.socket"),
+    file("${path.module}/runtime/duducar-recovery-loopback-proxy.service"),
   ]
   recovery_asset_bundle = join("\n${local.recovery_asset_separator}\n", local.recovery_asset_sources)
   recovery_user_data_base64 = base64gzip(templatefile("${path.module}/recovery-bootstrap.sh.tftpl", {

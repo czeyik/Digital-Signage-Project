@@ -25,6 +25,8 @@ sources=(
   "$root_dir/runtime/render-recovery-runtime-env"
   "$root_dir/runtime/duducar-recovery-stack"
   "$root_dir/runtime/duducar-recovery-restore"
+  "$root_dir/runtime/duducar-recovery-loopback-proxy.socket"
+  "$root_dir/runtime/duducar-recovery-loopback-proxy.service"
 )
 
 if rg -Fq "$separator" "${sources[@]}"; then
@@ -114,7 +116,9 @@ done
 bash -n "$rendered"
 
 raw_user_data_bytes=$(gzip -n -c "$rendered" | wc -c | tr -d '[:space:]')
-max_raw_user_data_bytes=15000
+# The reviewed loopback-proxy assets require a 15,550-byte fixture budget.
+# Keep a fixed 834-byte reserve below EC2's 16 KiB hard limit.
+max_raw_user_data_bytes=15550
 if [ "$raw_user_data_bytes" -gt "$max_raw_user_data_bytes" ]; then
   echo "Recovery EC2 raw user data is ${raw_user_data_bytes} bytes; budget is ${max_raw_user_data_bytes} bytes (EC2 limit 16384)." >&2
   exit 1

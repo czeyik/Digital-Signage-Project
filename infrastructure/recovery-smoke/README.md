@@ -46,15 +46,26 @@ initialize this directory using `production/terraform.tfstate`.
   cloned containers when Docker starts.
 - The recovery stack has its own `duducar-recovery-*` names and bridge network,
   no PostgreSQL host port, no systemd DUDU service, no timers, and an internal
-  Docker network with no application-container egress. Caddy uses an internal,
-  recovery-only certificate and is published only as
-  `127.0.0.1:8443` (or the reviewed `recovery_caddy_port`). It never requests a
-  production ACME certificate or reuses production Caddy state.
+  Docker network with no application-container egress. Caddy has one static
+  address (`172.31.0.10`) on that bridge and no Docker-published port. It uses
+  an internal, recovery-only certificate and never requests a production ACME
+  certificate or reuses production Caddy state.
+- A root-owned, non-enabled systemd socket unit is the only host exposure: it
+  listens exactly on `127.0.0.1:8443` (or the reviewed
+  `recovery_caddy_port`) and starts a dynamically unprivileged
+  `systemd-socket-proxyd` process that may connect only to Caddy's static
+  internal address. The helper validates unit ownership, exact listener and
+  target, Caddy's one internal network/static IP/no Docker port binding, and a
+  real loopback listener before its health request; stop removes that listener
+  and its health receipt, and fails (blocking unmount) if any listener on that
+  port remains. It never adds Caddy to a second bridge or host network.
+  Bootstrap explicitly installs `systemd` and fails before clone use
+  if the ARM64 AMI does not provide `/usr/lib/systemd/systemd-socket-proxyd`.
 - Caddy drops every Linux capability except `NET_BIND_SERVICE`. The pinned
   official image marks `/usr/bin/caddy` with that file capability; retaining
   only it lets the executable run with Docker's `no-new-privileges` policy.
-  This does not create an internet listener: the recovery stack still publishes
-  only its unprivileged loopback port.
+  This does not create an internet listener: only the hardened host socket
+  proxy owns the unprivileged loopback port.
 - The rendered application disables SMTP delivery and metadata credentials in
   the container. It does not configure a backup destination, and the IAM role
   cannot write a production backup even if a forbidden command is attempted.
