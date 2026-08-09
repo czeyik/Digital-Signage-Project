@@ -19,6 +19,35 @@ __pycache__/
 secrets/
 credentials/
 private/
+.aws/
+.ssh/
+secrets/**
+credentials/**
+private/**
+.aws/**
+.ssh/**
+
+# Apply the local-secret exclusions at every depth in the build context.
+**/.env
+**/.env.*
+**/*.env
+**/*.env.*
+**/*.envrc
+**/*.secret
+**/*.secrets
+**/*.credentials
+**/*.token
+**/*.tokens
+**/secrets/
+**/credentials/
+**/private/
+**/.aws/
+**/.ssh/
+**/secrets/**
+**/credentials/**
+**/private/**
+**/.aws/**
+**/.ssh/**
 
 # Private keys and local signing material are supplied only at release time.
 *.key
@@ -38,6 +67,27 @@ signing.properties
 signing.properties.*
 keystore.properties
 keystore.properties.*
+signing/**
+
+# Apply the private-key and signing exclusions at every depth as well.
+**/*.key
+**/*.pem
+**/*.p8
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/*.gpg
+**/*.pgp
+**/id_rsa
+**/id_ecdsa
+**/id_ed25519
+**/signing/
+**/signing/**
+**/signing.properties
+**/signing.properties.*
+**/keystore.properties
+**/keystore.properties.*
 
 media/
 staticfiles/

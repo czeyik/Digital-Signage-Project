@@ -12,6 +12,7 @@ readonly required_files=(
   pyproject.toml
   config/settings.py
   signage/models.py
+  signage/nested/keep.py
   templates/base.html
   worker-entrypoint.sh
 )
@@ -47,7 +48,20 @@ readonly excluded_files=(
   credentials/local.json
   private/application.key
   signing/release.keystore
+  .aws/config
+  .aws/credentials
+  .ssh/config
+  .ssh/id_rsa
 )
+
+nested_excluded_files=()
+for excluded_file in "${excluded_files[@]}"; do
+  nested_excluded_files+=("nested/$excluded_file")
+done
+readonly nested_excluded_files
+
+all_excluded_files=("${excluded_files[@]}" "${nested_excluded_files[@]}")
+readonly all_excluded_files
 
 cleanup() {
   rm -rf -- "$scratch_dir"
@@ -69,7 +83,7 @@ for required_file in "${required_files[@]}"; do
   install -Dm 0644 /dev/null "$context_dir/$required_file"
 done
 
-for excluded_file in "${excluded_files[@]}"; do
+for excluded_file in "${all_excluded_files[@]}"; do
   install -Dm 0600 /dev/null "$context_dir/$excluded_file"
 done
 
@@ -87,7 +101,7 @@ for required_file in "${required_files[@]}"; do
   }
 done
 
-for excluded_file in "${excluded_files[@]}"; do
+for excluded_file in "${all_excluded_files[@]}"; do
   test ! -e "$output_dir/context/$excluded_file" || {
     echo "Local secret material entered the Docker build context: $excluded_file" >&2
     exit 1
