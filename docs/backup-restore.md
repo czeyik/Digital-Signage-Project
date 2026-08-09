@@ -566,6 +566,63 @@ archive/sidecar/media versions. Confirm the production instance and original
 data volume remained unchanged. Keep the isolated state path and its
 lock/history as audit evidence unless its deletion is separately authorized.
 
+## Completed automated recovery-control smoke — 2026-08-09
+
+Operation `a4d730a97626bdb3bb652c4e72409d45` ran from reviewed source commit
+`3b9ba958df8a7295962a96fa16a5595d0c56ced7` on a separate encrypted ARM
+`t4g.small` recovery host. It used the actual deployed `0.1.0` backend image
+digest `173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-backend@sha256:a9103d0ed09417b62af2b3c6fb0644a6ebe6e164e180a4c37288b255e94dd2fc`, not a
+future release image. The operation had zero security-group ingress, no EIP,
+no DNS record, a recovery-only IAM profile, no production write permissions,
+and a clone of only the data-volume snapshot.
+
+The exact recovery inputs were DLM snapshot `snap-0e000e16f572c5ab0` from
+production volume `vol-05b6edc95de87cc4a`; archive
+`database-backups/duducar-signage-postgres-20260808T180321Z.dump` version
+`m34z57aR03cFEWC_MXTpDfq6AoYS_iiF`; sidecar version
+`waI9Vf.L_OlHtHYpFvissgCUqtu4UzBK`; and media
+`validated/181f50c7-9074-4550-aa49-02d7bc21f965.png` version
+`XNDO6IO05w6O3gHQhmUQVD.kXdJOQrsj`. At preflight, the snapshot and logical
+archive were about 13 hours 34 minutes and 14 hours 12 minutes old,
+respectively. The archive metadata, downloaded archive, and downloaded
+sidecar all matched SHA-256
+`d78fd57d7eb13187128dbac2bf11315b859dc371ab4666939ffc26926ed41917`; the
+selected normalized media matched its recorded key, SHA-256, and `893758`
+byte size.
+
+The crash-consistent XFS clone first completed the documented read-only
+`nouuid,norecovery` inspection and returned the recognized dirty-journal exit
+`3`. An explicit, operation-bound `replay-journal` ran only against the clone
+at its temporary mount point, then passed a clean post-replay `xfs_repair -n`
+check before writable mounting. Snapshot schema/migrations, the exact media
+proof, archive catalogue/sidecar validation, logical restore, grant repair,
+and migration check all passed. The capless root logical restore used only a
+short-lived root-owned credential copy; its normal `10001:10001` source
+credential remained `0500`/`0400`, and the temporary copy was removed after
+the restore.
+
+The recovery-only Caddy/Django stack was reachable only through the local
+socket proxy: the recovery CA validated `/login/` at HTTP `200`, and an
+unauthenticated protected request returned `302`. The sole `8443` listener was
+`127.0.0.1`; Caddy had only `NET_BIND_SERVICE`, no Docker-published port, and
+the bridge was internal. The web container retained `--cap-drop ALL`.
+
+The instance launched at `2026-08-09T08:18:50Z` and was terminated at
+`2026-08-09T08:31:53Z` (13 minutes 03 seconds). The wrapper's `cleanup-check`
+and an independent read-only AWS audit found no active recovery instance,
+clone/root volume, ENI, security group, IAM role/profile, or EIP association.
+AWS retains a terminated instance record and historical resource tags; native
+EC2 queries confirm the temporary resources are deleted. The production source
+snapshot remained complete/encrypted, and the source volume stayed attached
+only to production. The exact billed cost is pending normal billing
+availability; usage was limited to this short-lived `t4g.small`, encrypted
+16-GiB root, encrypted 32-GiB clone, and ephemeral IPv4.
+
+This is an automated recovery-control pass, not full recovery acceptance. A
+named owner still needs to use a fresh isolated SSM-tunnelled drill to sign in,
+open the authenticated dashboard, and generate a representative CSV. Do not
+access, reset, or record owner credentials to automate that gate.
+
 ## Completed isolated restore rehearsal — 2026-08-01
 
 The rehearsal ran in account `173454940059`, Region `ap-southeast-5`, without
