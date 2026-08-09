@@ -29,9 +29,7 @@ sidecar_path="$archive_dir/$sidecar_name"
 media_path="$archive_dir/selected-normalized-media"
 
 download_and_verify() {
-  # pg_restore comes from the reviewed immutable backend image. Starting the
-  # database helper first also proves Docker is using its recovery-only root
-  # before any downloaded archive is inspected.
+  # Validate the recovery Docker root before inspecting the archive.
   /usr/local/sbin/duducar-recovery-stack database
   install -d -o root -g root -m 0700 "$archive_dir"
   rm -f "$archive_path" "$sidecar_path"
@@ -52,10 +50,16 @@ download_and_verify() {
     cd "$archive_dir"
     sha256sum --check --strict "$sidecar_name"
   )
+  # Root reads root-only archive.
   docker run --rm \
+    --network none \
+    --user 0:0 \
     --read-only \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
     --volume "$archive_dir:/backups:ro" \
     --entrypoint pg_restore \
     "$BACKEND_IMAGE" \
@@ -100,10 +104,7 @@ verify_media() {
 
   local_sha256=$(sha256sum "$media_path" | awk '{print $1}')
   local_size=$(stat -c '%s' "$media_path")
-  # `shell` otherwise emits its automatic-import banner before the JSON,
-  # which makes the exact metadata parser fail even when the restored row is
-  # correct. The script explicitly imports MediaAsset, so suppress those
-  # unused imports and keep stdout machine-readable for the proof below.
+  # --no-imports keeps the explicit MediaAsset JSON query machine-readable.
   database_metadata=$(docker run --rm \
     --network "$network" \
     --read-only \
@@ -172,8 +173,10 @@ restore_logical() {
     psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \
     --file /run/postgres-config/runtime-grants.sql
 
+  # Root restores this root-only archive.
   docker run --rm \
     --network "$network" \
+    --user 0:0 \
     --read-only \
     --cap-drop ALL \
     --security-opt no-new-privileges:true \
@@ -185,6 +188,7 @@ restore_logical() {
     --env PGDATABASE=signage \
     --env PGUSER=signage_owner \
     --env PGSSLMODE=require \
+    --env AWS_EC2_METADATA_DISABLED=true \
     --env RESTORE_ARCHIVE="/backups/$archive_name" \
     --volume "$archive_dir:/backups:ro" \
     --volume "$runtime_dir/database-owner:/run/duducar-recovery/database-owner:ro" \
