@@ -389,7 +389,10 @@ verify_mounted_clone() {
 }
 
 unmount_recovery() {
-  /usr/local/sbin/duducar-recovery-stack stop || true
+  if ! /usr/local/sbin/duducar-recovery-stack stop; then
+    echo "Refusing recovery volume unmount because the recovery stack did not stop cleanly." >&2
+    return 1
+  fi
   if findmnt --target "$recovery_mountpoint" >/dev/null 2>&1; then
     sync
     umount "$recovery_mountpoint"
