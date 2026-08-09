@@ -29,13 +29,16 @@ The next agent should preserve the pilot topology and its cost/safety limits:
 | --- | --- |
 | Original release hardening | [#25](https://github.com/czeyik/Digital-Signage-Project/pull/25), merge `8a7ca5eabf8552c6b997be7ea81b5e28a38fd185` (source `c938d7c234aa697ea9fbeea5d6f7891c440cdd03`) |
 | Battery-policy merges | [#26](https://github.com/czeyik/Digital-Signage-Project/pull/26) `05cbf9d`, [#27](https://github.com/czeyik/Digital-Signage-Project/pull/27) `f99a941`, and [#28](https://github.com/czeyik/Digital-Signage-Project/pull/28) `6d2f3b3` |
-| Recovery-control merges | [#29](https://github.com/czeyik/Digital-Signage-Project/pull/29) `b29d6e7`; direct commit `a328c5e` (XFS journal replay); [#31](https://github.com/czeyik/Digital-Signage-Project/pull/31) `53a923c`; [#32](https://github.com/czeyik/Digital-Signage-Project/pull/32) `ca5e527`; [#33](https://github.com/czeyik/Digital-Signage-Project/pull/33) `b4e7021`; [#34](https://github.com/czeyik/Digital-Signage-Project/pull/34) `80b24f9`; [#35](https://github.com/czeyik/Digital-Signage-Project/pull/35) `3b58c0f`; [#36](https://github.com/czeyik/Digital-Signage-Project/pull/36) `3b9ba95` |
-| Current remote release state | `origin/main` = `3b9ba958df8a7295962a96fa16a5595d0c56ced7` — [#36](https://github.com/czeyik/Digital-Signage-Project/pull/36), `fix: isolate recovery restore credential` |
-| CI evidence | The original hardening run passed backend, PostgreSQL-backed backend tests, Android, Terraform, and ARM64 container build/runtime/Trivy. Review the linked merged-PR checks before relying on a later recovery-control change. |
+| Recovery-control merges | [#29](https://github.com/czeyik/Digital-Signage-Project/pull/29) `b29d6e7`; direct commit `a328c5e` (XFS journal replay); [#31](https://github.com/czeyik/Digital-Signage-Project/pull/31) `53a923c`; [#32](https://github.com/czeyik/Digital-Signage-Project/pull/32) `ca5e527`; [#33](https://github.com/czeyik/Digital-Signage-Project/pull/33) `b4e7021`; [#34](https://github.com/czeyik/Digital-Signage-Project/pull/34) `80b24f9`; [#35](https://github.com/czeyik/Digital-Signage-Project/pull/35) `3b58c0f`; [#36](https://github.com/czeyik/Digital-Signage-Project/pull/36) `3b9ba95`; [#37](https://github.com/czeyik/Digital-Signage-Project/pull/37) `9851366` |
+| Reviewed release baseline | `origin/main` before this documentation update = `756b81641944eaa5b726a75802c44dcff221e4b3` — [#38](https://github.com/czeyik/Digital-Signage-Project/pull/38), `Harden backend Docker build context` |
+| CI evidence | The merged hardening runs passed backend, PostgreSQL-backed backend tests, Android, Terraform, and ARM64 container build/runtime/Trivy. [#38](https://github.com/czeyik/Digital-Signage-Project/pull/38) additionally passed all five required checks after exercising Docker's native build-context exclusion fixture. |
 
 Before making a further change, inspect the worktree, fetch, and deliberately
 choose the intended branch. This handoff is release-state documentation, not
 deployment authority.
+
+PR #38 is source/CI hardening only; it did not build, push, or deploy a
+production artifact.
 
 ## Decisions and approvals already made
 
@@ -65,6 +68,10 @@ deployment authority.
 - Hardened the production Docker image: pinned the Python Alpine base digest,
   pinned build pip, and removed `pip`, `setuptools`, and `ensurepip` from the
   final runtime layer.
+- Added a Docker-native build-context guard. It excludes root and nested local
+  runtime-secret, Docker/GCloud credential, private-key, and signing paths
+  before `COPY . .`, while proving that normal nested Python and JSON inputs
+  remain available to the image build.
 - Added CI assertions that those build-only modules are absent; CI builds and
   exercises an ARM64 image and gates Trivy on all OS and library HIGH/CRITICAL
   findings.
@@ -77,16 +84,17 @@ deployment authority.
 ### Verification completed
 
 - Backend local checks passed: Ruff, Django system check, migration-drift
-  check, PostgreSQL 16 migrations through `signage.0009`, and the full
-  PostgreSQL-backed suite (193 tests).
+  check, PostgreSQL 16 migrations through `signage.0011`, and the full
+  PostgreSQL-backed suite (210 passed, 2 skipped).
 - Dependency audit found no vulnerability for `cryptography 50.0.0`.
 - Android production configuration was compiled and signed in a disposable
   test-key environment using the real production API/Play Integrity settings
   and `1.0.0` / `1`; APK Signature Scheme v2 verification passed.  This was
   **not** a production-signed APK.
-- `terraform fmt -check -recursive` and `terraform validate` passed.
-- A refreshed, read-only Terraform plan passed review.  It currently proposes
-  only the changes described below; no apply occurred.
+- `terraform fmt -check -recursive` and `terraform validate` passed. No final
+  production plan has been generated from the final immutable image digest and
+  current ignored inputs; the fresh plan described below remains mandatory
+  before an apply.
 
 ### AWS baseline verified (read-only)
 
@@ -95,7 +103,7 @@ deployment authority.
 - The production EC2 instance is healthy and SSM-online; public health
   endpoints returned HTTP 200 at the last check.
 - Latest DLM encrypted data-volume snapshot and logical backup/media sidecar
-  were both under 24 hours old at the 2026-08-08 check.
+  were both under 24 hours old at the latest 2026-08-09 read-only preflight.
 - The project budget was USD 1.916 of the USD 30 target; root MFA is enabled
   and root access keys are absent.
 
@@ -161,40 +169,64 @@ deployment authority.
 
 ## Important unresolved items and risks
 
-1. **No release image has been pushed to production ECR.**  Local Terraform
-   configuration still points at a historical backend image digest.  Build and
-   push the final ARM64 image, record its immutable digest, set
-   `container_image` to that digest in the ignored production tfvars, then
-   regenerate the plan.  Never deploy a mutable tag.
+1. **No final release image has been pushed to production ECR.** The existing
+   `sha256:973fd2…` ECR candidate tagged from `f99a941` predates the current
+   release source and must not be reused by inference. Build and scan a fresh
+   ARM64 image from the `main` commit that includes
+   [#38](https://github.com/czeyik/Digital-Signage-Project/pull/38) immediately
+   before the authorized rollout, record its immutable digest, set
+   `container_image` to that digest in the ignored production
+   tfvars, then regenerate the plan. The host and isolated worker must use that
+   same digest, paired with `required_app_version = "1.0.0"`. Never deploy a
+   mutable tag.
 
-2. **Terraform has not been applied.**  The reviewed refreshed plan was
-   `2 add, 2 change, 1 destroy`:
+2. **Terraform has not been applied.** A fresh plan, generated only after the
+   final digest and ignored inputs are reviewed, is authoritative. Based on the
+   latest read-only production assessment, it should account for **3 additions,
+   2 changes, and 1 worker-revision replacement/removal**:
 
-   - create the SSM runtime-assets document;
-   - replace the isolated Fargate worker task-definition revision;
+   - create the SSM runtime-assets document and the SSM release-config
+     document;
+   - create the new isolated Fargate worker task-definition revision;
    - add `ecs:ListTasks` to the EC2 media-dispatch role and reference the new
-     task definition;
+     worker task definition;
    - change S3 backup noncurrent-version retention from 30 days to the
-     user-approved 1 day.
+     user-approved 1 day; and
+   - replace the Terraform state reference currently at worker revision `:1`
+     with the new revision.
 
-   The destroy is the old ECS task-definition revision only.  The plan did not
-   propose changes to the EC2 instance, volumes, EIP, DNS, CloudFront, S3
-   bucket, RDS, ALB, ECS service, or a running task.  Regenerate and review a
-   fresh plan after the final image digest changes; do not rely on this old
-   plan.  The 1-day retention change is a deliberate deletion/retention
-   decision once applied.
+   Do not call the retired worker revision physically destroyed without plan
+   evidence: the source uses `skip_destroy = true`. The read-only assessment
+   found no intended changes to the EC2 instance, volumes, EIP, DNS,
+   CloudFront, RDS, ALB, ECS service, or a running task, but the fresh plan is
+   the final authority. The 1-day retention change is a deliberate
+   deletion/retention decision once applied.
 
 3. **IAM must be applied before the host image deployment.**  New media
    dispatch logic requires `ecs:ListTasks`; current live EC2 permissions lack
    it.  Deploying the web image first can break media dispatch.
 
-4. **Migration `0009_revoke_marketing_admin_access` has not been run in
-   production.**  It clears all dashboard sessions and removes
-   `is_staff`/`is_superuser` from every marketing-role account.  The owner
-   survival check passed now, but repeat it immediately before migration,
-   communicate the forced logout, and have the owner re-authenticate after the
-   rollout.  Do not run `create_initial_owner` on this live database; it is a
-   bootstrap-only command and will fail once a user exists.
+4. **Migrations `0009` through `0011` have not been run in production.**
+   `0009_revoke_marketing_admin_access` clears dashboard sessions, removes
+   `is_staff`/`is_superuser` from every marketing-role account, and appends an
+   audit event. `0010_battery_backed_player_policy` invalidates every approved
+   `HardwareQualification`, adds false-default battery-backed gates, makes the
+   historic heartbeat power fields nullable, and extends operational-event
+   choices. Before it runs, record affected active devices and qualifications,
+   keep affected devices in maintenance until requalified, and preserve/triage
+   retired power-policy alerts rather than deleting them. In `0011`, the
+   physical-column repair acts only for a database that received the superseded
+   rename and is a no-op on the expected legacy physical-column layout; the
+   migration itself must still run to invalidate incomplete re-approvals and
+   add the database constraint requiring all 19 current qualification fields
+   for approval. It fails closed on an unexpected column layout; do not
+   manually rename columns if it fails. The legacy-column bridge is for
+   isolated, read-only historic investigation only: it does not restore the
+   retired vehicle-power criteria, authorize a pre-policy image, or make an
+   old image a supported live rollback. Repeat the owner-survival check
+   immediately before migration, communicate the forced logout, and have the
+   owner re-authenticate afterward. Do not run `create_initial_owner` on this
+   live database; it is bootstrap-only and will fail once a user exists.
 
 5. **Owner-operated recovery smoke is still required.** The automated clone,
    snapshot/logical restore, media, TLS, unauthenticated protected-route, and
@@ -204,15 +236,21 @@ deployment authority.
    `docs/backup-restore.md`; do not keep a recovery host running solely to wait
    for the owner.
 
-6. **Physical hardware qualification is incomplete.**  Exact 10-inch pilot
-   tablet model and firmware must have a `HardwareQualification` record with
-   all required kiosk, power, screen-state, heat, boot, and evidence fields
-   passed.  Emulator/phone checks and a disposable signing-key APK are not
-   release acceptance.
+6. **Physical hardware qualification is incomplete.** Exact 10-inch pilot
+   tablet model and firmware must have an evidence-backed
+   `HardwareQualification` record with all 19 current battery-backed playback,
+   battery telemetry/runtime, planned shutdown and visible **Resume DUDU**
+   recovery, physical shutdown recovery, abnormal-exit, kiosk, screen-state,
+   heat, mounting, and evidence gates passed. Legacy boot-on-vehicle-power and
+   external-power-loss results cannot approve hardware. Emulator/phone checks
+   and a disposable signing-key APK are not release acceptance.
 
-7. **Real production signing is still pending.**  Use the established signing
-   process and secure secret store; do not place keystore files, passwords,
-   private keys, enrollment secrets, or production tfvars in Git or chat.
+7. **Real production signing is still pending.** Produce the protected-key
+   Android APK at version name `1.0.0`, version code `1`, record its signer,
+   checksum, certificate, and rollback artifact, and ensure its version name
+   matches the server requirement. Use the established signing process and
+   secure secret store; do not place keystore files, passwords, private keys,
+   enrollment secrets, or production tfvars in Git or chat.
 
 8. **Operational notifications are not proven.**  The SNS subscription exists
    but delivery has not been tested.  Include an authorized, non-sensitive
@@ -238,17 +276,19 @@ capability.
 3. **Complete real-device qualification.**  Record the exact model, firmware,
    evidence, and all required pass results before treating the Android build as
    releasable.
-4. **Produce the immutable release image.**  Build/push ARM64 backend image to
-   production ECR from the merged source, capture the pushed digest, and set
-   ignored production `container_image` to it.  Confirm
-   `required_app_version = "1.0.0"` in the ignored production tfvars.
-5. **Run a fresh Terraform plan and obtain explicit apply authority.**  It
-   should still be limited to the SSM document, worker revision, EC2 IAM
-   permission, and approved S3 lifecycle update.  Review every action,
-   including the one-day noncurrent-version deletion implication.
-6. **Apply Terraform first.**  Confirm the SSM runtime-assets document exists
-   and the EC2 role now permits `ecs:ListTasks` before deploying the host
-   image.
+4. **Produce the immutable release image.** Build and scan a fresh ARM64
+   backend image from the reviewed current source, then—only with explicit
+   rollout authority—push it to production ECR, capture the pushed digest, and
+   set ignored production `container_image` to it. Confirm
+   `required_app_version = "1.0.0"` in the ignored production tfvars. Do not
+   reuse the historical `f99a941` candidate.
+5. **Run a fresh Terraform plan and obtain explicit apply authority.** It
+   should account for both SSM documents, the worker revision, EC2 IAM
+   permission, and the approved S3 lifecycle update. Review every action,
+   including the one-day noncurrent-version deletion implication and the
+   worker-revision `skip_destroy` behavior.
+6. **Apply Terraform first.** Confirm both SSM documents exist and the EC2
+   role now permits `ecs:ListTasks` before deploying the host image.
 7. **Schedule a maintenance window and obtain explicit rollout authority.**
    Immediately beforehand: verify an active owner again, confirm recent
    backups, communicate the forced dashboard logout, and ensure a rollback
