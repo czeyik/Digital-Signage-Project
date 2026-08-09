@@ -52,6 +52,11 @@ require_literal 'get-role --role-name' "$root_dir/recovery-terraform"
 require_literal 'get-instance-profile --instance-profile-name' "$root_dir/recovery-terraform"
 require_literal 'recovery_asset_bundle' "$root_dir/main.tf"
 require_literal 'install_bundle_asset' "$root_dir/recovery-bootstrap.sh.tftpl"
+# AL2023 already provides AWS CLI v2 as awscli-2. A nonexistent package name
+# must not make cloud-init terminate before it installs the recovery helpers.
+reject_literal 'awscli2' "$root_dir/recovery-bootstrap.sh.tftpl"
+require_literal 'command -v aws >/dev/null' "$root_dir/recovery-bootstrap.sh.tftpl"
+require_literal 'aws --version >/dev/null' "$root_dir/recovery-bootstrap.sh.tftpl"
 
 # A writable clone needs a prior read-only XFS inspection and a receipt tied to
 # the exact mounted device. Every runtime entry point revalidates it.
