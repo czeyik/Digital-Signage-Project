@@ -146,6 +146,16 @@ jobs:
       - name: Validate production stack
         working-directory: infrastructure/terraform
         run: terraform init -backend=false && terraform validate
+      - name: Validate isolated recovery smoke and helper guardrails
+        working-directory: infrastructure/recovery-smoke
+        run: |
+          terraform init -backend=false -lockfile=readonly
+          terraform validate
+          bash ./test-static-guardrails.sh
+          bash ./test-recovery-terraform-wrapper.sh
+          bash ./test-user-data-size.sh
+      - name: Test atomic production release configuration manager
+        run: sudo bash infrastructure/terraform/ec2/runtime/test-manage-release-config.sh
 
   container:
     runs-on: ubuntu-latest

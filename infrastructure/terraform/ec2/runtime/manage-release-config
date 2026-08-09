@@ -1,0 +1,477 @@
+#!/bin/bash
+# Update only the two release settings that must move together with a player
+# launch. This helper is staged and invoked by the digest-pinned SSM document;
+# it deliberately never sources or prints release.env.
+set -Eeuo pipefail
+umask 0077
+
+mode=${1:-}
+commit=${2:-}
+operation_id=${3:-}
+backend_image=${4:-}
+required_app_version=${5:-}
+expected_repository=${6:-}
+expected_backend_image=${7:-}
+expected_required_app_version=${8:-}
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Release configuration operations must run as root." >&2
+  exit 2
+fi
+
+case "$mode" in
+  validate|install|rollback) ;;
+  *) echo "Mode must be validate, install, or rollback." >&2; exit 2 ;;
+esac
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "ExpectedCommit must be a full lowercase Git commit." >&2
+  exit 2
+}
+[[ "$operation_id" =~ ^[0-9a-f]{32}$ ]] || {
+  echo "OperationId must contain 32 lowercase hexadecimal characters." >&2
+  exit 2
+}
+for value in \
+  "$backend_image" \
+  "$required_app_version" \
+  "$expected_repository" \
+  "$expected_backend_image" \
+  "$expected_required_app_version"; do
+  case "$value" in
+    ''|*$'\n'*|*$'\r'*)
+      echo "Release configuration inputs must be non-empty single-line values." >&2
+      exit 2
+      ;;
+  esac
+done
+[[ "$backend_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || {
+  echo "BackendImage must be pinned by SHA-256 digest." >&2
+  exit 2
+}
+[[ "$backend_image" == "$expected_repository"@sha256:* ]] || {
+  echo "BackendImage must belong to the reviewed backend ECR repository." >&2
+  exit 2
+}
+[[ "$expected_backend_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || {
+  echo "The reviewed backend image must be pinned by SHA-256 digest." >&2
+  exit 2
+}
+[[ "$expected_backend_image" == "$expected_repository"@sha256:* ]] || {
+  echo "The reviewed backend image must belong to the reviewed backend ECR repository." >&2
+  exit 2
+}
+[[ "$required_app_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || {
+  echo "RequiredAppVersion must be an explicit semantic version." >&2
+  exit 2
+}
+[[ "$expected_required_app_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || {
+  echo "The reviewed required app version must be an explicit semantic version." >&2
+  exit 2
+}
+if [ "$backend_image" != "$expected_backend_image" ] || \
+  [ "$required_app_version" != "$expected_required_app_version" ]; then
+  echo "Release configuration values must exactly match the reviewed Terraform release selection." >&2
+  exit 2
+fi
+
+release_config=/etc/duducar/release.env
+backup_root=/var/lib/duducar/release-config-backups
+
+# Unit tests run the exact manager as root against a tightly scoped temporary
+# tree. The SSM document never sets this variable, and arbitrary alternate
+# paths are rejected so the production operation remains fixed to release.env.
+if [ -n "${DUDUCAR_RELEASE_CONFIG_TEST_ROOT:-}" ]; then
+  [[ "$DUDUCAR_RELEASE_CONFIG_TEST_ROOT" =~ ^/tmp/duducar-release-config-test\.[A-Za-z0-9]{6,}$ ]] || {
+    echo "Release configuration test root is outside the permitted temporary path." >&2
+    exit 2
+  }
+  release_config="$DUDUCAR_RELEASE_CONFIG_TEST_ROOT/etc/duducar/release.env"
+  backup_root="$DUDUCAR_RELEASE_CONFIG_TEST_ROOT/var/lib/duducar/release-config-backups"
+fi
+
+config_dir=$(dirname "$release_config")
+backup_dir="$backup_root/$commit-$operation_id"
+backup_parent=$(dirname "$backup_root")
+backup_parent_parent=$(dirname "$backup_parent")
+lock_file="$backup_root/.release-config.lock"
+candidate_file=''
+replacement_file=''
+pending_backup=''
+rollback_needed=0
+
+cleanup_pending_backup() {
+  [ -z "$pending_backup" ] && return
+  rm -f -- \
+    "$pending_backup/release.env" \
+    "$pending_backup/SHA256SUMS" \
+    "$pending_backup/REQUEST.sha256" \
+    "$pending_backup/UNRELATED.sha256" \
+    "$pending_backup/MODE"
+  rmdir -- "$pending_backup" 2>/dev/null || true
+}
+
+cleanup() {
+  status=$?
+  set +e
+  if [ "$rollback_needed" -eq 1 ]; then
+    echo "Release configuration update failed; restoring the operation backup." >&2
+    restore_backup_force || status=1
+  fi
+  [ -z "$candidate_file" ] || rm -f -- "$candidate_file"
+  [ -z "$replacement_file" ] || rm -f -- "$replacement_file"
+  cleanup_pending_backup
+  exit "$status"
+}
+trap cleanup EXIT
+
+ensure_secure_release_config() {
+  ensure_secure_directory "$config_dir" "release configuration directory" || return 1
+  if ! test -f "$release_config" || test -L "$release_config"; then
+    echo "release.env must be a regular non-symlink file." >&2
+    return 1
+  fi
+  if [ "$(stat -c '%U:%G' "$release_config")" != root:root ]; then
+    echo "release.env must be owned by root:root." >&2
+    return 1
+  fi
+  config_mode=$(stat -c '%a' "$release_config")
+  [[ "$config_mode" =~ ^[0-7]{3,4}$ ]] || {
+    echo "release.env has an invalid mode." >&2
+    return 1
+  }
+  if [ $((8#$config_mode & 0022)) -ne 0 ]; then
+    echo "release.env must not be group/world writable." >&2
+    return 1
+  fi
+  if [ "$(tail -c 1 -- "$release_config" | od -An -tx1 | tr -d '[:space:]')" != 0a ]; then
+    echo "release.env must be a newline-terminated Unix text file." >&2
+    return 1
+  fi
+  if LC_ALL=C grep -q $'\r' "$release_config"; then
+    echo "release.env must not use carriage-return line endings." >&2
+    return 1
+  fi
+}
+
+path_exists() {
+  test -e "$1" || test -L "$1"
+}
+
+ensure_secure_directory() {
+  directory=$1
+  label=$2
+  if ! test -d "$directory" || test -L "$directory"; then
+    echo "$label must be a directory, not a symlink." >&2
+    return 1
+  fi
+  if [ "$(stat -c '%U:%G' "$directory")" != root:root ]; then
+    echo "$label must be owned by root:root." >&2
+    return 1
+  fi
+  directory_mode=$(stat -c '%a' "$directory")
+  [[ "$directory_mode" =~ ^[0-7]{3,4}$ ]] || {
+    echo "$label has an invalid mode." >&2
+    return 1
+  }
+  if [ $((8#$directory_mode & 0022)) -ne 0 ]; then
+    echo "$label must not be group/world writable." >&2
+    return 1
+  fi
+}
+
+ensure_secure_backup_root() {
+  ensure_secure_directory "$backup_parent_parent" "release backup parent" || return 1
+  if path_exists "$backup_parent"; then
+    ensure_secure_directory "$backup_parent" "release backup state directory" || return 1
+  else
+    install -d -o root -g root -m 0755 "$backup_parent"
+  fi
+  ensure_secure_directory "$backup_parent" "release backup state directory" || return 1
+
+  if path_exists "$backup_root"; then
+    ensure_secure_directory "$backup_root" "release backup root" || return 1
+  else
+    install -d -o root -g root -m 0700 "$backup_root"
+  fi
+  ensure_secure_directory "$backup_root" "release backup root" || return 1
+  chmod 0700 "$backup_root"
+  test "$(stat -c '%a' "$backup_root")" = 700 || {
+    echo "release backup root could not be restricted to root." >&2
+    return 1
+  }
+}
+
+ensure_lock_file() {
+  command -v flock >/dev/null || {
+    echo "flock is required for release configuration operations." >&2
+    return 1
+  }
+  if path_exists "$lock_file"; then
+    if ! test -f "$lock_file" || test -L "$lock_file"; then
+      echo "Release configuration lock must be a regular non-symlink file." >&2
+      return 1
+    fi
+    if [ "$(stat -c '%U:%G' "$lock_file")" != root:root ]; then
+      echo "Release configuration lock must be owned by root:root." >&2
+      return 1
+    fi
+    lock_mode=$(stat -c '%a' "$lock_file")
+    if [ $((8#$lock_mode & 0022)) -ne 0 ]; then
+      echo "Release configuration lock must not be group/world writable." >&2
+      return 1
+    fi
+  else
+    install -o root -g root -m 0600 /dev/null "$lock_file"
+  fi
+}
+
+acquire_lock() {
+  ensure_secure_backup_root
+  ensure_lock_file
+  exec 9<>"$lock_file"
+  flock -n 9 || {
+    echo "Another release configuration operation is active; no files changed." >&2
+    exit 1
+  }
+}
+
+key_count() {
+  key=$1
+  source_file=$2
+  awk -v key="$key" '$0 ~ ("^" key "=") { count++ } END { print count + 0 }' \
+    "$source_file"
+}
+
+assignment_value() {
+  key=$1
+  source_file=$2
+  awk -v key="$key" '
+    $0 ~ ("^" key "=") {
+      count++
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (count != 1) exit 1
+      print value
+    }
+  ' "$source_file"
+}
+
+unrelated_sha256() {
+  source_file=$1
+  awk '$0 !~ /^BACKEND_IMAGE=/ && $0 !~ /^REQUIRED_APP_VERSION=/' \
+    "$source_file" | sha256sum | awk '{print $1}'
+}
+
+request_sha256() {
+  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$commit" \
+    "$operation_id" \
+    "$backend_image" \
+    "$required_app_version" \
+    "$expected_repository" \
+    "$expected_backend_image" \
+    "$expected_required_app_version" | sha256sum | awk '{print $1}'
+}
+
+build_candidate() {
+  source_file=$1
+  destination=$2
+  awk -v backend="$backend_image" -v version="$required_app_version" '
+    /^BACKEND_IMAGE=/ {
+      backend_count++
+      if (backend_count > 1) invalid = 1
+      print "BACKEND_IMAGE=" backend
+      next
+    }
+    /^REQUIRED_APP_VERSION=/ {
+      version_count++
+      if (version_count > 1) invalid = 1
+      print "REQUIRED_APP_VERSION=" version
+      next
+    }
+    { print }
+    END {
+      if (backend_count != 1 || invalid) exit 1
+      if (version_count == 0) print "REQUIRED_APP_VERSION=" version
+    }
+  ' "$source_file" > "$destination"
+}
+
+validate_candidate() {
+  source_file=$1
+  candidate=$2
+  test "$(key_count BACKEND_IMAGE "$candidate")" = 1 || return 1
+  test "$(key_count REQUIRED_APP_VERSION "$candidate")" = 1 || return 1
+  test "$(assignment_value BACKEND_IMAGE "$candidate")" = "$backend_image" || return 1
+  test "$(assignment_value REQUIRED_APP_VERSION "$candidate")" = "$required_app_version" || return 1
+  test "$(unrelated_sha256 "$source_file")" = "$(unrelated_sha256 "$candidate")" || return 1
+}
+
+read_backup_mode() {
+  backup_mode=$(tr -d '\n' < "$backup_dir/MODE")
+  [[ "$backup_mode" =~ ^[0-7]{3,4}$ ]] || {
+    echo "Release configuration backup has an invalid recorded mode." >&2
+    return 1
+  }
+  printf '%s\n' "$backup_mode"
+}
+
+verify_root_only_backup_file() {
+  backup_file=$1
+  if ! test -f "$backup_file" || test -L "$backup_file"; then
+    echo "Release configuration backup contains an invalid file." >&2
+    return 1
+  fi
+  if [ "$(stat -c '%U:%G' "$backup_file")" != root:root ]; then
+    echo "Release configuration backup files must be owned by root:root." >&2
+    return 1
+  fi
+  backup_file_mode=$(stat -c '%a' "$backup_file")
+  [[ "$backup_file_mode" =~ ^[0-7]{3,4}$ ]] || {
+    echo "Release configuration backup file has an invalid mode." >&2
+    return 1
+  }
+  if [ $((8#$backup_file_mode & 0077)) -ne 0 ]; then
+    echo "Release configuration backup files must be readable only by root." >&2
+    return 1
+  fi
+}
+
+verify_backup() {
+  test -d "$backup_dir" || return 1
+  test ! -L "$backup_dir" || return 1
+  test "$(stat -c '%U:%G' "$backup_dir")" = root:root || return 1
+  backup_dir_mode=$(stat -c '%a' "$backup_dir")
+  if [ $((8#$backup_dir_mode & 0077)) -ne 0 ]; then
+    echo "Release configuration backup directory is too permissive." >&2
+    return 1
+  fi
+  for backup_file in \
+    "$backup_dir/release.env" \
+    "$backup_dir/SHA256SUMS" \
+    "$backup_dir/REQUEST.sha256" \
+    "$backup_dir/UNRELATED.sha256" \
+    "$backup_dir/MODE"; do
+    verify_root_only_backup_file "$backup_file" || return 1
+  done
+  (cd "$backup_dir" && sha256sum -c --status SHA256SUMS) || return 1
+  test "$(tr -d '\n' < "$backup_dir/REQUEST.sha256")" = "$(request_sha256)" || return 1
+  test "$(tr -d '\n' < "$backup_dir/UNRELATED.sha256")" = \
+    "$(unrelated_sha256 "$backup_dir/release.env")" || return 1
+  read_backup_mode >/dev/null || return 1
+}
+
+config_matches_backup() {
+  cmp -s "$release_config" "$backup_dir/release.env"
+}
+
+config_matches_installed_values() {
+  test "$(key_count BACKEND_IMAGE "$release_config")" = 1 || return 1
+  test "$(key_count REQUIRED_APP_VERSION "$release_config")" = 1 || return 1
+  test "$(assignment_value BACKEND_IMAGE "$release_config")" = "$backend_image" || return 1
+  test "$(assignment_value REQUIRED_APP_VERSION "$release_config")" = "$required_app_version" || return 1
+  test "$(unrelated_sha256 "$release_config")" = \
+    "$(tr -d '\n' < "$backup_dir/UNRELATED.sha256")" || return 1
+}
+
+create_backup() {
+  pending_backup=$(mktemp -d "$backup_root/.$commit-$operation_id.XXXXXX")
+  source_mode=$(stat -c '%a' "$release_config")
+  install -o root -g root -m 0600 "$release_config" "$pending_backup/release.env"
+  printf '%s\n' "$source_mode" > "$pending_backup/MODE"
+  printf '%s\n' "$(request_sha256)" > "$pending_backup/REQUEST.sha256"
+  printf '%s\n' "$(unrelated_sha256 "$release_config")" > \
+    "$pending_backup/UNRELATED.sha256"
+  (
+    cd "$pending_backup"
+    sha256sum release.env > SHA256SUMS
+    chmod 0400 SHA256SUMS REQUEST.sha256 UNRELATED.sha256 MODE
+  )
+  chmod 0700 "$pending_backup"
+  mv -- "$pending_backup" "$backup_dir"
+  pending_backup=''
+  verify_backup
+}
+
+replace_release_config() {
+  source_file=$1
+  file_mode=$2
+  replacement_file=$(mktemp "$config_dir/.release.env.XXXXXX")
+  install -o root -g root -m "$file_mode" "$source_file" "$replacement_file"
+  mv -f -- "$replacement_file" "$release_config"
+  replacement_file=''
+}
+
+restore_backup_force() {
+  verify_backup || return 1
+  restore_mode=$(read_backup_mode)
+  replace_release_config "$backup_dir/release.env" "$restore_mode"
+  cmp -s "$release_config" "$backup_dir/release.env" || return 1
+}
+
+create_candidate() {
+  candidate_file=$(mktemp "$config_dir/.release.env.candidate.XXXXXX")
+  build_candidate "$release_config" "$candidate_file"
+  validate_candidate "$release_config" "$candidate_file"
+}
+
+validate_update_source() {
+  # Exercise the exact transformation without writing a candidate. Validate
+  # mode must not create a backup or touch release.env, even temporarily.
+  build_candidate "$release_config" /dev/null
+}
+
+case "$mode" in
+  validate)
+    ensure_secure_release_config
+    validate_update_source
+    echo "Release configuration validation complete for $commit operation $operation_id; no release configuration or backup files changed."
+    ;;
+  install)
+    ensure_secure_release_config
+    acquire_lock
+    ensure_secure_release_config
+    if path_exists "$backup_dir"; then
+      verify_backup
+      if config_matches_installed_values; then
+        echo "Release configuration operation $operation_id is already installed; no files changed."
+        exit 0
+      fi
+      config_matches_backup || {
+        echo "Current release.env does not match this operation backup; refusing stale retry." >&2
+        exit 1
+      }
+    else
+      create_candidate
+      if cmp -s "$release_config" "$candidate_file"; then
+        echo "release.env already contains the requested values without an operation backup; refusing to create a misleading rollback point." >&2
+        exit 1
+      fi
+      create_backup
+    fi
+    [ -n "$candidate_file" ] || create_candidate
+    replacement_mode=$(read_backup_mode)
+    rollback_needed=1
+    replace_release_config "$candidate_file" "$replacement_mode"
+    validate_candidate "$backup_dir/release.env" "$release_config"
+    rollback_needed=0
+    echo "Release configuration install completed for $commit operation $operation_id; services were not restarted."
+    ;;
+  rollback)
+    ensure_secure_release_config
+    acquire_lock
+    ensure_secure_release_config
+    verify_backup
+    if config_matches_backup; then
+      echo "Release configuration operation $operation_id is already rolled back; no files changed."
+      exit 0
+    fi
+    config_matches_installed_values || {
+      echo "Current release.env does not match this operation installation; refusing stale rollback." >&2
+      exit 1
+    }
+    restore_backup_force
+    echo "Release configuration rollback completed for $commit operation $operation_id; services were not restarted."
+    ;;
+esac

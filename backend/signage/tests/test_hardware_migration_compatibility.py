@@ -1,0 +1,180 @@
+import os
+import subprocess
+import sys
+from textwrap import dedent
+
+
+def test_hardware_qualification_schema_supports_old_image_rollback(tmp_path):
+    """Rehearse 0009 -> 0011 and prove the old ORM can still read the row.
+
+    This runs in an isolated SQLite database in a child process so data
+    migrations use that database's ``default`` alias and do not perturb the
+    pytest database.  It also simulates a database that ran the original 0010
+    column rename, exercising the repair path in 0011.
+    """
+
+    backend_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    database_path = tmp_path / "hardware-migration-rehearsal.sqlite3"
+    settings_path = tmp_path / "migration_rehearsal_settings.py"
+    settings_path.write_text(
+        dedent(
+            f"""
+            from config.settings import *
+
+            DATABASES = {{
+                "default": {{
+                    "ENGINE": "django.db.backends.sqlite3",
+                    "NAME": {str(database_path)!r},
+                }}
+            }}
+            """
+        ),
+        encoding="utf-8",
+    )
+    rehearsal = dedent(
+        """
+        from datetime import date
+
+        import django
+
+        django.setup()
+
+        from django.db import IntegrityError, connection
+        from django.db.migrations.executor import MigrationExecutor
+
+        old_target = [("signage", "0009_revoke_marketing_admin_access")]
+        policy_target = [("signage", "0010_battery_backed_player_policy")]
+        new_target = [("signage", "0011_restore_hardware_rollback_columns")]
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(old_target)
+        old_apps = executor.loader.project_state(old_target).apps
+        OldUser = old_apps.get_model("signage", "User")
+        OldHardwareQualification = old_apps.get_model(
+            "signage", "HardwareQualification"
+        )
+        owner = OldUser.objects.create(
+            email="rollback-owner@duducar.co",
+            password="not-used-for-this-rehearsal",
+            role="owner",
+        )
+        qualification = OldHardwareQualification.objects.create(
+            model_name="Rollback-compatible tablet",
+            firmware_version="1.0",
+            android_version="13",
+            tested_by=owner,
+            test_date=date(2026, 8, 9),
+            evidence_reference="internal://release/rehearsal",
+            boot_on_power_passed=True,
+            power_loss_path_passed=True,
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(policy_target)
+        # This is a legacy-image update after the original 0010 had invalidated
+        # prior approvals.  It must be cleared by the 0011 policy constraint.
+        OldHardwareQualification.objects.filter(pk=qualification.pk).update(
+            approved_for_pilot=True
+        )
+
+        PolicyHardwareQualification = executor.loader.project_state(
+            policy_target
+        ).apps.get_model("signage", "HardwareQualification")
+        table_name = PolicyHardwareQualification._meta.db_table
+        # Simulate a development database that applied the original 0010,
+        # which physically renamed the two columns.  Applying 0011 must repair
+        # this schema and invalidate the legacy-only re-approval.
+        with connection.schema_editor() as schema_editor:
+            quote_name = schema_editor.quote_name
+            schema_editor.execute(
+                (
+                    "ALTER TABLE {table_name} RENAME COLUMN "
+                    "{old_name} TO {new_name}"
+                ).format(
+                    table_name=quote_name(table_name),
+                    old_name=quote_name("boot_on_power_passed"),
+                    new_name=quote_name("legacy_boot_on_vehicle_power_passed"),
+                )
+            )
+            schema_editor.execute(
+                (
+                    "ALTER TABLE {table_name} RENAME COLUMN "
+                    "{old_name} TO {new_name}"
+                ).format(
+                    table_name=quote_name(table_name),
+                    old_name=quote_name("power_loss_path_passed"),
+                    new_name=quote_name("legacy_external_power_loss_path_passed"),
+                )
+            )
+        executor = MigrationExecutor(connection)
+        executor.migrate(new_target)
+        new_apps = executor.loader.project_state(new_target).apps
+        NewHardwareQualification = new_apps.get_model(
+            "signage", "HardwareQualification"
+        )
+
+        repaired_current_row = NewHardwareQualification.objects.get(
+            pk=qualification.pk
+        )
+        repaired_old_image_row = OldHardwareQualification.objects.get(
+            pk=qualification.pk
+        )
+        assert repaired_current_row.legacy_boot_on_vehicle_power_passed is True
+        assert repaired_current_row.legacy_external_power_loss_path_passed is True
+        assert repaired_current_row.approved_for_pilot is False
+        assert repaired_old_image_row.boot_on_power_passed is True
+        assert repaired_old_image_row.power_loss_path_passed is True
+        try:
+            OldHardwareQualification.objects.filter(pk=qualification.pk).update(
+                approved_for_pilot=True
+            )
+        except IntegrityError:
+            pass
+        else:
+            raise AssertionError(
+                "The pre-policy ORM must not be able to re-approve hardware."
+            )
+
+        with connection.cursor() as cursor:
+            column_names = {
+                column.name
+                for column in connection.introspection.get_table_description(
+                    cursor, table_name
+                )
+            }
+        assert "boot_on_power_passed" in column_names
+        assert "power_loss_path_passed" in column_names
+        assert "legacy_boot_on_vehicle_power_passed" not in column_names
+        assert "legacy_external_power_loss_path_passed" not in column_names
+
+        # A full schema rollback retains the original physical names as well.
+        executor = MigrationExecutor(connection)
+        executor.migrate(old_target)
+        rollback_row = OldHardwareQualification.objects.get(pk=qualification.pk)
+        assert rollback_row.boot_on_power_passed is True
+        assert rollback_row.power_loss_path_passed is True
+        """
+    )
+    environment = {
+        **os.environ,
+        "DJANGO_SETTINGS_MODULE": "migration_rehearsal_settings",
+        "PYTHONPATH": os.pathsep.join(
+            value
+            for value in (
+                str(tmp_path),
+                backend_dir,
+                os.environ.get("PYTHONPATH"),
+            )
+            if value
+        ),
+    }
+    result = subprocess.run(  # noqa: S603 - fixed local interpreter and rehearsal
+        [sys.executable, "-c", rehearsal],
+        cwd=backend_dir,
+        capture_output=True,
+        check=False,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -28,6 +28,17 @@ variable "container_image" {
   type        = string
   description = "Reviewed ARM64 backend ECR image for the isolated media worker. Pin by digest and keep the EC2 host release on the same version."
   default     = ""
+
+  validation {
+    condition = (
+      var.container_image == "" ||
+      can(regex(
+        "^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$",
+        var.container_image,
+      ))
+    )
+    error_message = "container_image must be empty before bootstrap or a SHA-256 digest-pinned image reference."
+  }
 }
 
 variable "enable_services" {
@@ -126,8 +137,17 @@ variable "enable_container_insights" {
 }
 
 variable "required_app_version" {
-  type    = string
-  default = "0.1.0"
+  type        = string
+  description = "Exact semantic Android version required by the backend. It must match the signed APK and the release-config SSM operation."
+  default     = "0.1.0"
+
+  validation {
+    condition = can(regex(
+      "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$",
+      var.required_app_version,
+    ))
+    error_message = "required_app_version must be an explicit semantic version such as 1.0.0 or 1.0.0-rc.1."
+  }
 }
 
 variable "play_integrity_project_number" {

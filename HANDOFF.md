@@ -375,7 +375,7 @@ recovery; Android warns that it can drain battery quickly.  See [Android screen-
 
 - `AGENTS.md` — product, security, production-topology, and verification
   constraints.
-- `docs/production-runbook.md` — rollout order, owner preflight, forced logout,
+- `docs/production-deployment-runbook.md` — rollout order, owner preflight, forced logout,
   and deployment actions.
 - `docs/backup-restore.md` — recovery evidence and approved retention change.
 - `docs/android-release-signing.md` — first-production release identity and

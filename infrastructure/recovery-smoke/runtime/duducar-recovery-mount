@@ -1,0 +1,228 @@
+#!/bin/bash
+set -euo pipefail
+umask 0077
+
+host_config=/etc/duducar-recovery/host.env
+recovery_mountpoint=/srv/duducar
+receipt_dir=/var/lib/duducar-recovery
+inspection_receipt="$receipt_dir/inspection-receipt"
+
+if [ ! -r "$host_config" ]; then
+  echo "Missing recovery host configuration." >&2
+  exit 1
+fi
+
+# Values are rendered by the recovery-only Terraform root and contain no
+# credentials. They are root-owned and never sourced from the cloned volume.
+set -a
+source "$host_config"
+set +a
+
+device="/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_${RECOVERY_DATA_VOLUME_ID}"
+
+wait_for_device() {
+  for attempt in $(seq 1 120); do
+    if [ -b "$device" ]; then
+      return
+    fi
+    sleep 5
+  done
+  echo "The tagged recovery data volume did not appear within ten minutes." >&2
+  exit 1
+}
+
+require_xfs() {
+  filesystem_type=$(blkid -o value -s TYPE "$device" || true)
+  if [ "$filesystem_type" != xfs ]; then
+    echo "Refusing a recovery volume with filesystem type '${filesystem_type:-missing}'." >&2
+    exit 1
+  fi
+}
+
+assert_expected_layout() {
+  for path in \
+    "$recovery_mountpoint/postgres" \
+    "$recovery_mountpoint/postgres-secrets" \
+    "$recovery_mountpoint/postgres-tls" \
+    "$recovery_mountpoint/backups"; do
+    if [ ! -d "$path" ]; then
+      echo "Recovery volume is missing expected path: $path" >&2
+      exit 1
+    fi
+  done
+  for secret_file in \
+    "$recovery_mountpoint/postgres-secrets/admin-password" \
+    "$recovery_mountpoint/postgres-secrets/owner-password" \
+    "$recovery_mountpoint/postgres-tls/server.key"; do
+    if [ ! -s "$secret_file" ]; then
+      echo "Recovery volume is missing required local database material: $secret_file" >&2
+      exit 1
+    fi
+  done
+}
+
+inspect_read_only() {
+  wait_for_device
+  require_xfs
+  if findmnt --target "$recovery_mountpoint" >/dev/null 2>&1; then
+    echo "Refusing read-only inspection while $recovery_mountpoint is already mounted." >&2
+    exit 1
+  fi
+
+  # Any old receipt is invalid until this exact device is inspected again.
+  rm -f "$inspection_receipt"
+  inspection_dir=$(mktemp -d /mnt/duducar-recovery-inspection.XXXXXX)
+  cleanup() {
+    umount "$inspection_dir" 2>/dev/null || true
+    rmdir "$inspection_dir" 2>/dev/null || true
+  }
+  trap cleanup EXIT
+
+  mount -o ro,nouuid,norecovery,nodev,nosuid "$device" "$inspection_dir"
+  recovery_mountpoint="$inspection_dir"
+  assert_expected_layout
+  findmnt --target "$inspection_dir" --output SOURCE,FSTYPE,OPTIONS,TARGET
+  # xfs_repair -n is non-mutating and must run while the clone is unmounted.
+  umount "$inspection_dir"
+  xfs_repair -n "$device"
+
+  # The receipt is stored on the disposable encrypted root volume, never on
+  # the clone. A writable mount cannot happen unless this exact operation,
+  # device, filesystem UUID, and selected source snapshot passed both gates.
+  install -d -o root -g root -m 0700 "$receipt_dir"
+  device_uuid=$(blkid -o value -s UUID "$device")
+  receipt_tmp=$(mktemp "$receipt_dir/.inspection-receipt.XXXXXX")
+  {
+    printf 'format=1\n'
+    printf 'operation_id=%s\n' "$RECOVERY_OPERATION_ID"
+    printf 'device=%s\n' "$device"
+    printf 'device_uuid=%s\n' "$device_uuid"
+    printf 'source_snapshot_id=%s\n' "$SOURCE_SNAPSHOT_ID"
+    printf 'source_data_volume_id=%s\n' "$SOURCE_DATA_VOLUME_ID"
+    printf 'inspected_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  } > "$receipt_tmp"
+  chown root:root "$receipt_tmp"
+  chmod 0600 "$receipt_tmp"
+  mv -f "$receipt_tmp" "$inspection_receipt"
+  echo "Read-only XFS inspection and xfs_repair -n completed; inspection receipt created."
+}
+
+require_inspection_receipt() {
+  if [ ! -f "$inspection_receipt" ]; then
+    echo "Refusing writable mount: run duducar-recovery-mount inspect successfully first." >&2
+    exit 1
+  fi
+
+  receipt_owner=$(stat -c '%U:%G' "$inspection_receipt")
+  receipt_mode=$(stat -c '%a' "$inspection_receipt")
+  if [ "$receipt_owner" != "root:root" ] || [ "$receipt_mode" != "600" ]; then
+    echo "Refusing writable mount: inspection receipt ownership or mode is unsafe." >&2
+    exit 1
+  fi
+
+  device_uuid=$(blkid -o value -s UUID "$device")
+  for expected in \
+    'format=1' \
+    "operation_id=$RECOVERY_OPERATION_ID" \
+    "device=$device" \
+    "device_uuid=$device_uuid" \
+    "source_snapshot_id=$SOURCE_SNAPSHOT_ID" \
+    "source_data_volume_id=$SOURCE_DATA_VOLUME_ID"; do
+    if ! grep -Fqx "$expected" "$inspection_receipt"; then
+      echo "Refusing writable mount: inspection receipt does not match this recovery operation/device/snapshot." >&2
+      exit 1
+    fi
+  done
+
+  if ! grep -Eq '^inspected_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$inspection_receipt"; then
+    echo "Refusing writable mount: inspection receipt has no valid inspection timestamp." >&2
+    exit 1
+  fi
+}
+
+mount_writable() {
+  wait_for_device
+  require_xfs
+  require_inspection_receipt
+  if findmnt --target "$recovery_mountpoint" >/dev/null 2>&1; then
+    echo "$recovery_mountpoint is already mounted; refusing to remount an ambiguous target." >&2
+    exit 1
+  fi
+
+  install -d -o root -g root -m 0755 "$recovery_mountpoint"
+  # The source XFS UUID is intentionally retained. nouuid permits this clone
+  # to mount on the disposable host after the required read-only inspection.
+  mount -o nouuid,nodev,nosuid "$device" "$recovery_mountpoint"
+  cleanup_failed_mount() {
+    status=$?
+    if [ "$status" -ne 0 ]; then
+      umount "$recovery_mountpoint" 2>/dev/null || true
+    fi
+  }
+  trap cleanup_failed_mount EXIT
+  verify_mounted_clone
+  trap - EXIT
+  findmnt --target "$recovery_mountpoint" --output SOURCE,FSTYPE,OPTIONS,TARGET
+  echo "Recovery volume mounted writable on the disposable host."
+}
+
+verify_mounted_clone() {
+  wait_for_device
+  require_xfs
+  require_inspection_receipt
+  if ! findmnt --target "$recovery_mountpoint" >/dev/null 2>&1; then
+    echo "Recovery clone is not mounted at $recovery_mountpoint." >&2
+    exit 1
+  fi
+
+  mounted_source=$(findmnt --noheadings --output SOURCE --target "$recovery_mountpoint" | xargs)
+  expected_source=$(readlink -f "$device")
+  if [ -z "$mounted_source" ] || [ "$(readlink -f "$mounted_source")" != "$expected_source" ]; then
+    echo "Refusing unexpected mounted source '$mounted_source'; expected recovery clone '$expected_source'." >&2
+    exit 1
+  fi
+
+  mounted_filesystem=$(findmnt --noheadings --output FSTYPE --target "$recovery_mountpoint" | xargs)
+  mounted_options=$(findmnt --noheadings --output OPTIONS --target "$recovery_mountpoint" | xargs)
+  if [ "$mounted_filesystem" != xfs ] || [[ ",$mounted_options," != *,rw,* ]]; then
+    echo "Refusing recovery clone mount without writable XFS options (fstype=$mounted_filesystem options=$mounted_options)." >&2
+    exit 1
+  fi
+  assert_expected_layout
+  echo "Verified the inspected recovery clone is mounted writable from $expected_source."
+}
+
+unmount_recovery() {
+  /usr/local/sbin/duducar-recovery-stack stop || true
+  if findmnt --target "$recovery_mountpoint" >/dev/null 2>&1; then
+    sync
+    umount "$recovery_mountpoint"
+  fi
+  # A subsequent smoke requires a new read-only inspection receipt. Masking
+  # Docker again makes an accidental helper invocation unable to start any
+  # container until the clone has been inspected and remounted.
+  systemctl stop docker.service docker.socket >/dev/null 2>&1 || true
+  systemctl disable docker.service docker.socket >/dev/null 2>&1 || true
+  systemctl mask docker.service docker.socket >/dev/null 2>&1 || true
+  rm -f "$inspection_receipt"
+  echo "Recovery volume is detached from the filesystem; Terraform can now destroy only its tagged resources."
+}
+
+case "${1:-}" in
+  inspect)
+    inspect_read_only
+    ;;
+  mount)
+    mount_writable
+    ;;
+  verify-mounted)
+    verify_mounted_clone
+    ;;
+  unmount)
+    unmount_recovery
+    ;;
+  *)
+    echo "Usage: duducar-recovery-mount {inspect|mount|verify-mounted|unmount}" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,264 @@
+#!/bin/bash
+set -euo pipefail
+
+# Mandatory entry point for this root. It owns backend initialization so a
+# recovery operation cannot accidentally use production/terraform.tfstate.
+# Terraform has a default-data-directory guardrail as defence in depth, but
+# this wrapper is mandatory because Terraform environment indirection is
+# outside module evaluation.
+
+root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+metadata_path="$root_dir/.terraform/terraform.tfstate"
+state_bucket="duducar-signage-terraform-state-173454940059"
+state_region="ap-southeast-5"
+state_profile="dudu-production"
+expected_account_id="173454940059"
+
+usage() {
+  cat >&2 <<'EOF'
+Usage:
+  recovery-terraform <init|fmt|validate|plan|show|apply|destroy|output|cleanup-check> \
+    --operation-id <32-lowercase-hex> [terraform arguments]
+
+Use this wrapper for every recovery-root Terraform command. `init` always
+reconfigures the fixed recovery backend and all stateful commands verify it.
+EOF
+  exit 2
+}
+
+command_name=${1:-}
+if [ -z "$command_name" ]; then
+  usage
+fi
+shift
+
+if [ "${1:-}" != "--operation-id" ] || [ -z "${2:-}" ]; then
+  usage
+fi
+operation_id=$2
+shift 2
+
+if ! [[ "$operation_id" =~ ^[0-9a-f]{32}$ ]]; then
+  echo "operation-id must be exactly 32 lowercase hexadecimal characters." >&2
+  exit 2
+fi
+
+# Do not allow a caller or ambient Terraform state/workspace/CLI setting to
+# redirect this operation. In particular, TF_DATA_DIR can otherwise make this
+# wrapper inspect this root's safe metadata and then execute against metadata
+# from another initialized directory. Force the default workspace as well:
+# recovery states never use workspace prefixes.
+unset TF_DATA_DIR TF_WORKSPACE TF_CLI_ARGS
+for terraform_subcommand in init fmt validate plan show apply destroy output workspace; do
+  unset "TF_CLI_ARGS_${terraform_subcommand}"
+done
+export TF_WORKSPACE=default
+
+# Terraform's in-module guard catches a raw command as a second line of
+# defence. The wrapper owns all backend settings for normal operations.
+for argument in "$@"; do
+  case "$argument" in
+    -backend|-backend=*|-backend-config|-backend-config=*|-reconfigure|-migrate-state|\
+    -state|-state=*|-state-out|-state-out=*|-backup|-backup=*|-chdir|-chdir=*|\
+    -target|-target=*|-lock=false)
+      echo "Do not pass backend, state, directory, target, or lock-bypass options; recovery-terraform owns the isolated full-root operation." >&2
+      exit 2
+      ;;
+  esac
+done
+
+validate_apply_arguments() {
+  local awaiting_value=""
+  local argument
+  for argument in "$@"; do
+    if [ -n "$awaiting_value" ]; then
+      if [ -z "$argument" ] || [[ "$argument" == -* ]]; then
+        echo "Missing value for $awaiting_value in recovery apply." >&2
+        exit 2
+      fi
+      awaiting_value=""
+      continue
+    fi
+
+    case "$argument" in
+      -auto-approve|-auto-approve=*|-input=false|-input=false|-out|-out=*)
+        echo "Recovery apply must generate and display its own plan, then receive an interactive typed confirmation; -auto-approve, -input=false, and -out are forbidden." >&2
+        exit 2
+        ;;
+      -var|-var-file|-lock-timeout|-parallelism|-replace)
+        awaiting_value="$argument"
+        ;;
+      -var=*|-var-file=*|-lock-timeout=*|-parallelism=*|-replace=*|\
+      -lock|-lock=*|-refresh|-refresh=*|-input|-input=*|-compact-warnings|-no-color)
+        ;;
+      --)
+        echo "Recovery apply does not accept a positional saved-plan path." >&2
+        exit 2
+        ;;
+      -*)
+        # Let Terraform reject any unsupported flag after the wrapper has
+        # removed every option that can redirect state or bypass confirmation.
+        ;;
+      *)
+        echo "Recovery apply does not accept a positional saved-plan path: $argument" >&2
+        exit 2
+        ;;
+    esac
+  done
+
+  if [ -n "$awaiting_value" ]; then
+    echo "Missing value for $awaiting_value in recovery apply." >&2
+    exit 2
+  fi
+}
+
+verify_backend() {
+  expected_key="recovery-smoke/${operation_id}.tfstate"
+  if [ ! -f "$metadata_path" ]; then
+    echo "Recovery backend is not initialized. Run recovery-terraform init first." >&2
+    exit 1
+  fi
+  if ! jq -e \
+    --arg bucket "$state_bucket" \
+    --arg key "$expected_key" \
+    --arg region "$state_region" \
+    --arg profile "$state_profile" '
+      .backend.type == "s3" and
+      .backend.config.bucket == $bucket and
+      .backend.config.key == $key and
+      .backend.config.region == $region and
+      .backend.config.profile == $profile and
+      .backend.config.encrypt == true and
+      .backend.config.use_lockfile == true
+    ' "$metadata_path" >/dev/null; then
+    echo "Recovery backend metadata is unsafe; expected ${state_bucket}/${expected_key}, ${state_region}, ${state_profile}, encryption, and lockfile." >&2
+    exit 1
+  fi
+}
+
+verify_default_workspace() {
+  current_workspace=$(command terraform -chdir="$root_dir" workspace show)
+  if [ "$current_workspace" != "default" ]; then
+    echo "Recovery Terraform must use the default workspace; found '$current_workspace'." >&2
+    exit 1
+  fi
+}
+
+verify_cleanup_account() {
+  local account_id
+  if ! account_id=$(command aws sts get-caller-identity \
+    --profile "$state_profile" \
+    --region "$state_region" \
+    --query Account \
+    --output text); then
+    echo "Cannot verify the cleanup AWS account through profile $state_profile." >&2
+    exit 1
+  fi
+  if [ "$account_id" != "$expected_account_id" ]; then
+    echo "Cleanup profile $state_profile resolved to account $account_id, not guarded account $expected_account_id." >&2
+    exit 1
+  fi
+}
+
+assert_iam_resource_absent() {
+  local resource_kind=$1
+  shift
+  local command_output
+  if command_output=$(command aws iam "$@" --profile "$state_profile" --region "$state_region" --output json 2>&1); then
+    echo "Temporary IAM $resource_kind remains: duducar-recovery-${operation_id}." >&2
+    exit 1
+  fi
+  if ! grep -Eq 'NoSuchEntity|not found' <<<"$command_output"; then
+    echo "Could not verify absence of temporary IAM $resource_kind; refusing cleanup acceptance." >&2
+    printf '%s\n' "$command_output" >&2
+    exit 1
+  fi
+}
+
+run_safe_apply() {
+  validate_apply_arguments "$@"
+  local apply_plan_dir
+  local apply_plan_file
+  local confirmation
+  local prior_umask
+  prior_umask=$(umask)
+  umask 0077
+  apply_plan_dir=$(mktemp -d "/tmp/duducar-recovery-${operation_id}.XXXXXX")
+  apply_plan_file="$apply_plan_dir/recovery.tfplan"
+  cleanup_apply_plan() {
+    rm -rf -- "$apply_plan_dir"
+  }
+  trap cleanup_apply_plan EXIT
+
+  # This saved plan is generated only after the wrapper proved the initialized
+  # recovery backend and default workspace. Never accept an operator-supplied
+  # plan file: Terraform plans embed backend information.
+  command terraform -chdir="$root_dir" plan -out="$apply_plan_file" "$@"
+  command terraform -chdir="$root_dir" show "$apply_plan_file"
+  printf 'Type APPLY %s to apply this freshly generated recovery plan: ' "$operation_id" >&2
+  read -r confirmation
+  if [ "$confirmation" != "APPLY $operation_id" ]; then
+    echo "Recovery apply was not confirmed; no resources were changed." >&2
+    exit 1
+  fi
+  command terraform -chdir="$root_dir" apply "$apply_plan_file"
+  trap - EXIT
+  cleanup_apply_plan
+  umask "$prior_umask"
+}
+
+case "$command_name" in
+  init)
+    command terraform -chdir="$root_dir" init -reconfigure \
+      -backend-config="bucket=$state_bucket" \
+      -backend-config="key=recovery-smoke/${operation_id}.tfstate" \
+      -backend-config="region=$state_region" \
+      -backend-config="encrypt=true" \
+      -backend-config="use_lockfile=true" \
+      -backend-config="profile=$state_profile" \
+      "$@"
+    verify_backend
+    verify_default_workspace
+    ;;
+  fmt|validate)
+    command terraform -chdir="$root_dir" "$command_name" "$@"
+    ;;
+  plan|show|destroy|output)
+    verify_backend
+    verify_default_workspace
+    command terraform -chdir="$root_dir" "$command_name" "$@"
+    ;;
+  apply)
+    verify_backend
+    verify_default_workspace
+    run_safe_apply "$@"
+    ;;
+  cleanup-check)
+    if [ "$#" -ne 0 ]; then
+      usage
+    fi
+    verify_backend
+    verify_default_workspace
+    verify_cleanup_account
+    if ! remaining=$(command aws resourcegroupstaggingapi get-resources \
+      --profile "$state_profile" \
+      --region "$state_region" \
+      --tag-filters "Key=OperationId,Values=$operation_id" \
+      --query 'ResourceTagMappingList[].ResourceARN' \
+      --output json); then
+      echo "Could not list taggable temporary resources; refusing cleanup acceptance." >&2
+      exit 1
+    fi
+    if ! jq -e 'type == "array" and length == 0' <<<"$remaining" >/dev/null; then
+      echo "Temporary resources with OperationId=$operation_id remain:" >&2
+      jq -r '.[]' <<<"$remaining" >&2
+      exit 1
+    fi
+    assert_iam_resource_absent role get-role --role-name "duducar-recovery-${operation_id}"
+    assert_iam_resource_absent instance-profile get-instance-profile --instance-profile-name "duducar-recovery-${operation_id}"
+    echo "No taggable temporary resources or named recovery IAM role/profile remain for OperationId=$operation_id."
+    ;;
+  *)
+    usage
+    ;;
+esac

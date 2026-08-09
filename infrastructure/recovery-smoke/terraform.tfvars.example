@@ -1,0 +1,47 @@
+# This example intentionally contains no production credentials, secret values,
+# signing material, or usable image references. Replace every illustrative value
+# from a reviewed read-only preflight and keep the real file untracked.
+
+# Generate with `openssl rand -hex 16`, record it in the change record, and use
+# the same value in the separate Terraform backend key.
+operation_id = "0123456789abcdef0123456789abcdef"
+
+source_snapshot_id    = "snap-0123456789abcdef0"
+source_data_volume_id = "vol-0123456789abcdef0"
+source_archive_key = "database-backups/duducar-signage-postgres-YYYYMMDDTHHMMSSZ.dump"
+source_archive_version_id = "REPLACE_WITH_EXACT_VERSION_ID"
+source_sidecar_key = "database-backups/duducar-signage-postgres-YYYYMMDDTHHMMSSZ.dump.sha256"
+source_sidecar_version_id = "REPLACE_WITH_EXACT_VERSION_ID"
+source_media_key = "validated/REPLACE-WITH-EXACT-NORMALIZED-MEDIA.png"
+source_media_version_id = "REPLACE_WITH_EXACT_VERSION_ID"
+source_media_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+source_media_size_bytes = 1
+
+recovery_vpc_id    = "vpc-0123456789abcdef0"
+recovery_subnet_id = "subnet-0123456789abcdef0"
+vpc_cidr           = "10.40.0.0/16"
+recovery_ami_id    = "ami-0123456789abcdef0"
+recovery_instance_type        = "t4g.small"
+recovery_root_volume_size_gib = 16
+
+# The data snapshot/root key can differ from the application/storage key.
+data_volume_kms_key_arn = "arn:aws:kms:ap-southeast-5:173454940059:key/00000000-0000-0000-0000-000000000000"
+application_secret_arn = "arn:aws:secretsmanager:ap-southeast-5:173454940059:secret:REPLACE"
+application_kms_key_arn = "arn:aws:kms:ap-southeast-5:173454940059:key/00000000-0000-0000-0000-000000000000"
+storage_kms_key_arn = "arn:aws:kms:ap-southeast-5:173454940059:key/00000000-0000-0000-0000-000000000000"
+
+backup_bucket_name = "duducar-signage-production-backups-173454940059"
+media_bucket_name  = "duducar-signage-production-media-173454940059"
+
+# Supply the same reviewed release digests used for the recovery smoke. The
+# backend image is additionally required to be in the fixed production
+# duducar-signage-backend ECR repository; tags are refused.
+backend_image  = "173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-backend@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+postgres_image = "postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+caddy_image    = "caddy@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+required_app_version          = "1.0.0"
+play_integrity_project_number = "123456789"
+cloudfront_domain             = "REPLACE.cloudfront.net"
+cloudfront_public_key_id      = "REPLACE"
+recovery_caddy_port           = 8443

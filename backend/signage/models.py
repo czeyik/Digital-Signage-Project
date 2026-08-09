@@ -16,6 +16,29 @@ def token_hash(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS = (
+    "device_owner_lock_task_passed",
+    "screen_state_passed",
+    "battery_backed_playback_passed",
+    "battery_runtime_passed",
+    "battery_level_telemetry_passed",
+    "planned_shutdown_flow_passed",
+    "physical_shutdown_recovery_passed",
+    "abnormal_exit_recovery_passed",
+    "playback_12h_passed",
+    "image_aspect_passed",
+    "cache_capacity_passed",
+    "network_reconnect_passed",
+    "interrupted_download_passed",
+    "thermal_passed",
+    "mounting_power_safety_passed",
+    "kiosk_escape_resistance_passed",
+    "device_time_change_passed",
+    "remote_disable_reboot_passed",
+    "factory_reset_revocation_passed",
+)
+
+
 class TimeStampedModel(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -65,11 +88,17 @@ class HardwareQualification(TimeStampedModel):
     legacy_boot_on_vehicle_power_passed = models.BooleanField(
         default=False,
         editable=False,
+        # Keep the physical pre-policy column name for isolated, read-only
+        # historic investigation with the pre-0010 image; that image is not a
+        # supported live rollback target.
+        db_column="boot_on_power_passed",
     )
     screen_state_passed = models.BooleanField(default=False)
     legacy_external_power_loss_path_passed = models.BooleanField(
         default=False,
         editable=False,
+        # See legacy_boot_on_vehicle_power_passed above.
+        db_column="power_loss_path_passed",
     )
     battery_backed_playback_passed = models.BooleanField(default=False)
     battery_runtime_passed = models.BooleanField(default=False)
@@ -91,30 +120,26 @@ class HardwareQualification(TimeStampedModel):
     approved_for_pilot = models.BooleanField(default=False)
     approved_at = models.DateTimeField(null=True, blank=True)
 
-    REQUIRED_PASS_FIELDS = (
-        "device_owner_lock_task_passed",
-        "screen_state_passed",
-        "battery_backed_playback_passed",
-        "battery_runtime_passed",
-        "battery_level_telemetry_passed",
-        "planned_shutdown_flow_passed",
-        "physical_shutdown_recovery_passed",
-        "abnormal_exit_recovery_passed",
-        "playback_12h_passed",
-        "image_aspect_passed",
-        "cache_capacity_passed",
-        "network_reconnect_passed",
-        "interrupted_download_passed",
-        "thermal_passed",
-        "mounting_power_safety_passed",
-        "kiosk_escape_resistance_passed",
-        "device_time_change_passed",
-        "remote_disable_reboot_passed",
-        "factory_reset_revocation_passed",
-    )
+    REQUIRED_PASS_FIELDS = HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS
 
     class Meta:
         ordering = ["-test_date", "model_name"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(approved_for_pilot=False)
+                    | Q(
+                        **{
+                            field_name: True
+                            for field_name in (
+                                HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS
+                            )
+                        }
+                    )
+                ),
+                name="signage_hq_battery_policy_approved",
+            )
+        ]
 
     def clean(self):
         if not self.approved_for_pilot:

@@ -16,6 +16,16 @@ ECS web service, and ALB have been removed. Changing a legacy Terraform
 variable is therefore not a rollback: recovery requires an isolated
 rebuild/restore, reconciliation, approval, and a separate traffic cutover.
 
+The battery-backed policy migration is forward-only for live service. Its
+legacy qualification columns provide historic/read compatibility only; they do
+not restore the former external-power policy or make a pre-policy application
+image a normal production rollback. Once `0010_battery_backed_player_policy`
+is recorded, the safe live code path is the released image or a reviewed
+forward fix. A pre-policy image may be used only for read-only investigation on
+an isolated recovered data set. Returning live production to a pre-migration
+backup is a separately approved data-recovery decision with reconciliation and
+possible data loss, not a routine application rollback.
+
 ## Create and verify the production backup
 
 The systemd backup timer runs daily. An operator can run the same workflow
@@ -275,6 +285,240 @@ Use this isolated recovery procedure:
 9. For a rehearsal, stop the probe, unmount and detach the clone, and delete
    only the explicitly tagged temporary instance and volume. Do not manually
    delete the retained DLM source snapshot outside its lifecycle policy.
+
+The preceding data-volume steps describe a separately approved disaster
+recovery rebuild. They do **not** apply to the disposable application-layer
+smoke below. For that smoke, the recovery root supersedes every use of the
+normal production `/etc/duducar/release.env`,
+`render-duducar-runtime-env`, `duducar-stack`, `duducar.service`, production
+timers, and `duducar-command backup`. Use only the recovery-specific runtime,
+stack, loopback listener, and read-only production permissions; never create a
+fresh production backup from the cloned data volume.
+
+## Application-layer recovery smoke — isolated Terraform root
+
+The database and media checks above do not prove that a restored Django/Caddy
+application can serve an owner. Run this additional smoke test before relying
+on the recovery procedure for release approval. It is a disposable,
+application-layer test only: it must never become a standby host, receive
+production traffic, or write to a production data store.
+
+Use the separate `infrastructure/recovery-smoke` Terraform root. It has one
+remote state object per drill:
+
+```text
+recovery-smoke/<operation-id>.tfstate
+```
+
+This is intentionally not a Terraform workspace in the production root and
+must never use `production/terraform.tfstate`. The state object, its lock, and
+all temporary resources are tied to the same operation ID. Keep the empty
+post-destroy state object as change evidence unless a separately approved
+retention procedure removes it.
+
+The recovery root receives all source identifiers explicitly rather than
+reading or modifying production Terraform state. Its required inputs include
+the 32-hex-character `operation_id`, DLM `source_snapshot_id` and
+`source_data_volume_id`, exact logical archive and sidecar S3 keys and version
+IDs, exact normalized-media S3 key and version ID, that media record's
+preflight SHA-256 and byte size, recovery subnet/VPC CIDR, data and application
+KMS key ARNs, application secret ARN, digest-pinned backend/PostgreSQL/Caddy
+images, and the reviewed ARM64 AMI ID. Values may identify production resources
+but must not include secret values. Store the temporary variables file outside
+the repository with mode `0600`.
+
+### Preflight
+
+1. Obtain a written maintenance/recovery-test approval that names the account,
+   Region, operator, cost limit, exact source snapshot, data volume, archive
+   and sidecar object versions, reviewed Git commit, image digests, and
+   operation ID. Generate the ID once and never reuse it for another drill:
+
+   ```sh
+   recovery_operation_id=$(openssl rand -hex 16)
+   test "${#recovery_operation_id}" -eq 32
+   printf '%s\n' "$recovery_operation_id"
+   ```
+
+2. Start from the reviewed release commit and verify both the caller and
+   source recovery points. Confirm that the snapshot belongs to the stated
+   production data volume and has both `dlm:managed=true` and
+   `DLMBackup=duducar-signage-production-ec2-target-data`; this excludes the
+   retained manual bootstrap snapshot. Confirm the archive sidecar and
+   catalogue pass, and record one ready `MediaAsset` normalized key, SHA-256,
+   size, and exact S3 version. Do not create a new production backup as part of
+   this smoke test.
+
+3. Create a protected, out-of-repository variables file for that one operation
+   and initialize only the recovery root through its mandatory
+   `recovery-terraform` wrapper. It fixes and verifies the isolated backend;
+   never pass `../terraform/backend.hcl` or invoke a raw stateful Terraform
+   command in this root:
+
+   ```sh
+   recovery_tf=./infrastructure/recovery-smoke/recovery-terraform
+   "$recovery_tf" init --operation-id "$recovery_operation_id"
+   "$recovery_tf" fmt --operation-id "$recovery_operation_id" -check
+   "$recovery_tf" validate --operation-id "$recovery_operation_id"
+   "$recovery_tf" plan --operation-id "$recovery_operation_id" \
+     -var-file=/secure/duducar-recovery/${recovery_operation_id}.tfvars \
+     -out=/secure/duducar-recovery/${recovery_operation_id}.tfplan
+   ```
+
+   The `operation_id` in the variables file must exactly equal
+   `recovery_operation_id`. Before any apply, inspect the saved plan and the
+   planned backend key. The only permitted production reads are validation of
+   the named source volume/snapshot and ECR digest, followed at runtime by the
+   exact selected archive, sidecar, and normalized-media S3 object versions.
+   Abort if the plan proposes a change to the production instance, Elastic IP,
+   Route 53 records, production security group, live data volume, source
+   snapshot, existing IAM role, backup objects, or the production Terraform
+   state path.
+
+4. Confirm the plan creates only resources carrying
+   `OperationId=<operation-id>` and the recovery-specific role/profile,
+   security group, instance, and cloned volume. There must be no inbound
+   security-group rule, Elastic IP, public application listener, DNS record,
+   or route change. The instance has an ordinary ephemeral public IPv4 only for
+   outbound HTTPS because this public subnet has no NAT or interface endpoints;
+   it is not an administrative or application path. Administrative access is
+   through Systems Manager only; SSH is not an exception.
+
+5. Review the temporary instance role before applying. It may read only the
+   selected versioned archive, sidecar, and normalized-media object, approved
+   application secret, fixed backend ECR repository image, and SSM channels.
+   It must have no production write capability: in particular no S3
+   `PutObject`, delete, lifecycle, or list permission on production buckets;
+   no snapshot, volume, DNS, IAM, Secrets Manager, database, ECS, SNS, or
+   CloudFront mutation permission. The recovery application must not be given
+   the production instance profile or credentials.
+
+6. Explicitly approve the reviewed saved-plan **evidence**, then make a fresh,
+   verified-backend apply using the identical variables file. Do **not** pass
+   any saved plan path to `apply`: a Terraform plan embeds backend information.
+   The wrapper creates a new private plan after checking its recovery backend
+   and default workspace, displays it, and asks its own literal
+   `APPLY <operation-id>` confirmation. Record the root outputs
+   `recovery_instance_id`, `recovery_volume_id`,
+   `recovery_security_group_id`, `recovery_instance_profile_name`, and
+   `recovery_operation_id` before connecting. An apply does not authorize a
+   production cutover, a DNS change, or removal of the source snapshot. Bind
+   the approval to the operation ID:
+
+   ```sh
+   "$recovery_tf" apply --operation-id "$recovery_operation_id" \
+     -var-file=/secure/duducar-recovery/${recovery_operation_id}.tfvars
+   "$recovery_tf" output --operation-id "$recovery_operation_id"
+   ```
+
+### Restore and smoke-test procedure
+
+1. Connect only through the output `recovery_ssm_port_forward_command` and a
+   Session Manager shell. Verify the recovery security group has zero ingress
+   rules and, if the host has its expected ephemeral public IPv4, that it is
+   used solely for outbound HTTPS. Keep the SSM port-forward session local to
+   the reviewing operator.
+
+2. Run only `duducar-recovery-mount inspect` and then
+   `duducar-recovery-mount mount`; do not mount the device directly. `mount`
+   fails closed unless the recovery-only root-volume receipt proves a successful
+   read-only XFS `nouuid,norecovery` layout inspection followed by an unmounted
+   `xfs_repair -n`, tied to this operation, clone device, source snapshot, and
+   source volume. The renderer, restore helper, and stack revalidate that exact
+   mounted clone and receipt before they read a secret or start Docker. Never
+   attach or mount the source volume on the production host.
+
+3. **Quarantine the cloned Docker state before starting Docker.** The data
+   volume contains `/srv/duducar/docker`, which is the production Docker
+   data-root. Its copied container metadata and `unless-stopped` restart
+   policies can restart cloned PostgreSQL, Django, or Caddy as soon as a daemon
+   points at it. The recovery bootstrap must instead use its recovery-only,
+   root-volume Docker data-root. The recovery helper validates the exact
+   root-owned daemon JSON and absence of local systemd Docker replacements or
+   drop-ins before unmasking it, then rechecks `docker info`; do not bypass it.
+   Do not start Docker against the clone, run the normal `duducar-stack`
+   helper, reuse the production `release.env`, or use the production Caddy
+   configuration.
+
+4. Keep every `duducar-*` timer disabled or masked, including backup, health,
+   playlist, media-reconcile, and retention timers. Do not invoke
+   `duducar-command backup`, `create_postgres_backup`, media dispatch, email
+   delivery, or alert delivery. The temporary role is deliberately read-only
+   to production, but disabled timers and a recovery-specific runtime
+   configuration are required defence in depth. Dashboard login/session and
+   audit rows written to the cloned database are local to the drill.
+
+5. Start only the recovery root's generated recovery stack. Its Caddy
+   configuration must use recovery-only TLS and bind its published listener to
+   the recovery host loopback interface. It must not use production DNS,
+   production TLS private keys, the production `Caddyfile.post-cutover`, or an
+   internet-routable bind. Check the listening socket on the recovery host
+   before opening the tunnel; an external scan is not a substitute for this
+   check. Run `duducar-recovery-restore snapshot-schema` (or `logical`) and
+   then `duducar-recovery-restore media` before the web stack: the latter
+   downloads the exact selected S3 object version and fails unless it matches
+   both the recorded preflight SHA-256/size and the restored
+   `MediaAsset.normalized_file`, SHA-256, and file size.
+
+6. Run the exact `recovery_ssm_port_forward_command` output locally, then use
+   the reserved operation-specific `recovery_tls_hostname` (for example,
+   `recovery-<operation-id>.duducar.test`) and `recovery_tls_port` through the
+   loopback tunnel. Map only that reserved hostname to `127.0.0.1` in a
+   temporary browser profile or use `curl --resolve`; import only the public
+   recovery CA at `recovery_tls_ca_path`, verified with
+   `duducar-recovery-stack tls-info`. Retrieve that public CA through the
+   Session Manager shell only (for example, `sudo base64 -w0
+   /run/duducar-recovery/caddy-data/caddy/pki/authorities/local/root.crt`),
+   decode it into a temporary local file, compare its SHA-256 certificate
+   fingerprint to `tls-info`, and remove it after the smoke. Do not use `-k` or
+   a browser certificate click-through. Do not create a Route 53 record, use a
+   production hostname, or bypass TLS with plain HTTP. Verify `/health/live/`
+   and `/health/ready/`, sign in as an existing account owner, open one
+   representative report containing restored data, export one representative
+   playback CSV from the **clone**, and log out. Do not retain or copy CSV
+   contents, upload media, publish a playlist, create an enrollment code, or
+   change a user/device.
+
+7. Record the source versions, state key, operation ID, image digests,
+   recovery host/volume IDs, test start/end times, TLS and loopback evidence,
+   HTTP results, owner-login/report result, restored aggregate comparison, and
+   observed cost. Redact secrets, session cookies, access tokens, raw media
+   URLs, and personal data from the evidence.
+
+### Explicit cleanup
+
+The recovery root never performs automatic cleanup: do not rely on a failed
+test, session expiry, or Terraform state removal to terminate resources. Once
+evidence is collected, stop the recovery stack, close the SSM tunnel, unmount
+and detach the clone, and require an operator confirmation bound to the same
+operation ID before destroying the root:
+
+```sh
+printf 'Type DESTROY %s to remove only this recovery drill: ' \
+  "$recovery_operation_id"
+read -r recovery_confirmation
+test "$recovery_confirmation" = "DESTROY $recovery_operation_id"
+
+"$recovery_tf" output --operation-id "$recovery_operation_id" -raw \
+  recovery_cleanup_query
+"$recovery_tf" destroy --operation-id "$recovery_operation_id" \
+  -var-file=/secure/duducar-recovery/${recovery_operation_id}.tfvars
+```
+
+After destroy, run the wrapper's read-only cleanup check and retain its result
+with the change record:
+
+```sh
+"$recovery_tf" cleanup-check --operation-id "$recovery_operation_id"
+```
+
+It first verifies that the configured profile resolves to guarded account
+`173454940059`, then must report no temporary instance, cloned volume, recovery
+security group, other taggable resource, or named recovery IAM role/profile.
+Do not use a broad tag query, manually delete the source snapshot, or delete
+archive/sidecar/media versions. Confirm the production instance and original
+data volume remained unchanged. Keep the isolated state path and its
+lock/history as audit evidence unless its deletion is separately authorized.
 
 ## Completed isolated restore rehearsal — 2026-08-01
 
