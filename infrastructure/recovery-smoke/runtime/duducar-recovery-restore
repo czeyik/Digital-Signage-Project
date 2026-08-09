@@ -118,7 +118,11 @@ verify_media() {
     --volume "$runtime_dir/backend-secrets:/run/duducar-recovery/backend-secrets:ro" \
     --volume "$runtime_dir/database-owner:/run/duducar-recovery/database-owner:ro" \
     "$BACKEND_IMAGE" \
-    python manage.py shell -c '
+    # `shell` otherwise emits its automatic-import banner before the JSON,
+    # which makes the exact metadata parser fail even when the restored row is
+    # correct. The script explicitly imports MediaAsset, so suppress those
+    # unused imports and keep stdout machine-readable for the proof below.
+    python manage.py shell --no-imports -c '
 import json
 import os
 from signage.models import MediaAsset

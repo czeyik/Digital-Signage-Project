@@ -99,6 +99,7 @@ require_literal 'start_existing_container_if_stopped' "$root_dir/runtime/duducar
 require_literal '--version-id "$SOURCE_MEDIA_VERSION_ID"' "$root_dir/runtime/duducar-recovery-restore"
 require_literal 'SOURCE_MEDIA_SHA256' "$root_dir/runtime/duducar-recovery-restore"
 require_literal 'SOURCE_MEDIA_SIZE_BYTES' "$root_dir/runtime/duducar-recovery-restore"
+require_literal 'python manage.py shell --no-imports -c' "$root_dir/runtime/duducar-recovery-restore"
 require_literal 'ReadOnlyExactArchiveVersion' "$root_dir/main.tf"
 require_literal 'ReadOnlyExactArchiveSidecarVersion' "$root_dir/main.tf"
 require_literal 'ReadOnlyExactNormalizedMediaVersion' "$root_dir/main.tf"
