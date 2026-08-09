@@ -13,6 +13,7 @@ readonly required_files=(
   config/settings.py
   signage/models.py
   signage/nested/keep.py
+  signage/nested/manifest.json
   templates/base.html
   worker-entrypoint.sh
 )
@@ -40,6 +41,10 @@ readonly excluded_files=(
   id_rsa
   id_ecdsa
   id_ed25519
+  id_dsa
+  id_xmss
+  id_ecdsa_sk
+  id_ed25519_sk
   signing.properties
   signing.properties.local
   keystore.properties
@@ -52,6 +57,20 @@ readonly excluded_files=(
   .aws/credentials
   .ssh/config
   .ssh/id_rsa
+  .docker/config.json
+  .config/gcloud/credentials.db
+  play-integrity.json
+  application-secret.json
+  django-secret-key
+  database-password
+  email-host-user
+  email-host-password
+  service-account.json
+  service-account-production.json
+  .netrc
+  .pypirc
+  pip.conf
+  .git-credentials
 )
 
 nested_excluded_files=()

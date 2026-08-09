@@ -21,11 +21,28 @@ credentials/
 private/
 .aws/
 .ssh/
+.docker/
+.config/gcloud/
 secrets/**
 credentials/**
 private/**
 .aws/**
 .ssh/**
+.docker/**
+.config/gcloud/**
+
+# Known local runtime credentials are intentionally exact, not broad JSON rules.
+play-integrity.json
+application-secret.json
+django-secret-key
+database-password
+email-host-user
+email-host-password
+service-account*.json
+.netrc
+.pypirc
+pip.conf
+.git-credentials
 
 # Apply the local-secret exclusions at every depth in the build context.
 **/.env
@@ -43,11 +60,26 @@ private/**
 **/private/
 **/.aws/
 **/.ssh/
+**/.docker/
+**/.config/gcloud/
 **/secrets/**
 **/credentials/**
 **/private/**
 **/.aws/**
 **/.ssh/**
+**/.docker/**
+**/.config/gcloud/**
+**/play-integrity.json
+**/application-secret.json
+**/django-secret-key
+**/database-password
+**/email-host-user
+**/email-host-password
+**/service-account*.json
+**/.netrc
+**/.pypirc
+**/pip.conf
+**/.git-credentials
 
 # Private keys and local signing material are supplied only at release time.
 *.key
@@ -62,6 +94,10 @@ private/**
 id_rsa
 id_ecdsa
 id_ed25519
+id_dsa
+id_xmss
+id_ecdsa_sk
+id_ed25519_sk
 signing/
 signing.properties
 signing.properties.*
@@ -82,6 +118,10 @@ signing/**
 **/id_rsa
 **/id_ecdsa
 **/id_ed25519
+**/id_dsa
+**/id_xmss
+**/id_ecdsa_sk
+**/id_ed25519_sk
 **/signing/
 **/signing/**
 **/signing.properties
