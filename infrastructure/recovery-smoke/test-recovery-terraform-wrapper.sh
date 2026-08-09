@@ -28,6 +28,22 @@ printf '%s\n' \
   'fi' > "$fake_bin/terraform"
 chmod 0755 "$fake_bin/terraform"
 
+# The cleanup check must ask the native EC2 APIs whether this root's resources
+# are still live. Resource Groups Tagging deliberately returns previously
+# tagged/terminated resources, so make that API an unexpected invocation here.
+printf '%s\n' \
+  '#!/bin/bash' \
+  'set -euo pipefail' \
+  'case "$1 $2" in' \
+  '  "sts get-caller-identity") printf "%s\\n" 173454940059 ;;' \
+  '  "ec2 describe-instances") printf "%s\\n" '\''{"Reservations":[{"Instances":[{"InstanceId":"i-stale","State":{"Name":"terminated"}}]}]} '\'' ;;' \
+  '  "ec2 describe-volumes") printf "%s\\n" '\''{"Volumes":[]} '\'' ;;' \
+  '  "ec2 describe-security-groups") printf "%s\\n" '\''{"SecurityGroups":[]} '\'' ;;' \
+  '  "iam get-role"|"iam get-instance-profile") echo "NoSuchEntity" >&2; exit 254 ;;' \
+  '  *) echo "Unexpected fake AWS invocation: $*" >&2; exit 1 ;;' \
+  'esac' > "$fake_bin/aws"
+chmod 0755 "$fake_bin/aws"
+
 write_backend_metadata() {
   local key=$1
   printf '%s\n' \
@@ -97,5 +113,30 @@ if [ "$after_apply_calls" -ne $((before_apply_calls + 1)) ]; then
   echo "Wrapper delegated an unsafe apply instead of rejecting its saved plan." >&2
   exit 1
 fi
+
+# Destroy uses the same verified-backend fresh-plan discipline, and its
+# confirmation is bound to the exact operation instead of Terraform's generic
+# `yes`. A wrong confirmation may produce the workspace/plan/show calls only.
+before_destroy_calls=$(wc -l < "$fake_log")
+if output=$(printf 'no\n' | run_wrapper destroy --operation-id "$operation_id" 2>&1); then
+  echo "Wrapper accepted an unbound recovery destroy confirmation." >&2
+  exit 1
+else
+  status=$?
+fi
+if [ "$status" -ne 1 ] || [[ "$output" != *'Recovery destroy was not confirmed'* ]]; then
+  echo "Wrapper did not reject the unbound recovery destroy confirmation." >&2
+  exit 1
+fi
+after_destroy_calls=$(wc -l < "$fake_log")
+if [ "$after_destroy_calls" -ne $((before_destroy_calls + 3)) ]; then
+  echo "Wrapper did not generate/show exactly one guarded destroy plan before rejecting confirmation." >&2
+  exit 1
+fi
+
+# A terminated EC2 instance can remain in the tagging index after destroy. The
+# native resource APIs are authoritative: a stale terminated record and no
+# volume/security group/IAM objects must pass cleanup-check without real AWS.
+run_wrapper cleanup-check --operation-id "$operation_id"
 
 echo "Recovery Terraform wrapper containment checks passed."

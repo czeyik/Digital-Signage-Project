@@ -499,8 +499,6 @@ printf 'Type DESTROY %s to remove only this recovery drill: ' \
 read -r recovery_confirmation
 test "$recovery_confirmation" = "DESTROY $recovery_operation_id"
 
-"$recovery_tf" output --operation-id "$recovery_operation_id" -raw \
-  recovery_cleanup_query
 "$recovery_tf" destroy --operation-id "$recovery_operation_id" \
   -var-file=/secure/duducar-recovery/${recovery_operation_id}.tfvars
 ```
@@ -513,8 +511,10 @@ with the change record:
 ```
 
 It first verifies that the configured profile resolves to guarded account
-`173454940059`, then must report no temporary instance, cloned volume, recovery
-security group, other taggable resource, or named recovery IAM role/profile.
+`173454940059`, then must report no nonterminated temporary instance, cloned
+volume, recovery security group, or named recovery IAM role/profile. It uses
+native EC2 control-plane liveness checks rather than Resource Groups Tagging
+API, because AWS retains previously tagged resources in that historical index.
 Do not use a broad tag query, manually delete the source snapshot, or delete
 archive/sidecar/media versions. Confirm the production instance and original
 data volume remained unchanged. Keep the isolated state path and its

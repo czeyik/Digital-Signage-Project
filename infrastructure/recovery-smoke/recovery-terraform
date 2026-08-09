@@ -67,13 +67,13 @@ for argument in "$@"; do
   esac
 done
 
-validate_apply_arguments() {
+validate_confirmed_plan_arguments() {
   local awaiting_value=""
   local argument
   for argument in "$@"; do
     if [ -n "$awaiting_value" ]; then
       if [ -z "$argument" ] || [[ "$argument" == -* ]]; then
-        echo "Missing value for $awaiting_value in recovery apply." >&2
+        echo "Missing value for $awaiting_value in a confirmed recovery operation." >&2
         exit 2
       fi
       awaiting_value=""
@@ -82,7 +82,7 @@ validate_apply_arguments() {
 
     case "$argument" in
       -auto-approve|-auto-approve=*|-input=false|-input=false|-out|-out=*)
-        echo "Recovery apply must generate and display its own plan, then receive an interactive typed confirmation; -auto-approve, -input=false, and -out are forbidden." >&2
+        echo "A confirmed recovery operation must generate and display its own plan, then receive an interactive typed confirmation; -auto-approve, -input=false, and -out are forbidden." >&2
         exit 2
         ;;
       -var|-var-file|-lock-timeout|-parallelism|-replace)
@@ -92,7 +92,7 @@ validate_apply_arguments() {
       -lock|-lock=*|-refresh|-refresh=*|-input|-input=*|-compact-warnings|-no-color)
         ;;
       --)
-        echo "Recovery apply does not accept a positional saved-plan path." >&2
+        echo "Recovery operation does not accept a positional saved-plan path." >&2
         exit 2
         ;;
       -*)
@@ -100,14 +100,14 @@ validate_apply_arguments() {
         # removed every option that can redirect state or bypass confirmation.
         ;;
       *)
-        echo "Recovery apply does not accept a positional saved-plan path: $argument" >&2
+        echo "Recovery operation does not accept a positional saved-plan path: $argument" >&2
         exit 2
         ;;
     esac
   done
 
   if [ -n "$awaiting_value" ]; then
-    echo "Missing value for $awaiting_value in recovery apply." >&2
+    echo "Missing value for $awaiting_value in a confirmed recovery operation." >&2
     exit 2
   fi
 }
@@ -175,8 +175,60 @@ assert_iam_resource_absent() {
   fi
 }
 
+verify_no_active_ec2_resources() {
+  # Resource Groups Tagging API intentionally returns resources that were
+  # *previously* tagged, including terminated instances and deleted volumes.
+  # Query the native EC2 control plane instead, accepting only a terminated
+  # instance record while rejecting every live resource this root can create.
+  local instances
+  local volumes
+  local security_groups
+
+  if ! instances=$(command aws ec2 describe-instances \
+    --profile "$state_profile" \
+    --region "$state_region" \
+    --filters "Name=tag:OperationId,Values=$operation_id" \
+    --output json); then
+    echo "Could not verify recovery EC2 instance cleanup." >&2
+    exit 1
+  fi
+  if ! jq -e '[.Reservations[]?.Instances[]? | select(.State.Name != "terminated")] | length == 0' <<<"$instances" >/dev/null; then
+    echo "Nonterminated recovery EC2 instances remain:" >&2
+    jq '[.Reservations[]?.Instances[]? | select(.State.Name != "terminated") | {InstanceId, State: .State.Name}]' <<<"$instances" >&2
+    exit 1
+  fi
+
+  if ! volumes=$(command aws ec2 describe-volumes \
+    --profile "$state_profile" \
+    --region "$state_region" \
+    --filters "Name=tag:OperationId,Values=$operation_id" \
+    --output json); then
+    echo "Could not verify recovery EBS volume cleanup." >&2
+    exit 1
+  fi
+  if ! jq -e '.Volumes | type == "array" and length == 0' <<<"$volumes" >/dev/null; then
+    echo "Recovery EBS volumes remain:" >&2
+    jq '[.Volumes[]? | {VolumeId, State}]' <<<"$volumes" >&2
+    exit 1
+  fi
+
+  if ! security_groups=$(command aws ec2 describe-security-groups \
+    --profile "$state_profile" \
+    --region "$state_region" \
+    --filters "Name=tag:OperationId,Values=$operation_id" \
+    --output json); then
+    echo "Could not verify recovery security-group cleanup." >&2
+    exit 1
+  fi
+  if ! jq -e '.SecurityGroups | type == "array" and length == 0' <<<"$security_groups" >/dev/null; then
+    echo "Recovery security groups remain:" >&2
+    jq '[.SecurityGroups[]? | {GroupId, GroupName}]' <<<"$security_groups" >&2
+    exit 1
+  fi
+}
+
 run_safe_apply() {
-  validate_apply_arguments "$@"
+  validate_confirmed_plan_arguments "$@"
   local apply_plan_dir
   local apply_plan_file
   local confirmation
@@ -207,6 +259,38 @@ run_safe_apply() {
   umask "$prior_umask"
 }
 
+run_safe_destroy() {
+  validate_confirmed_plan_arguments "$@"
+  local destroy_plan_dir
+  local destroy_plan_file
+  local confirmation
+  local prior_umask
+  prior_umask=$(umask)
+  umask 0077
+  destroy_plan_dir=$(mktemp -d "/tmp/duducar-recovery-${operation_id}.XXXXXX")
+  destroy_plan_file="$destroy_plan_dir/recovery-destroy.tfplan"
+  cleanup_destroy_plan() {
+    rm -rf -- "$destroy_plan_dir"
+  }
+  trap cleanup_destroy_plan EXIT
+
+  # As with apply, the wrapper generates the saved plan only after proving the
+  # isolated backend. A generic Terraform `yes` is not enough: cleanup must be
+  # deliberately bound to this exact temporary operation.
+  command terraform -chdir="$root_dir" plan -destroy -out="$destroy_plan_file" "$@"
+  command terraform -chdir="$root_dir" show "$destroy_plan_file"
+  printf 'Type DESTROY %s to destroy this freshly generated recovery plan: ' "$operation_id" >&2
+  read -r confirmation
+  if [ "$confirmation" != "DESTROY $operation_id" ]; then
+    echo "Recovery destroy was not confirmed; no resources were changed." >&2
+    exit 1
+  fi
+  command terraform -chdir="$root_dir" apply "$destroy_plan_file"
+  trap - EXIT
+  cleanup_destroy_plan
+  umask "$prior_umask"
+}
+
 case "$command_name" in
   init)
     command terraform -chdir="$root_dir" init -reconfigure \
@@ -223,10 +307,15 @@ case "$command_name" in
   fmt|validate)
     command terraform -chdir="$root_dir" "$command_name" "$@"
     ;;
-  plan|show|destroy|output)
+  plan|show|output)
     verify_backend
     verify_default_workspace
     command terraform -chdir="$root_dir" "$command_name" "$@"
+    ;;
+  destroy)
+    verify_backend
+    verify_default_workspace
+    run_safe_destroy "$@"
     ;;
   apply)
     verify_backend
@@ -240,23 +329,10 @@ case "$command_name" in
     verify_backend
     verify_default_workspace
     verify_cleanup_account
-    if ! remaining=$(command aws resourcegroupstaggingapi get-resources \
-      --profile "$state_profile" \
-      --region "$state_region" \
-      --tag-filters "Key=OperationId,Values=$operation_id" \
-      --query 'ResourceTagMappingList[].ResourceARN' \
-      --output json); then
-      echo "Could not list taggable temporary resources; refusing cleanup acceptance." >&2
-      exit 1
-    fi
-    if ! jq -e 'type == "array" and length == 0' <<<"$remaining" >/dev/null; then
-      echo "Temporary resources with OperationId=$operation_id remain:" >&2
-      jq -r '.[]' <<<"$remaining" >&2
-      exit 1
-    fi
+    verify_no_active_ec2_resources
     assert_iam_resource_absent role get-role --role-name "duducar-recovery-${operation_id}"
     assert_iam_resource_absent instance-profile get-instance-profile --instance-profile-name "duducar-recovery-${operation_id}"
-    echo "No taggable temporary resources or named recovery IAM role/profile remain for OperationId=$operation_id."
+    echo "No active recovery EC2 resources or named recovery IAM role/profile remain for OperationId=$operation_id."
     ;;
   *)
     usage
