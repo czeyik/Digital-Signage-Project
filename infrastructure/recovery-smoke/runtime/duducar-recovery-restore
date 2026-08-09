@@ -50,7 +50,6 @@ download_and_verify() {
     cd "$archive_dir"
     sha256sum --check --strict "$sidecar_name"
   )
-  # Root reads root-only archive.
   docker run --rm \
     --network none \
     --user 0:0 \
@@ -89,8 +88,6 @@ run_owner_command() {
 }
 
 verify_media() {
-  # Query the restored database only after the recovery database helper has
-  # re-validated the inspected clone and isolated Docker data-root.
   /usr/local/sbin/duducar-recovery-stack database
   install -d -o root -g root -m 0700 "$archive_dir"
   rm -f "$media_path"
@@ -104,7 +101,6 @@ verify_media() {
 
   local_sha256=$(sha256sum "$media_path" | awk '{print $1}')
   local_size=$(stat -c '%s' "$media_path")
-  # --no-imports keeps the explicit MediaAsset JSON query machine-readable.
   database_metadata=$(docker run --rm \
     --network "$network" \
     --read-only \
@@ -173,28 +169,36 @@ restore_logical() {
     psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \
     --file /run/postgres-config/runtime-grants.sql
 
-  # Root restores this root-only archive.
-  docker run --rm \
-    --network "$network" \
-    --user 0:0 \
-    --read-only \
-    --cap-drop ALL \
-    --security-opt no-new-privileges:true \
-    --pids-limit 256 \
-    --memory 768m \
-    --cpus 1.5 \
-    --env PGHOST=duducar-recovery-postgres \
-    --env PGPORT=5432 \
-    --env PGDATABASE=signage \
-    --env PGUSER=signage_owner \
-    --env PGSSLMODE=require \
-    --env AWS_EC2_METADATA_DISABLED=true \
-    --env RESTORE_ARCHIVE="/backups/$archive_name" \
-    --volume "$archive_dir:/backups:ro" \
-    --volume "$runtime_dir/database-owner:/run/duducar-recovery/database-owner:ro" \
-    --entrypoint /bin/sh \
-    "$BACKEND_IMAGE" \
-    -ec 'export PGPASSWORD="$(cat /run/duducar-recovery/database-owner/database-owner-password)"; exec pg_restore --exit-on-error --single-transaction --no-owner --no-privileges --dbname="$PGDATABASE" "$RESTORE_ARCHIVE"'
+  (
+    restore_owner_dir=$(mktemp -d "$runtime_dir/logical-restore.XXXXXX")
+    trap 'status=$?; if ! rm -rf -- "$restore_owner_dir"; then exit 1; fi; exit "$status"' EXIT
+    chown root:root "$restore_owner_dir"
+    chmod 0700 "$restore_owner_dir"
+    install -o root -g root -m 0400 \
+      "$runtime_dir/database-owner/database-owner-password" \
+      "$restore_owner_dir/database-owner-password"
+    docker run --rm \
+      --network "$network" \
+      --user 0:0 \
+      --read-only \
+      --cap-drop ALL \
+      --security-opt no-new-privileges:true \
+      --pids-limit 256 \
+      --memory 768m \
+      --cpus 1.5 \
+      --env PGHOST=duducar-recovery-postgres \
+      --env PGPORT=5432 \
+      --env PGDATABASE=signage \
+      --env PGUSER=signage_owner \
+      --env PGSSLMODE=require \
+      --env AWS_EC2_METADATA_DISABLED=true \
+      --env RESTORE_ARCHIVE="/backups/$archive_name" \
+      --volume "$archive_dir:/backups:ro" \
+      --volume "$restore_owner_dir:/run/duducar-recovery/logical-restore:ro" \
+      --entrypoint /bin/sh \
+      "$BACKEND_IMAGE" \
+      -ec 'export PGPASSWORD="$(cat /run/duducar-recovery/logical-restore/database-owner-password)"; exec pg_restore --exit-on-error --single-transaction --no-owner --no-privileges --dbname="$PGDATABASE" "$RESTORE_ARCHIVE"'
+  )
 
   docker exec duducar-recovery-postgres \
     psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \

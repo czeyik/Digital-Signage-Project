@@ -167,6 +167,11 @@ media_proof_definition=$(awk '
   in_media { print }
   in_media && /^}/ { exit }
 ' "$root_dir/runtime/duducar-recovery-restore")
+logical_restore_definition=$(awk '
+  /^restore_logical\(\) \{/ { in_restore = 1 }
+  in_restore { print }
+  in_restore && /^}/ { exit }
+' "$root_dir/runtime/duducar-recovery-restore")
 if ! printf '%s\n' "$caddy_container_definition" | grep -Fq -- '--network "$network"'; then
   echo "Recovery Caddy must stay on the isolated recovery bridge." >&2
   exit 1
@@ -246,6 +251,28 @@ require_literal 'install -d -o root -g root -m 0700 "$archive_dir"' "$root_dir/r
 require_literal 'chmod 0600 "$archive_path" "$sidecar_path"' "$root_dir/runtime/duducar-recovery-restore"
 require_literal '--network none' "$root_dir/runtime/duducar-recovery-restore"
 require_literal '--env AWS_EC2_METADATA_DISABLED=true' "$root_dir/runtime/duducar-recovery-restore"
+if ! printf '%s\n' "$logical_restore_definition" | grep -Fq -- 'restore_owner_dir=$(mktemp -d "$runtime_dir/logical-restore.XXXXXX")'; then
+  echo "Logical restore must create a dedicated tmpfs credential directory." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$logical_restore_definition" | grep -Eq '^[[:space:]]*trap .+ EXIT$' || \
+   ! printf '%s\n' "$logical_restore_definition" | grep -Fq -- 'rm -rf -- "$restore_owner_dir"'; then
+  echo "Logical restore must clean its temporary credential directory with an EXIT trap." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$logical_restore_definition" | grep -Fq -- 'install -o root -g root -m 0400' || \
+   ! printf '%s\n' "$logical_restore_definition" | grep -Fq -- '"$restore_owner_dir/database-owner-password"'; then
+  echo "Logical restore must create a root-only temporary owner-password copy." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$logical_restore_definition" | grep -Fq -- '--volume "$restore_owner_dir:/run/duducar-recovery/logical-restore:ro"'; then
+  echo "Logical restore must mount only its temporary owner-password copy." >&2
+  exit 1
+fi
+if printf '%s\n' "$logical_restore_definition" | grep -Fq -- '--volume "$runtime_dir/database-owner:'; then
+  echo "Logical root restore must not mount the original appuser credential." >&2
+  exit 1
+fi
 require_literal 'test-recovery-logical-restore.sh' "$root_dir/test-static-guardrails.sh"
 require_literal 'ReadOnlyExactArchiveVersion' "$root_dir/main.tf"
 require_literal 'ReadOnlyExactArchiveSidecarVersion' "$root_dir/main.tf"

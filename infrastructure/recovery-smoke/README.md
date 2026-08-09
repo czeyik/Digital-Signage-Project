@@ -50,7 +50,11 @@ initialize this directory using `production/terraform.tfstate`.
   capability-free, and resource-limited. The catalogue reader has
   `--network none`; the restore reader has only the internal recovery network,
   no metadata access, and no `backend-secrets`, Docker-socket, or cloned-data
-  mount.
+  mount. Its appuser-owned owner-password source remains `10001:10001` with
+  `0500`/`0400` protection; immediately before the root restore, the helper
+  copies it into a fresh root-owned `0700` tmpfs directory as a `0400` file,
+  mounts only that copy read-only, and removes the directory through an exit
+  trap on success or failure.
 - The recovery stack has its own `duducar-recovery-*` names and bridge network,
   no PostgreSQL host port, no systemd DUDU service, no timers, and an internal
   Docker network with no application-container egress. Caddy has one static
