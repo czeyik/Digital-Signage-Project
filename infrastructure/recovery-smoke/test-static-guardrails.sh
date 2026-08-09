@@ -96,6 +96,65 @@ require_literal '--publish "127.0.0.1:${RECOVERY_CADDY_PORT}:${RECOVERY_CADDY_PO
 require_literal '--restart no' "$root_dir/runtime/duducar-recovery-stack"
 require_literal 'start_existing_container_if_stopped' "$root_dir/runtime/duducar-recovery-stack"
 
+# The official pinned Caddy image marks its executable with
+# cap_net_bind_service=ep. Retain exactly that capability so it can execute
+# under no-new-privileges after dropping everything else; broader grants would
+# weaken the isolated recovery stack without a listener requirement.
+caddy_container_definition=$(awk '
+  /^create_caddy\(\) \{/ { in_caddy = 1 }
+  in_caddy { print }
+  in_caddy && /^}/ { exit }
+' "$root_dir/runtime/duducar-recovery-stack")
+web_container_definition=$(awk '
+  /^create_web\(\) \{/ { in_web = 1 }
+  in_web { print }
+  in_web && /^}/ { exit }
+' "$root_dir/runtime/duducar-recovery-stack")
+if ! printf '%s\n' "$caddy_container_definition" | grep -Fq -- '--network "$network"'; then
+  echo "Recovery Caddy must stay on the isolated recovery bridge." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$caddy_container_definition" | grep -Fq -- '--publish "127.0.0.1:${RECOVERY_CADDY_PORT}:${RECOVERY_CADDY_PORT}"'; then
+  echo "Recovery Caddy must publish only its loopback listener." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$caddy_container_definition" | grep -Eq '^[[:space:]]*--cap-drop ALL \\$'; then
+  echo "Recovery Caddy must drop all Linux capabilities before its narrow exception." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$caddy_container_definition" | grep -Eq '^[[:space:]]*--cap-add NET_BIND_SERVICE \\$'; then
+  echo "Recovery Caddy must retain NET_BIND_SERVICE for the pinned image executable." >&2
+  exit 1
+fi
+if [ "$(printf '%s\n' "$caddy_container_definition" | grep -Fc -- '--cap-add')" -ne 1 ]; then
+  echo "Recovery Caddy must retain exactly one Linux capability." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$caddy_container_definition" | grep -Eq '^[[:space:]]*--security-opt no-new-privileges:true \\$'; then
+  echo "Recovery Caddy must retain no-new-privileges." >&2
+  exit 1
+fi
+if printf '%s\n' "$caddy_container_definition" | grep -Fq -- '--privileged'; then
+  echo "Recovery Caddy must never use privileged mode." >&2
+  exit 1
+fi
+if printf '%s\n' "$caddy_container_definition" | grep -Fq -- '--network host'; then
+  echo "Recovery Caddy must never use host networking." >&2
+  exit 1
+fi
+if printf '%s\n' "$web_container_definition" | grep -Fq -- '--cap-add'; then
+  echo "Recovery Django must not inherit Caddy's capability exception." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$web_container_definition" | grep -Eq '^[[:space:]]*--cap-drop ALL \\$'; then
+  echo "Recovery Django must keep its full capability drop." >&2
+  exit 1
+fi
+if ! printf '%s\n' "$web_container_definition" | grep -Eq '^[[:space:]]*--security-opt no-new-privileges:true \\$'; then
+  echo "Recovery Django must keep no-new-privileges." >&2
+  exit 1
+fi
+
 # The media proof must bind an exact S3 version to both preflight evidence and
 # the record recovered from the clone; no production hostname may be used.
 require_literal '--version-id "$SOURCE_MEDIA_VERSION_ID"' "$root_dir/runtime/duducar-recovery-restore"

@@ -50,6 +50,11 @@ initialize this directory using `production/terraform.tfstate`.
   recovery-only certificate and is published only as
   `127.0.0.1:8443` (or the reviewed `recovery_caddy_port`). It never requests a
   production ACME certificate or reuses production Caddy state.
+- Caddy drops every Linux capability except `NET_BIND_SERVICE`. The pinned
+  official image marks `/usr/bin/caddy` with that file capability; retaining
+  only it lets the executable run with Docker's `no-new-privileges` policy.
+  This does not create an internet listener: the recovery stack still publishes
+  only its unprivileged loopback port.
 - The rendered application disables SMTP delivery and metadata credentials in
   the container. It does not configure a backup destination, and the IAM role
   cannot write a production backup even if a forbidden command is attempted.
