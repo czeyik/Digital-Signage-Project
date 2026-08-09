@@ -160,11 +160,13 @@ object, alert, email, task, or other mutation to production.
 The root deliberately does not auto-clean temporary resources. After the
 owner-login and representative-report smoke passes, confirm a
 `DESTROY <operation-id>` prompt, destroy only that recovery root, and execute
-its `recovery_cleanup_query` output. Then run the wrapper's `cleanup-check`,
-which verifies the guarded account plus taggable resources and the named
-temporary IAM role/profile. Retain the empty per-operation state path and
-cleanup result as evidence. The full preflight, restore, TLS-tunnel test, and
-cleanup procedure is in [`docs/backup-restore.md`](../docs/backup-restore.md).
+its `cleanup-check`. The check verifies the guarded account, native EC2
+liveness (no nonterminated recovery instance, cloned volume, or recovery
+security group), and the named temporary IAM role/profile. It intentionally
+does not use Resource Groups Tagging API, which returns previously tagged
+resources after deletion. Retain the empty per-operation state path and cleanup
+result as evidence. The full preflight, restore, TLS-tunnel test, and cleanup
+procedure is in [`docs/backup-restore.md`](../docs/backup-restore.md).
 
 ## Build and release
 

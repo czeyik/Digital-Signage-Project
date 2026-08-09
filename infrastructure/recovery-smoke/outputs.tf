@@ -68,11 +68,10 @@ output "recovery_ssm_port_forward_command" {
   )
 }
 
-output "recovery_cleanup_query" {
-  description = "Read-only post-destroy query for taggable resources. recovery-terraform cleanup-check additionally verifies the guarded account and named IAM role/profile absence."
+output "recovery_cleanup_command" {
+  description = "Read-only post-destroy verification. It checks native EC2 liveness plus the guarded account and named IAM role/profile absence; it deliberately does not use the historical Resource Groups Tagging API as a deletion signal."
   value = format(
-    "aws resourcegroupstaggingapi get-resources --profile dudu-production --region %s --tag-filters Key=OperationId,Values=%s --query 'ResourceTagMappingList[].ResourceARN' --output text",
-    local.production_region,
+    "recovery-terraform cleanup-check --operation-id %s",
     var.operation_id,
   )
 }

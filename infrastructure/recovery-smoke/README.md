@@ -233,15 +233,17 @@ state key and exact `terraform.tfvars` to destroy only this operation.
 sudo /usr/local/sbin/duducar-recovery-stack stop
 sudo /usr/local/sbin/duducar-recovery-mount unmount
 rm -f "/tmp/duducar-recovery-${operation_id}-ca.crt"
-"$recovery_tf" output --operation-id "$operation_id" -raw recovery_cleanup_query
 "$recovery_tf" destroy --operation-id "$operation_id" \
   -var-file=terraform.tfvars
 ```
 
-Before destroy, record the non-secret `recovery_cleanup_query` output. After
-destroy, run `"$recovery_tf" cleanup-check --operation-id "$operation_id"`;
-it verifies account `173454940059`, taggable temporary resources, and the exact
-named IAM role/profile. Record source IDs/versions, start/end times,
+The wrapper generates a fresh destruction plan and requires exactly
+`DESTROY <operation-id>` before it applies it. After destroy, run
+`"$recovery_tf" cleanup-check --operation-id "$operation_id"`; it verifies
+account `173454940059`, that no nonterminated recovery instance, cloned volume,
+or recovery security group remains, and the exact named IAM role/profile is
+absent. Do not use Resource Groups Tagging API as a deletion signal: AWS keeps
+previously tagged resources in that historical index. Record source IDs/versions, start/end times,
 owner-login/report/media-proof result, RPO/RTO, cost window,
 instance/volume/role/security-group IDs, destruction result, and approver. Do
 not delete the DLM source snapshot or the separately retained manual bootstrap
