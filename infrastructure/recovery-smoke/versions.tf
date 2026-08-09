@@ -15,6 +15,10 @@ terraform {
 }
 
 provider "aws" {
+  # Do not inherit arbitrary shell credentials. The provider must use the
+  # same fixed production SSO profile that the isolated backend and wrapper
+  # verify before it can inspect or create recovery-only resources.
+  profile             = local.recovery_state_profile
   region              = local.production_region
   allowed_account_ids = [local.production_account_id]
 
