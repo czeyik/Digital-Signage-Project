@@ -1,16 +1,17 @@
 # Digital Signage Project — Deployment Handoff
 
-**Updated:** 2026-08-09 01:40 Asia/Kuala_Lumpur
+**Updated:** 2026-08-09 Asia/Kuala_Lumpur
 
 **Scope:** controlled live launch of the 10-vehicle Malaysia pilot.
 **Authoritative operating constraints:** `AGENTS.md` and `docs/architecture.md`.
 
 ## Mission and current position
 
-The project is preparing a pre-canary release for the production pilot.  The
-application hardening release is now merged to `main`, but **production has not
-been deployed from that release**.  Do not mistake the Git merge or passing CI
-for a completed go-live.
+The project is preparing a pre-canary release for the production pilot. The
+application, battery-policy, and recovery-control changes are merged to
+`main`, but **production has not been deployed from those changes**. Do not
+mistake a Git merge, passing CI, or an isolated recovery control-path test for
+a completed go-live.
 
 The next agent should preserve the pilot topology and its cost/safety limits:
 
@@ -26,17 +27,15 @@ The next agent should preserve the pilot topology and its cost/safety limits:
 
 | Item | Verified state |
 | --- | --- |
-| Release commit on `dev` | `c938d7c234aa697ea9fbeea5d6f7891c440cdd03` — `feat: harden pilot canary release` |
-| GitHub PR | [#25](https://github.com/czeyik/Digital-Signage-Project/pull/25), `dev` → `main` |
-| PR state | Merged externally by `czeyik` at `2026-08-08T10:41:21Z`; merge commit `8a7ca5eabf8552c6b997be7ea81b5e28a38fd185` |
-| Remote branches at handoff | `origin/dev` = `c938d7c…`; `origin/main` = `8a7ca5e…` |
-| GitHub Actions run | [dev CI #25](https://github.com/czeyik/Digital-Signage-Project/actions/runs/31253130026) passed |
-| Passed CI jobs | backend, PostgreSQL-backed backend tests, Android, Terraform, ARM64 container build/runtime exercise/Trivy |
+| Original release hardening | [#25](https://github.com/czeyik/Digital-Signage-Project/pull/25), merge `8a7ca5eabf8552c6b997be7ea81b5e28a38fd185` (source `c938d7c234aa697ea9fbeea5d6f7891c440cdd03`) |
+| Battery-policy merges | [#26](https://github.com/czeyik/Digital-Signage-Project/pull/26) `05cbf9d`, [#27](https://github.com/czeyik/Digital-Signage-Project/pull/27) `f99a941`, and [#28](https://github.com/czeyik/Digital-Signage-Project/pull/28) `6d2f3b3` |
+| Recovery-control merges | [#29](https://github.com/czeyik/Digital-Signage-Project/pull/29) `b29d6e7`; direct commit `a328c5e` (XFS journal replay); [#31](https://github.com/czeyik/Digital-Signage-Project/pull/31) `53a923c`; [#32](https://github.com/czeyik/Digital-Signage-Project/pull/32) `ca5e527`; [#33](https://github.com/czeyik/Digital-Signage-Project/pull/33) `b4e7021`; [#34](https://github.com/czeyik/Digital-Signage-Project/pull/34) `80b24f9`; [#35](https://github.com/czeyik/Digital-Signage-Project/pull/35) `3b58c0f`; [#36](https://github.com/czeyik/Digital-Signage-Project/pull/36) `3b9ba95` |
+| Current remote release state | `origin/main` = `3b9ba958df8a7295962a96fa16a5595d0c56ced7` — [#36](https://github.com/czeyik/Digital-Signage-Project/pull/36), `fix: isolate recovery restore credential` |
+| CI evidence | The original hardening run passed backend, PostgreSQL-backed backend tests, Android, Terraform, and ARM64 container build/runtime/Trivy. Review the linked merged-PR checks before relying on a later recovery-control change. |
 
-The local checkout is still on `dev`.  Before making a further change, inspect
-the worktree, fetch, and deliberately choose the intended branch.  `HANDOFF.md`
-itself is a new local file created for this handoff and has not been committed
-or pushed.
+Before making a further change, inspect the worktree, fetch, and deliberately
+choose the intended branch. This handoff is release-state documentation, not
+deployment authority.
 
 ## Decisions and approvals already made
 
@@ -45,13 +44,17 @@ or pushed.
 - The user approved changing S3 **noncurrent** logical-database-backup versions
   from 30 days to **1 day**.  This is recorded in `docs/backup-restore.md` and
   Terraform, but has **not** been applied to AWS.
-- The user confirmed that an account-owner login works.  A controlled
-  production read-only check also found one active `role=owner` account.
-- The first production Android release identity is **version name `1.0.0`,
-  version code `1`**, with no prior production code (`0 → 1`).
+- No owner-login proof has been recorded for the current isolated recovery
+  drill. A historic account-owner inspection is not a replacement for the
+  required restored-environment owner-login and protected-dashboard check.
+- The next battery-policy Android release is **version name `1.0.0`, version
+  code `1`**. The currently deployed application/recovery-smoke release is
+  `0.1.0`; do not treat the intended `1.0.0` value as already deployed.
 - The production Play Integrity project number was already present in ignored
-  local Terraform configuration.  The required app version was set locally to
-  `1.0.0`; verify it remains so before the final plan.
+  local Terraform configuration. For the future policy rollout, verify the
+  ignored release configuration sets the required app version to `1.0.0` before
+  generating its final plan; do not change the live `0.1.0` host merely by
+  editing Terraform variables.
 
 ## Completed technical work
 
@@ -96,15 +99,65 @@ or pushed.
 - The project budget was USD 1.916 of the USD 30 target; root MFA is enabled
   and root access keys are absent.
 
-### Recovery rehearsal
+### Recovery rehearsal and final evidence gate
 
 - The 2026-08-01 isolated rehearsal successfully restored the DB snapshot,
   logical backup, and private media within the intended recovery objective.
   Temporary rehearsal resources were removed; estimated extra AWS cost was
-  below USD 0.01.
-- It did **not** start the restored Django/Caddy application or test an owner
-  login and representative report in the restored environment.  That
-  application-layer smoke test remains a hard pre-go-live gate.
+  below USD 0.01. It did **not** start the restored Django/Caddy application
+  or test an owner login and representative report.
+- The later recovery-only fixes listed above harden the isolated path for the
+  XFS journal, bootstrap tooling, media proof, Caddy capability and loopback
+  exposure, and logical-restore credentials. They do not deploy or alter the
+  production application.
+- **Automated final drill completed — owner-operated smoke still pending.**
+  The reviewed `main` commit was
+  `3b9ba958df8a7295962a96fa16a5595d0c56ced7`; operation
+  `a4d730a97626bdb3bb652c4e72409d45` used the isolated recovery root and the
+  production-equivalent `0.1.0` image
+  `duducar-signage-backend@sha256:a9103d0ed09417b62af2b3c6fb0644a6ebe6e164e180a4c37288b255e94dd2fc`.
+  It used only snapshot `snap-0e000e16f572c5ab0` from production data volume
+  `vol-05b6edc95de87cc4a`, archive
+  `database-backups/duducar-signage-postgres-20260808T180321Z.dump` version
+  `m34z57aR03cFEWC_MXTpDfq6AoYS_iiF`, matching sidecar version
+  `waI9Vf.L_OlHtHYpFvissgCUqtu4UzBK`, and normalized media
+  `validated/181f50c7-9074-4550-aa49-02d7bc21f965.png` version
+  `XNDO6IO05w6O3gHQhmUQVD.kXdJOQrsj`. At preflight, the DLM snapshot and
+  logical backup were respectively about 13 hours 34 minutes and 14 hours 12
+  minutes old, within the 24-hour RPO.
+  - The clone took the expected guarded XFS dirty-journal path: read-only
+    inspection returned the documented exit `3`, explicit clone-only journal
+    replay passed its clean post-check, and the clone was then mounted only on
+    the disposable host.
+  - Snapshot schema/migrations, exact media key/SHA-256/byte-size proof,
+    archive sidecar/catalogue validation, logical restore, grant repair, and
+    migration checks all passed. The root-only logical reader used a short-lived
+    copied credential; the original `10001:10001` credential remained mode
+    `0500`/`0400` and the temporary copy was gone afterward.
+  - Recovery Caddy/Django passed over the recovery CA only: `/login/` returned
+    `200`, an unauthenticated protected request returned `302`, and the sole
+    port `8443` listener was `127.0.0.1` via the socket proxy. Caddy had only
+    `NET_BIND_SERVICE`, no Docker-published port, and the Docker bridge was
+    internal; Django retained `--cap-drop ALL`.
+  - The instance launched at `2026-08-09T08:18:50Z` and was terminated at
+    `2026-08-09T08:31:53Z` (13 minutes 03 seconds). This demonstrates the
+    automated path is within the 24-hour objective, but does **not** establish
+    full RTO acceptance because the owner-operated check below was not run.
+    Exact billed cost is not yet available; the only temporary usage was this
+    short-lived `t4g.small`, its encrypted 16-GiB root and 32-GiB clone, and an
+    ephemeral public IPv4.
+  - `cleanup-check` and an independent read-only audit both passed. The
+    operation's instance, clone and root volumes, ENI, security group, IAM
+    role/profile, and EIP association are absent; only AWS terminated-resource
+    history remains. The source snapshot remains complete/encrypted and the
+    source volume remains attached only to production.
+
+  The remaining hard pre-go-live recovery action is a named account owner using
+  the isolated SSM-tunnelled environment to sign in, open the protected
+  dashboard, and generate a representative CSV. Do not retrieve, reset, or
+  record an owner password to automate that action. No production deployment,
+  hardware qualification, production-signed APK, device enrollment/canary, or
+  owner-login proof is established by this drill.
 
 ## Important unresolved items and risks
 
@@ -143,11 +196,13 @@ or pushed.
    rollout.  Do not run `create_initial_owner` on this live database; it is a
    bootstrap-only command and will fail once a user exists.
 
-5. **Application-level restore smoke is still required.**  Authorize and run
-   a new isolated restore environment with the correct application secrets,
-   then prove owner login and a representative report.  Tear all temporary
-   resources down afterward and record timing/cost/evidence in
-   `docs/backup-restore.md`.
+5. **Owner-operated recovery smoke is still required.** The automated clone,
+   snapshot/logical restore, media, TLS, unauthenticated protected-route, and
+   cleanup checks are recorded above. A named owner must still sign in through
+   the isolated SSM tunnel, open the authenticated dashboard, and produce a
+   representative CSV without exposing credentials. Record that evidence in
+   `docs/backup-restore.md`; do not keep a recovery host running solely to wait
+   for the owner.
 
 6. **Physical hardware qualification is incomplete.**  Exact 10-inch pilot
    tablet model and firmware must have a `HardwareQualification` record with
@@ -175,10 +230,11 @@ capability.
 1. **Synchronize the local checkout deliberately.**  Check `git status`,
    `git fetch origin`, inspect the merge on `main`, and make any necessary
    handoff/document commit separately from the release commit.
-2. **Complete the isolated application restore smoke.**  Obtain explicit
-   authorization for any temporary cost, use production-equivalent secrets
-   only in the isolated environment, test owner login and one representative
-   report, then clean up and document evidence.
+2. **Complete and record the owner-operated recovery smoke.** Authorize a new
+   temporary isolated environment only when the named owner is available, then
+   use production-equivalent secrets only there to test owner login and one
+   representative report. Clean it up and append the evidence; do not reuse a
+   prior operation ID or recovery state key.
 3. **Complete real-device qualification.**  Record the exact model, firmware,
    evidence, and all required pass results before treating the Android build as
    releasable.
@@ -210,14 +266,15 @@ capability.
     evidence, monitor cost/backup status, and retain an explicit rollback
     decision for any failure.
 
-## Approved battery-backed Android player policy — locally implemented, not deployed
+## Approved battery-backed Android player policy — merged to `main`, not deployed
 
-This user-approved change is locally implemented in the current working tree.
-It is **not** in commit `c938d7c`, has passed local review and automated
-verification, has not been tested on the physical tablet, and remains pending
-release review, exact-hardware qualification, release signing, and authorized
-deployment. **No production database migration, image or APK
-deployment, device enrollment, or canary action has occurred for this policy.**
+This user-approved change is merged through [#26](https://github.com/czeyik/Digital-Signage-Project/pull/26),
+[#27](https://github.com/czeyik/Digital-Signage-Project/pull/27), and
+[#28](https://github.com/czeyik/Digital-Signage-Project/pull/28). It remains
+pending exact-hardware qualification, release signing, and authorized
+deployment. **No production database migration, image or APK deployment,
+device enrollment, hardware canary, or owner-login proof has occurred for this
+policy.**
 
 ### Locked product decisions
 
@@ -275,10 +332,10 @@ history, so it supplements heartbeat liveness rather than proving every device
 shutdown.  See the official [ActivityManager API](https://developer.android.com/reference/android/app/ActivityManager)
 and [ApplicationExitInfo API](https://developer.android.com/reference/android/app/ApplicationExitInfo).
 
-### Locally implemented scope and remaining validation
+### Merged scope and remaining validation
 
-The following policy changes are present locally. Backend checks (Ruff, Django
-checks, migration drift, development readiness, and `208 passed, 2 skipped`)
+The following policy changes are merged to `main`. Backend checks (Ruff, Django
+checks, migration drift, development readiness, and `209 passed, 2 skipped`)
 and Android Docker checks (16 JVM tests plus debug and AndroidTest Kotlin
 compilation) pass. Exact-hardware qualification, release review/signing, and
 authorized deployment remain required.
