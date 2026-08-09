@@ -273,12 +273,14 @@ create_web() {
 
 create_caddy() {
   install -d -o root -g root -m 0700 "$runtime_dir/caddy-data" "$runtime_dir/caddy-config"
+  # Required for Caddy under NNP.
   docker run -d \
     --name duducar-recovery-caddy \
     --restart no \
     --network "$network" \
     --log-driver journald \
     --cap-drop ALL \
+    --cap-add NET_BIND_SERVICE \
     --security-opt no-new-privileges:true \
     --pids-limit 128 \
     --memory 128m \
