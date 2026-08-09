@@ -26,6 +26,7 @@ reject_literal() {
 
 bash -n \
   "$root_dir/recovery-terraform" \
+  "$root_dir/test-recovery-media-query.sh" \
   "$root_dir/test-recovery-terraform-wrapper.sh" \
   "$root_dir/test-recovery-mount-journal-replay.sh" \
   "$root_dir/test-user-data-size.sh" \
@@ -36,6 +37,7 @@ bash -n \
 "$root_dir/test-user-data-size.sh"
 "$root_dir/test-recovery-terraform-wrapper.sh"
 "$root_dir/test-recovery-mount-journal-replay.sh"
+"$root_dir/test-recovery-media-query.sh"
 
 # State must be isolated even if an operator's terminal has inherited Terraform
 # state/workspace settings from a production command.
