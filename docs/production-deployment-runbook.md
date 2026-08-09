@@ -195,8 +195,8 @@ rollback_config_command=$(aws ssm send-command \
 
 Require `rollback_config_command` to reach `Success`, then render the restored
 runtime environment before any previous compatible stack deployment. Never use
-this mechanical configuration rollback after applying the battery-backed policy
-migration to select an older app image.
+this mechanical configuration rollback after applying the `0010`–`0011`
+battery-backed policy migration sequence to select an older app image.
 
 If the checked-in `Caddyfile.post-cutover` or `render-runtime-env` changed,
 also run the existing `production_runtime_asset_document` with its exact pinned
@@ -224,9 +224,10 @@ preflight in the change record; do not infer it from a database user count or a
 marketing-user login. The migration cannot restore marketing administrator
 flags or the terminated sessions.
 
-Before applying `0010_battery_backed_player_policy`, record in the change
-record the count and identities of active devices linked to qualifications that
-will become legacy/unapproved. Confirm, in the reviewed release and during the
+Before applying `0010_battery_backed_player_policy` and
+`0011_restore_hardware_rollback_columns`, record in the change record the
+count and identities of active devices linked to qualifications that will
+become legacy/unapproved. Confirm, in the reviewed release and during the
 maintenance window, that each affected device receives `maintenance` from sync
 until its exact model and firmware are requalified under the battery-backed
 criteria; enrollment-only qualification checks are insufficient for an
@@ -236,13 +237,22 @@ retired power-loss policy (including `repeated_power_loss` and
 triage and acknowledge them where appropriate. Preserve the historical alerts
 as evidence; do not silently close or delete them during the migration.
 
-`0010_battery_backed_player_policy` is not a normal old-image rollback point.
-Its legacy columns exist only for historic/read compatibility; they do not
-restore the former external-power policy or authorize a pre-policy image in
-production. After `0010` is recorded, keep the new image selected and resolve
-a code failure with a reviewed forward fix. A pre-policy image may be used only
-for read-only investigation against an isolated restored recovery point, never
-as a live rollback. Do not reverse the migration casually.
+In `0011_restore_hardware_rollback_columns`, the physical-column repair acts
+only for a database that received the superseded rename and is a no-op on the
+expected legacy physical-column layout. The migration itself must still run to
+invalidate incomplete re-approvals and add the database constraint for all
+current battery-policy qualification fields. It fails closed if the expected
+layout is ambiguous or missing; if it fails, stop and investigate rather than
+manually renaming columns.
+
+The `0010`–`0011` battery-backed policy sequence is not a normal old-image
+rollback point. Its legacy columns exist only for historic/read compatibility;
+they do not restore the former external-power policy or authorize a pre-policy
+image in production. After that sequence is recorded, keep the new image
+selected and resolve a code failure with a reviewed forward fix. A pre-policy
+image may be used only for read-only investigation against an isolated restored
+recovery point, never as a live rollback. Do not reverse the migrations
+casually.
 
 ```sh
 sudo /usr/local/sbin/duducar-command migrate
@@ -335,8 +345,8 @@ recovery time under 24 hours.
 For a code regression, use a reviewed forward fix and keep database migrations
 backward-compatible; never reverse a production migration casually. Before any
 schema migration, a guarded release-config rollback may restore its exact saved
-selection. After `0010_battery_backed_player_policy`, do **not** pin a
-pre-policy image as a normal live rollback: historic-column support is
+selection. After the `0010`–`0011` battery-backed policy sequence, do **not**
+pin a pre-policy image as a normal live rollback: historic-column support is
 old-image reads only on an isolated recovered data set, not restoration of the
 former policy. The safe live path is the released image or a reviewed forward
 fix. If media processing is implicated, stop new uploads and allow isolated
