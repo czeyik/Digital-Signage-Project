@@ -44,6 +44,13 @@ initialize this directory using `production/terraform.tfstate`.
   root or listener. Never use the cloned `/srv/duducar/docker`: it can contain
   production `--restart unless-stopped` metadata that would otherwise start
   cloned containers when Docker starts.
+- The downloaded logical archive and checksum stay in a root-only `0700`
+  directory with `0600` files. Only the catalogue and logical `pg_restore`
+  readers are explicitly run as container root; both remain read-only,
+  capability-free, and resource-limited. The catalogue reader has
+  `--network none`; the restore reader has only the internal recovery network,
+  no metadata access, and no `backend-secrets`, Docker-socket, or cloned-data
+  mount.
 - The recovery stack has its own `duducar-recovery-*` names and bridge network,
   no PostgreSQL host port, no systemd DUDU service, no timers, and an internal
   Docker network with no application-container egress. Caddy has one static

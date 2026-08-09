@@ -27,6 +27,7 @@ reject_literal() {
 bash -n \
   "$root_dir/recovery-terraform" \
   "$root_dir/test-recovery-media-query.sh" \
+  "$root_dir/test-recovery-logical-restore.sh" \
   "$root_dir/test-recovery-terraform-wrapper.sh" \
   "$root_dir/test-recovery-mount-journal-replay.sh" \
   "$root_dir/test-recovery-loopback-proxy.sh" \
@@ -39,6 +40,7 @@ bash -n \
 "$root_dir/test-recovery-terraform-wrapper.sh"
 "$root_dir/test-recovery-mount-journal-replay.sh"
 "$root_dir/test-recovery-media-query.sh"
+"$root_dir/test-recovery-logical-restore.sh"
 "$root_dir/test-recovery-loopback-proxy.sh"
 
 # State must be isolated even if an operator's terminal has inherited Terraform
@@ -155,6 +157,16 @@ web_container_definition=$(awk '
   in_web { print }
   in_web && /^}/ { exit }
 ' "$root_dir/runtime/duducar-recovery-stack")
+owner_command_definition=$(awk '
+  /^run_owner_command\(\) \{/ { in_owner = 1 }
+  in_owner { print }
+  in_owner && /^}/ { exit }
+' "$root_dir/runtime/duducar-recovery-restore")
+media_proof_definition=$(awk '
+  /^verify_media\(\) \{/ { in_media = 1 }
+  in_media { print }
+  in_media && /^}/ { exit }
+' "$root_dir/runtime/duducar-recovery-restore")
 if ! printf '%s\n' "$caddy_container_definition" | grep -Fq -- '--network "$network"'; then
   echo "Recovery Caddy must stay on the isolated recovery bridge." >&2
   exit 1
@@ -208,12 +220,33 @@ if ! printf '%s\n' "$web_container_definition" | grep -Eq '^[[:space:]]*--securi
   exit 1
 fi
 
+# Root inside a container is reserved for the two read-only pg_restore archive
+# readers. Do not widen it to dashboard/migration, media, or Caddy helpers.
+restore_helper="$root_dir/runtime/duducar-recovery-restore"
+if [ "$(grep -Fc -- '--user 0:0' "$restore_helper")" -ne 2 ]; then
+  echo "Recovery restore must contain exactly two root archive-reader identities." >&2
+  exit 1
+fi
+if grep -Fq -- '--user root' "$restore_helper" "$root_dir/runtime/duducar-recovery-stack" || \
+   printf '%s\n%s\n%s\n%s\n' "$owner_command_definition" "$media_proof_definition" "$web_container_definition" "$caddy_container_definition" | grep -Fq -- '--user 0:0'; then
+  echo "Recovery root identity must not widen beyond the dedicated archive readers." >&2
+  exit 1
+fi
+
 # The media proof must bind an exact S3 version to both preflight evidence and
 # the record recovered from the clone; no production hostname may be used.
 require_literal '--version-id "$SOURCE_MEDIA_VERSION_ID"' "$root_dir/runtime/duducar-recovery-restore"
 require_literal 'SOURCE_MEDIA_SHA256' "$root_dir/runtime/duducar-recovery-restore"
 require_literal 'SOURCE_MEDIA_SIZE_BYTES' "$root_dir/runtime/duducar-recovery-restore"
 require_literal 'python manage.py shell --no-imports -c' "$root_dir/runtime/duducar-recovery-restore"
+# Exact logical backups stay root-only on the host. The dedicated behavioural
+# check verifies the only two root-in-container readers remain capless and
+# read-only, while normal Django helpers retain their image-configured user.
+require_literal 'install -d -o root -g root -m 0700 "$archive_dir"' "$root_dir/runtime/duducar-recovery-restore"
+require_literal 'chmod 0600 "$archive_path" "$sidecar_path"' "$root_dir/runtime/duducar-recovery-restore"
+require_literal '--network none' "$root_dir/runtime/duducar-recovery-restore"
+require_literal '--env AWS_EC2_METADATA_DISABLED=true' "$root_dir/runtime/duducar-recovery-restore"
+require_literal 'test-recovery-logical-restore.sh' "$root_dir/test-static-guardrails.sh"
 require_literal 'ReadOnlyExactArchiveVersion' "$root_dir/main.tf"
 require_literal 'ReadOnlyExactArchiveSidecarVersion' "$root_dir/main.tf"
 require_literal 'ReadOnlyExactNormalizedMediaVersion' "$root_dir/main.tf"
