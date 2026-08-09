@@ -27,6 +27,7 @@ reject_literal() {
 bash -n \
   "$root_dir/recovery-terraform" \
   "$root_dir/test-recovery-terraform-wrapper.sh" \
+  "$root_dir/test-recovery-mount-journal-replay.sh" \
   "$root_dir/test-user-data-size.sh" \
   "$root_dir/runtime/duducar-recovery-mount" \
   "$root_dir/runtime/duducar-recovery-restore" \
@@ -34,6 +35,7 @@ bash -n \
   "$root_dir/runtime/render-recovery-runtime-env"
 "$root_dir/test-user-data-size.sh"
 "$root_dir/test-recovery-terraform-wrapper.sh"
+"$root_dir/test-recovery-mount-journal-replay.sh"
 
 # State must be isolated even if an operator's terminal has inherited Terraform
 # state/workspace settings from a production command.
@@ -54,7 +56,10 @@ reject_literal 'resourcegroupstaggingapi get-resources' "$root_dir/recovery-terr
 require_literal 'get-role --role-name' "$root_dir/recovery-terraform"
 require_literal 'get-instance-profile --instance-profile-name' "$root_dir/recovery-terraform"
 require_literal 'recovery_asset_bundle' "$root_dir/main.tf"
+require_literal 'recovery_assets_raw = local.recovery_asset_bundle' "$root_dir/main.tf"
 require_literal 'install_bundle_asset' "$root_dir/recovery-bootstrap.sh.tftpl"
+require_literal "<<'__DUDUCAR_RECOVERY_ASSET_BUNDLE_EOF_V1__'" "$root_dir/recovery-bootstrap.sh.tftpl"
+reject_literal 'recovery_assets_b64' "$root_dir/recovery-bootstrap.sh.tftpl"
 # AL2023 already provides AWS CLI v2 as awscli-2. A nonexistent package name
 # must not make cloud-init terminate before it installs the recovery helpers.
 reject_literal 'awscli2' "$root_dir/recovery-bootstrap.sh.tftpl"
@@ -67,6 +72,15 @@ require_literal 'mount -o ro,nouuid,norecovery,nodev,nosuid' "$root_dir/runtime/
 require_literal 'xfs_repair -n "$device"' "$root_dir/runtime/duducar-recovery-mount"
 require_literal 'require_inspection_receipt' "$root_dir/runtime/duducar-recovery-mount"
 require_literal 'verify_mounted_clone' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'replay-journal)' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'REPLAY-JOURNAL $RECOVERY_OPERATION_ID' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'journal_replay_required' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'journal_replayed_clean' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'assert_docker_quarantined' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'assert_clone_unmounted_everywhere' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'rw,nouuid,nodev,nosuid,noexec,noatime' "$root_dir/runtime/duducar-recovery-mount"
+require_literal 'post_replay_xfs_log' "$root_dir/runtime/duducar-recovery-mount"
+reject_literal 'xfs_repair -L' "$root_dir/runtime/duducar-recovery-mount"
 require_literal 'duducar-recovery-mount verify-mounted' "$root_dir/runtime/duducar-recovery-stack"
 require_literal 'duducar-recovery-mount verify-mounted' "$root_dir/runtime/duducar-recovery-restore"
 require_literal 'duducar-recovery-mount verify-mounted' "$root_dir/runtime/render-recovery-runtime-env"

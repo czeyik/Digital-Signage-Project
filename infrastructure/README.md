@@ -149,6 +149,21 @@ use its recovery-only local Docker data-root and recovery runtime/Caddy
 configuration before Docker starts; do not run the normal production stack
 helper against the clone.
 
+Because a DLM snapshot is crash-consistent, its XFS journal can require replay.
+Use only `duducar-recovery-mount inspect` for the initial read-only
+`nouuid,norecovery` check. A clean inspection permits the helper's normal
+`mount`; the helper's recognized pending dirty-log result instead requires the
+explicit, operation-bound confirmation `replay-journal --confirm
+"REPLAY-JOURNAL <operation-id>"`. That helper keeps Docker's service and socket
+masked and inactive, confirms the clone is unmounted, mounts only the
+disposable clone briefly at a temporary directory to replay its journal, then
+requires a clean post-replay `xfs_repair -n` before allowing the normal clone
+mount. Never mount the recovery device directly, add it to `/etc/fstab`, or
+run `xfs_repair -L`. Journal replay writes only the disposable clone: it cannot
+change the source snapshot, source volume, production host, or production data
+plane. The detailed operation procedure is in
+[`infrastructure/recovery-smoke/README.md`](recovery-smoke/README.md).
+
 The recovery Caddy listener uses recovery-only TLS, a loopback bind, and an
 operation-specific reserved `.test` hostname. Open it only through the root's
 SSM port-forward output and map only that hostname locally; do not create DNS,
