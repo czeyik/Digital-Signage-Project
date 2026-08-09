@@ -19,25 +19,44 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RenameField(
-            model_name="hardwarequalification",
-            old_name="boot_on_power_passed",
-            new_name="legacy_boot_on_vehicle_power_passed",
-        ),
-        migrations.RenameField(
-            model_name="hardwarequalification",
-            old_name="power_loss_path_passed",
-            new_name="legacy_external_power_loss_path_passed",
-        ),
-        migrations.AlterField(
-            model_name="hardwarequalification",
-            name="legacy_boot_on_vehicle_power_passed",
-            field=models.BooleanField(default=False, editable=False),
-        ),
-        migrations.AlterField(
-            model_name="hardwarequalification",
-            name="legacy_external_power_loss_path_passed",
-            field=models.BooleanField(default=False, editable=False),
+        # The Python field names change under the battery-backed policy, but
+        # the physical columns intentionally retain their pre-policy names.
+        # A pre-0010 web image can therefore read the historic results only in
+        # an isolated, read-only investigation.  It is not a supported live
+        # rollback target, and the data is not part of
+        # HardwareQualification.REQUIRED_PASS_FIELDS.
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=[
+                migrations.RenameField(
+                    model_name="hardwarequalification",
+                    old_name="boot_on_power_passed",
+                    new_name="legacy_boot_on_vehicle_power_passed",
+                ),
+                migrations.RenameField(
+                    model_name="hardwarequalification",
+                    old_name="power_loss_path_passed",
+                    new_name="legacy_external_power_loss_path_passed",
+                ),
+                migrations.AlterField(
+                    model_name="hardwarequalification",
+                    name="legacy_boot_on_vehicle_power_passed",
+                    field=models.BooleanField(
+                        db_column="boot_on_power_passed",
+                        default=False,
+                        editable=False,
+                    ),
+                ),
+                migrations.AlterField(
+                    model_name="hardwarequalification",
+                    name="legacy_external_power_loss_path_passed",
+                    field=models.BooleanField(
+                        db_column="power_loss_path_passed",
+                        default=False,
+                        editable=False,
+                    ),
+                ),
+            ],
         ),
         migrations.AddField(
             model_name="hardwarequalification",

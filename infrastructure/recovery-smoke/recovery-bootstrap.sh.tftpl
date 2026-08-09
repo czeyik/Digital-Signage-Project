@@ -1,0 +1,131 @@
+#!/bin/bash
+set -euo pipefail
+umask 0077
+
+# This is deliberately not the production bootstrap. It never mounts the clone,
+# starts Docker, enables DUDU units/timers, configures an EIP/DNS record, or
+# writes a production runtime asset. The operator performs read-only XFS
+# inspection through SSM before explicitly mounting the clone.
+
+export AWS_DEFAULT_REGION="$(printf '%s' '${aws_region_b64}' | base64 -d)"
+
+systemctl mask docker.service docker.socket >/dev/null 2>&1 || true
+dnf install -y docker gzip jq openssl xfsprogs awscli2
+systemctl enable --now amazon-ssm-agent
+systemctl stop docker.service docker.socket >/dev/null 2>&1 || true
+systemctl disable docker.service docker.socket >/dev/null 2>&1 || true
+systemctl mask docker.service docker.socket >/dev/null
+
+install -d -o root -g root -m 0755 /etc/docker /etc/duducar-recovery/postgres-init
+install -d -o root -g root -m 0700 /var/lib/duducar-recovery /var/lib/duducar-recovery/docker
+install -d -o root -g root -m 0700 /run/duducar-recovery
+
+cat > /etc/docker/daemon.json <<'EOF'
+{
+  "data-root": "/var/lib/duducar-recovery/docker",
+  "log-driver": "journald",
+  "live-restore": true,
+  "no-new-privileges": true
+}
+EOF
+
+write_config_value() {
+  local key=$1
+  local encoded=$2
+  local value
+  value=$(printf '%s' "$encoded" | base64 -d)
+  # Bash's %q produces a source-safe assignment even if a future opaque S3
+  # version ID contains shell metacharacters. No tfvars value is emitted as
+  # unquoted shell code into the root-owned configuration files.
+  printf '%s=%q\n' "$key" "$value"
+}
+
+{
+  write_config_value AWS_REGION '${aws_region_b64}'
+  write_config_value RECOVERY_OPERATION_ID '${operation_id_b64}'
+  write_config_value RECOVERY_DATA_VOLUME_ID '${data_volume_id_b64}'
+  write_config_value APPLICATION_SECRET_ARN '${application_secret_arn_b64}'
+  write_config_value AWS_STORAGE_BUCKET_NAME '${media_bucket_name_b64}'
+  write_config_value PILOT_BACKUP_SOURCE_BUCKET '${backup_bucket_name_b64}'
+  # This reserved hostname has no production DNS record and changes with the
+  # operation ID, preventing the smoke from sharing browser cookies with the
+  # live dashboard. Its explicit Caddy port is part of the CSRF Origin.
+  write_config_value DJANGO_ALLOWED_HOSTS '${django_allowed_hosts_b64}'
+  write_config_value DJANGO_CSRF_TRUSTED_ORIGINS '${django_csrf_trusted_origins_b64}'
+  write_config_value REQUIRED_APP_VERSION '${required_app_version_b64}'
+  write_config_value PLAY_INTEGRITY_PROJECT_NUMBER '${play_integrity_project_number_b64}'
+  write_config_value AWS_S3_CUSTOM_DOMAIN '${cloudfront_domain_b64}'
+  write_config_value AWS_CLOUDFRONT_KEY_ID '${cloudfront_public_key_id_b64}'
+  write_config_value RECOVERY_HOSTNAME '${recovery_hostname_b64}'
+  write_config_value RECOVERY_CADDY_PORT '${recovery_caddy_port_b64}'
+  write_config_value SOURCE_SNAPSHOT_ID '${source_snapshot_id_b64}'
+  write_config_value SOURCE_DATA_VOLUME_ID '${source_data_volume_id_b64}'
+  write_config_value SOURCE_ARCHIVE_KEY '${source_archive_key_b64}'
+  write_config_value SOURCE_ARCHIVE_VERSION_ID '${source_archive_version_id_b64}'
+  write_config_value SOURCE_SIDECAR_KEY '${source_sidecar_key_b64}'
+  write_config_value SOURCE_SIDECAR_VERSION_ID '${source_sidecar_version_id_b64}'
+  write_config_value SOURCE_MEDIA_KEY '${source_media_key_b64}'
+  write_config_value SOURCE_MEDIA_VERSION_ID '${source_media_version_id_b64}'
+  write_config_value SOURCE_MEDIA_SHA256 '${source_media_sha256_b64}'
+  write_config_value SOURCE_MEDIA_SIZE_BYTES '${source_media_size_bytes_b64}'
+} > /etc/duducar-recovery/host.env
+chown root:root /etc/duducar-recovery/host.env
+chmod 0600 /etc/duducar-recovery/host.env
+
+{
+  write_config_value BACKEND_IMAGE '${backend_image_b64}'
+  write_config_value POSTGRES_IMAGE '${postgres_image_b64}'
+  write_config_value CADDY_IMAGE '${caddy_image_b64}'
+} > /etc/duducar-recovery/release.env
+chown root:root /etc/duducar-recovery/release.env
+chmod 0600 /etc/duducar-recovery/release.env
+
+recovery_asset_separator='__DUDUCAR_RECOVERY_ASSET_SEPARATOR_V1__'
+recovery_asset_bundle=$(mktemp /var/lib/duducar-recovery/assets.XXXXXX)
+printf '%s' '${recovery_assets_b64}' | base64 -d | gzip -d > "$recovery_asset_bundle"
+asset_count=$(awk -v separator="$recovery_asset_separator" 'BEGIN { RS = "\n" separator "\n" } END { print NR }' "$recovery_asset_bundle")
+if [ "$asset_count" != 8 ]; then
+  echo "Recovery runtime asset bundle has an unexpected record count: $asset_count" >&2
+  exit 1
+fi
+
+install_bundle_asset() {
+  record=$1
+  destination=$2
+  mode=$3
+  if ! awk -v separator="$recovery_asset_separator" -v record="$record" '
+    BEGIN { RS = "\n" separator "\n" }
+    NR == record { printf "%s", $0; found = 1; exit }
+    END { if (!found) exit 1 }
+  ' "$recovery_asset_bundle" > "$destination"; then
+    echo "Recovery runtime asset record $record could not be extracted." >&2
+    exit 1
+  fi
+  chown root:root "$destination"
+  chmod "$mode" "$destination"
+}
+
+install_bundle_asset 1 /etc/duducar-recovery/pg_hba.conf 0644
+install_bundle_asset 2 /etc/duducar-recovery/postgres-init/postgres-init-roles.sh 0555
+install_bundle_asset 3 /etc/duducar-recovery/postgres-init/postgres-runtime-grants.sql 0444
+install_bundle_asset 4 /etc/duducar-recovery/Caddyfile.recovery 0644
+install_bundle_asset 5 /usr/local/sbin/duducar-recovery-mount 0750
+install_bundle_asset 6 /usr/local/sbin/render-recovery-runtime-env 0750
+install_bundle_asset 7 /usr/local/sbin/duducar-recovery-stack 0750
+install_bundle_asset 8 /usr/local/sbin/duducar-recovery-restore 0750
+rm -f "$recovery_asset_bundle"
+
+recovery_hostname=$(printf '%s' '${recovery_hostname_b64}' | base64 -d)
+recovery_caddy_port=$(printf '%s' '${recovery_caddy_port_b64}' | base64 -d)
+sed -i \
+  -e "s/__RECOVERY_HOSTNAME__/$recovery_hostname/g" \
+  -e "s/__RECOVERY_CADDY_PORT__/$recovery_caddy_port/g" \
+  /etc/duducar-recovery/Caddyfile.recovery
+
+bash -n /usr/local/sbin/duducar-recovery-mount
+bash -n /usr/local/sbin/render-recovery-runtime-env
+bash -n /usr/local/sbin/duducar-recovery-stack
+bash -n /usr/local/sbin/duducar-recovery-restore
+
+touch /var/lib/duducar-recovery/bootstrap-complete
+echo 'DUDU recovery-smoke bootstrap completed. Docker remains masked until the clone passes read-only inspection.'

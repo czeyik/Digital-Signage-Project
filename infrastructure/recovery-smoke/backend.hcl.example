@@ -1,0 +1,10 @@
+# Reference only. Do not pass this file directly to Terraform: use
+# ./recovery-terraform init --operation-id <operation-id>, which writes and
+# verifies these fixed settings before any recovery plan/apply/destroy.
+# Never use production/terraform.tfstate from infrastructure/terraform/backend.hcl.
+bucket       = "duducar-signage-terraform-state-173454940059"
+key          = "recovery-smoke/0123456789abcdef0123456789abcdef.tfstate"
+region       = "ap-southeast-5"
+encrypt      = true
+use_lockfile = true
+profile      = "dudu-production"

@@ -1,0 +1,232 @@
+#!/bin/bash
+set -euo pipefail
+umask 0077
+
+host_config=/etc/duducar-recovery/host.env
+release_config=/etc/duducar-recovery/release.env
+runtime_dir=/run/duducar-recovery
+archive_dir=/var/lib/duducar-recovery/archives
+network=duducar-recovery
+
+for config in "$host_config" "$release_config"; do
+  if [ ! -r "$config" ]; then
+    echo "Missing recovery configuration: $config" >&2
+    exit 1
+  fi
+done
+
+/usr/local/sbin/duducar-recovery-mount verify-mounted >/dev/null
+
+set -a
+source "$host_config"
+source "$release_config"
+set +a
+
+archive_name=${SOURCE_ARCHIVE_KEY##*/}
+sidecar_name=${SOURCE_SIDECAR_KEY##*/}
+archive_path="$archive_dir/$archive_name"
+sidecar_path="$archive_dir/$sidecar_name"
+media_path="$archive_dir/selected-normalized-media"
+
+download_and_verify() {
+  # pg_restore comes from the reviewed immutable backend image. Starting the
+  # database helper first also proves Docker is using its recovery-only root
+  # before any downloaded archive is inspected.
+  /usr/local/sbin/duducar-recovery-stack database
+  install -d -o root -g root -m 0700 "$archive_dir"
+  rm -f "$archive_path" "$sidecar_path"
+  aws s3api get-object \
+    --region "$AWS_REGION" \
+    --bucket "$PILOT_BACKUP_SOURCE_BUCKET" \
+    --key "$SOURCE_ARCHIVE_KEY" \
+    --version-id "$SOURCE_ARCHIVE_VERSION_ID" \
+    "$archive_path" >/dev/null
+  aws s3api get-object \
+    --region "$AWS_REGION" \
+    --bucket "$PILOT_BACKUP_SOURCE_BUCKET" \
+    --key "$SOURCE_SIDECAR_KEY" \
+    --version-id "$SOURCE_SIDECAR_VERSION_ID" \
+    "$sidecar_path" >/dev/null
+  chmod 0600 "$archive_path" "$sidecar_path"
+  (
+    cd "$archive_dir"
+    sha256sum --check --strict "$sidecar_name"
+  )
+  docker run --rm \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --volume "$archive_dir:/backups:ro" \
+    --entrypoint pg_restore \
+    "$BACKEND_IMAGE" \
+    --list "/backups/$archive_name" >/dev/null
+  echo "Exact versioned archive and sidecar verified locally."
+}
+
+run_owner_command() {
+  docker run --rm \
+    --network "$network" \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
+    --env-file "$runtime_dir/application.env" \
+    --env DB_NAME=signage \
+    --env DB_USER=signage_owner \
+    --env DB_PASSWORD_FILE=/run/duducar-recovery/database-owner/database-owner-password \
+    --env AWS_EC2_METADATA_DISABLED=true \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m \
+    --volume "$runtime_dir/backend-secrets:/run/duducar-recovery/backend-secrets:ro" \
+    --volume "$runtime_dir/database-owner:/run/duducar-recovery/database-owner:ro" \
+    "$BACKEND_IMAGE" \
+    python manage.py "$@"
+}
+
+verify_media() {
+  # Query the restored database only after the recovery database helper has
+  # re-validated the inspected clone and isolated Docker data-root.
+  /usr/local/sbin/duducar-recovery-stack database
+  install -d -o root -g root -m 0700 "$archive_dir"
+  rm -f "$media_path"
+  aws s3api get-object \
+    --region "$AWS_REGION" \
+    --bucket "$AWS_STORAGE_BUCKET_NAME" \
+    --key "$SOURCE_MEDIA_KEY" \
+    --version-id "$SOURCE_MEDIA_VERSION_ID" \
+    "$media_path" >/dev/null
+  chmod 0600 "$media_path"
+
+  local_sha256=$(sha256sum "$media_path" | awk '{print $1}')
+  local_size=$(stat -c '%s' "$media_path")
+  database_metadata=$(docker run --rm \
+    --network "$network" \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
+    --env-file "$runtime_dir/application.env" \
+    --env DB_NAME=signage \
+    --env DB_USER=signage_owner \
+    --env DB_PASSWORD_FILE=/run/duducar-recovery/database-owner/database-owner-password \
+    --env AWS_EC2_METADATA_DISABLED=true \
+    --env RECOVERY_SOURCE_MEDIA_KEY="$SOURCE_MEDIA_KEY" \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m \
+    --volume "$runtime_dir/backend-secrets:/run/duducar-recovery/backend-secrets:ro" \
+    --volume "$runtime_dir/database-owner:/run/duducar-recovery/database-owner:ro" \
+    "$BACKEND_IMAGE" \
+    python manage.py shell -c '
+import json
+import os
+from signage.models import MediaAsset
+
+key = os.environ["RECOVERY_SOURCE_MEDIA_KEY"]
+assets = list(MediaAsset.objects.filter(normalized_file=key))
+if len(assets) != 1:
+    raise SystemExit(f"expected exactly one MediaAsset for normalized_file={key!r}, found {len(assets)}")
+asset = assets[0]
+if asset.status != MediaAsset.Status.READY:
+    raise SystemExit(f"MediaAsset {asset.pk} is not ready: {asset.status}")
+if asset.normalized_file.name != key:
+    raise SystemExit("MediaAsset normalized file does not match the selected object key")
+if len(asset.sha256) != 64 or asset.file_size < 1:
+    raise SystemExit("MediaAsset lacks a normalized SHA-256 or positive file size")
+print(json.dumps({"file_size": asset.file_size, "normalized_file": asset.normalized_file.name, "sha256": asset.sha256}, sort_keys=True))
+')
+  database_key=$(jq -er '.normalized_file | strings' <<<"$database_metadata")
+  database_sha256=$(jq -er '.sha256 | strings' <<<"$database_metadata")
+  database_size=$(jq -er '.file_size | numbers | floor' <<<"$database_metadata")
+
+  if [ "$database_key" != "$SOURCE_MEDIA_KEY" ] || \
+     [ "$database_sha256" != "$local_sha256" ] || \
+     [ "$database_size" != "$local_size" ] || \
+     [ "$local_sha256" != "$SOURCE_MEDIA_SHA256" ] || \
+     [ "$local_size" != "$SOURCE_MEDIA_SIZE_BYTES" ]; then
+    echo "Selected normalized media does not match both preflight evidence and restored MediaAsset metadata." >&2
+    exit 1
+  fi
+  echo "Exact versioned normalized media matches preflight evidence and the restored MediaAsset key, SHA-256, and file size."
+}
+
+restore_logical() {
+  download_and_verify
+  /usr/local/sbin/duducar-recovery-stack stop
+  /usr/local/sbin/duducar-recovery-stack database
+
+  # This is the literal cloned database only. The source snapshot and live
+  # production database are never attached to this host.
+  docker exec --user postgres duducar-recovery-postgres \
+    psql -X --set ON_ERROR_STOP=1 --username duducar_admin --dbname postgres \
+    --command 'DROP DATABASE signage WITH (FORCE)' \
+    --command 'CREATE DATABASE signage OWNER signage_owner TEMPLATE template0' \
+    --command 'REVOKE ALL ON DATABASE signage FROM PUBLIC' \
+    --command 'GRANT CONNECT ON DATABASE signage TO signage_owner, signage_app'
+  docker exec duducar-recovery-postgres \
+    psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \
+    --file /run/postgres-config/runtime-grants.sql
+
+  docker run --rm \
+    --network "$network" \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
+    --env PGHOST=duducar-recovery-postgres \
+    --env PGPORT=5432 \
+    --env PGDATABASE=signage \
+    --env PGUSER=signage_owner \
+    --env PGSSLMODE=require \
+    --env RESTORE_ARCHIVE="/backups/$archive_name" \
+    --volume "$archive_dir:/backups:ro" \
+    --volume "$runtime_dir/database-owner:/run/duducar-recovery/database-owner:ro" \
+    --entrypoint /bin/sh \
+    "$BACKEND_IMAGE" \
+    -ec 'export PGPASSWORD="$(cat /run/duducar-recovery/database-owner/database-owner-password)"; exec pg_restore --exit-on-error --single-transaction --no-owner --no-privileges --dbname="$PGDATABASE" "$RESTORE_ARCHIVE"'
+
+  docker exec duducar-recovery-postgres \
+    psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \
+    --file /run/postgres-config/runtime-grants.sql
+  run_owner_command migrate --noinput
+  docker exec duducar-recovery-postgres \
+    psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \
+    --file /run/postgres-config/runtime-grants.sql
+  run_owner_command migrate --check
+  echo "Logical archive restored into the disposable clone. Start the recovery stack for the login/report smoke."
+}
+
+prepare_snapshot_schema() {
+  /usr/local/sbin/duducar-recovery-stack database
+  docker exec duducar-recovery-postgres \
+    psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \
+    --file /run/postgres-config/runtime-grants.sql
+  run_owner_command migrate --noinput
+  docker exec duducar-recovery-postgres \
+    psql --set ON_ERROR_STOP=1 --username duducar_admin --dbname signage \
+    --file /run/postgres-config/runtime-grants.sql
+  run_owner_command migrate --check
+  echo "Snapshot clone schema is prepared for the recovery application smoke."
+}
+
+case "${1:-}" in
+  verify)
+    download_and_verify
+    ;;
+  snapshot-schema)
+    prepare_snapshot_schema
+    ;;
+  logical)
+    restore_logical
+    ;;
+  media)
+    verify_media
+    ;;
+  *)
+    echo "Usage: duducar-recovery-restore {verify|snapshot-schema|logical|media}" >&2
+    exit 2
+    ;;
+esac

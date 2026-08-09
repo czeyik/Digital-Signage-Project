@@ -1,0 +1,19 @@
+# Recovery-only Caddy configuration. Terraform substitutes the two placeholders
+# during bootstrap. It has no ACME issuer and is only published on host loopback
+# by duducar-recovery-stack.
+{
+	admin off
+	local_certs
+}
+
+https://__RECOVERY_HOSTNAME__:__RECOVERY_CADDY_PORT__ {
+	tls internal
+
+	reverse_proxy duducar-recovery-web:8000 {
+		header_up Host __RECOVERY_HOSTNAME__
+		header_up X-Forwarded-Host __RECOVERY_HOSTNAME__
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-Proto https
+	}
+}

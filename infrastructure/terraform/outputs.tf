@@ -3,6 +3,16 @@ output "ecr_repository_url" {
   value       = aws_ecr_repository.backend.repository_url
 }
 
+output "production_backend_image" {
+  description = "Reviewed digest-pinned backend image that the EC2 release configuration and isolated media worker must use together."
+  value       = var.container_image
+}
+
+output "production_required_app_version" {
+  description = "Exact semantic Android version required by the reviewed production backend release."
+  value       = var.required_app_version
+}
+
 output "application_secret_arn" {
   description = "Runtime secret read by the EC2 host and isolated media worker."
   value       = aws_secretsmanager_secret.application.arn
@@ -151,4 +161,29 @@ output "production_runtime_asset_sha256" {
     environment_render = local.ec2_runtime_renderer_sha256
     operation_manager  = local.ec2_runtime_manager_sha256
   }
+}
+
+output "production_release_config_document" {
+  description = "SSM document that atomically updates only the pinned backend image and required Android app version."
+  value       = try(aws_ssm_document.ec2_release_config[0].name, null)
+}
+
+output "production_release_config_document_version" {
+  description = "Exact SSM document version to pin during release configuration validation, installation, and rollback."
+  value       = try(aws_ssm_document.ec2_release_config[0].document_version, null)
+}
+
+output "production_release_config_document_hash" {
+  description = "AWS-generated hash to pin for the release configuration SSM document."
+  value       = try(aws_ssm_document.ec2_release_config[0].hash, null)
+}
+
+output "production_release_config_document_hash_type" {
+  description = "Hash algorithm for the pinned release configuration SSM document."
+  value       = try(aws_ssm_document.ec2_release_config[0].hash_type, null)
+}
+
+output "production_release_config_manager_sha256" {
+  description = "Reviewed SHA-256 for the host-side release configuration manager staged by the SSM document."
+  value       = local.ec2_release_config_manager_sha256
 }

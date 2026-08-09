@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from django.apps import apps as django_apps
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.management import CommandError, call_command
+from django.db import IntegrityError, transaction
 from django.test import Client, override_settings
 from storages.backends.s3 import S3Storage
 
@@ -123,6 +124,31 @@ def test_hardware_legacy_power_results_cannot_satisfy_new_battery_gates():
     assert not HardwareQualification._meta.get_field(
         "legacy_external_power_loss_path_passed"
     ).editable
+
+
+@pytest.mark.django_db
+def test_database_blocks_legacy_policy_hardware_reapproval():
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    qualification = HardwareQualification.objects.create(
+        model_name="Legacy Example 10",
+        firmware_version="1.0",
+        android_version="13",
+        tested_by=owner,
+        test_date=date.today(),
+        evidence_reference="internal://hardware/legacy-example-10",
+        legacy_boot_on_vehicle_power_passed=True,
+        legacy_external_power_loss_path_passed=True,
+    )
+
+    with transaction.atomic():
+        with pytest.raises(IntegrityError):
+            HardwareQualification.objects.filter(pk=qualification.pk).update(
+                approved_for_pilot=True
+            )
 
 
 @pytest.mark.django_db

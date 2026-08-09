@@ -23,5 +23,7 @@ android-player/**/build/
 *.tfplan
 infrastructure/terraform/backend.hcl
 infrastructure/terraform/terraform.tfvars
+infrastructure/recovery-smoke/backend.hcl
+infrastructure/recovery-smoke/terraform.tfvars
 infrastructure/**/.terraform/
 .vscode/

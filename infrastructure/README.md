@@ -97,6 +97,75 @@ The `infrastructure/bootstrap` stack only owns the versioned remote-state
 bucket. Do not rerun its original account bootstrap as an application
 deployment procedure.
 
+## Isolated application recovery smoke
+
+The application-level restore gate uses the separate
+`infrastructure/recovery-smoke` Terraform root, not a workspace or target of
+the production root. Each authorised drill has a fresh 32-hex-character
+operation ID and its own encrypted, locked state key:
+
+```text
+recovery-smoke/<operation-id>.tfstate
+```
+
+Initialize it only through its mandatory wrapper; it fixes and verifies the
+backend metadata/default workspace before every stateful command. The Terraform
+guardrail is a second check for the normal local data directory; the wrapper is
+what prevents Terraform environment indirection. Never initialize this root
+against `production/terraform.tfstate`:
+
+```sh
+./infrastructure/recovery-smoke/recovery-terraform init \
+  --operation-id "$recovery_operation_id"
+```
+
+The recovery root accepts explicit source snapshot, source-volume, archive,
+sidecar, and normalized-media version identifiers, plus the reviewed recovery
+subnet, KMS/secret ARNs, ARM64 AMI, and digest-pinned images. Account, Region,
+Project tag, recovery hostname, and backend ECR repository are fixed in the
+root rather than accepted from tfvars. It must not use production Terraform
+state as an input. Its outputs identify the temporary instance, clone, security
+group, instance profile, operation ID, recovery-only TLS hostname/CA path, an
+SSM port-forward command, and a tagged-resource cleanup query.
+
+Before an authorised apply, review the saved plan for all of these non-negotiable
+properties:
+
+- each temporary resource is tagged with the exact operation ID;
+- the recovery security group has **zero ingress**, no Elastic IP/DNS/public
+  listener exists, and its ordinary ephemeral public IPv4 is used only for
+  outbound HTTPS because the public subnet has no NAT or interface endpoints;
+  Systems Manager is the only administrative path;
+- the temporary role can read only the selected versioned backup/media objects,
+  application secret, ECR images, and SSM channels, but has no production
+  write capability; and
+- no production host, data volume, snapshot, backup object/version, Route 53
+  record, IAM role, or production state object will change.
+
+The clone includes `/srv/duducar/docker`, the normal production Docker
+data-root. Pointing Docker at that copied directory can automatically restart
+cloned containers under their saved restart policies. The recovery root must
+use its recovery-only local Docker data-root and recovery runtime/Caddy
+configuration before Docker starts; do not run the normal production stack
+helper against the clone.
+
+The recovery Caddy listener uses recovery-only TLS, a loopback bind, and an
+operation-specific reserved `.test` hostname. Open it only through the root's
+SSM port-forward output and map only that hostname locally; do not create DNS,
+expose a public port, use production hostnames/certificates, or convert the
+smoke test into a traffic cutover. Disable all application timers and never run
+the production backup command: this drill must not write a backup, media
+object, alert, email, task, or other mutation to production.
+
+The root deliberately does not auto-clean temporary resources. After the
+owner-login and representative-report smoke passes, confirm a
+`DESTROY <operation-id>` prompt, destroy only that recovery root, and execute
+its `recovery_cleanup_query` output. Then run the wrapper's `cleanup-check`,
+which verifies the guarded account plus taggable resources and the named
+temporary IAM role/profile. Retain the empty per-operation state path and
+cleanup result as evidence. The full preflight, restore, TLS-tunnel test, and
+cleanup procedure is in [`docs/backup-restore.md`](../docs/backup-restore.md).
+
 ## Build and release
 
 The backend image must be built for ARM64, pushed to the existing ECR
@@ -113,6 +182,27 @@ CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover
 
 `Caddyfile.preflight` and `Caddyfile.production` are retired migration
 artifacts. The checked-in runtime helper refuses to use them.
+
+Never hand-edit or copy `/etc/duducar/release.env`. The dedicated
+`production_release_config_document` is the only reviewed path to change
+`BACKEND_IMAGE` and `REQUIRED_APP_VERSION`: it accepts a digest only from the
+reviewed backend ECR repository and a semantic Android version only when both
+exactly match the Terraform release selection embedded in the document. It
+atomically changes only those two assignments, preserves a root-only operation
+backup, and does not print the configuration or restart a service. The required
+app version must equal the signed APK version name. Use the exact pinned Terraform/SSM
+`Mode=validate`, `Mode=install`, status-polling, confirmation, and rollback
+procedure in the [production deployment runbook](../docs/production-deployment-runbook.md#deploy-the-ec2-release).
+Record the full commit, document version and hash, command IDs, digest, app
+version, and one 32-hex operation ID.
+
+The mechanical release-config rollback is permitted only before any schema
+migration begins and only with the same document inputs and operation ID; it
+restores its matching saved file and is not a data rollback. Once
+`0010_battery_backed_player_policy` is recorded, old-image compatibility is
+read-only on an isolated recovery data set only. It does not restore the former
+external-power policy or authorize a normal live pre-policy image rollback;
+keep the released image selected and use a reviewed forward fix.
 
 Use the host helpers rather than a legacy ECS application task:
 
@@ -314,9 +404,12 @@ wait_for_runtime_command "$rollback_command"
 
 After the validated installation, render the runtime environment and use the
 normal maintenance-window deployment. Do not rerun cloud-init or replace the
-host merely to update these files. After a runtime-asset rollback, restore the
-previous reviewed `release.env`, render with the restored script, and run the
-normal previous-image deployment and readiness checks.
+host merely to update these files. Do not copy a previous `release.env` after a
+runtime-asset rollback: before a schema migration, use only the guarded
+release-config SSM rollback from the deployment runbook, then render with the
+restored script and run compatible readiness checks. After
+`0010_battery_backed_player_policy`, do not select a pre-policy backend image;
+the safe live recovery path is the released image or a reviewed forward fix.
 
 An application release requires a current logical backup, digest-pinned image
 review, backward-compatible migration plan, readiness check, and rollback
@@ -388,7 +481,10 @@ relying on a backup.
 
 A rollback is a host image/configuration rollback plus a reviewed database
 recovery decision. It is never performed by enabling the retired ALB, ECS web
-service, schedules, or RDS controls.
+service, schedules, or RDS controls. After
+`0010_battery_backed_player_policy`, historic-column compatibility is for
+old-image reads in isolated recovery only: it does not restore the former
+policy or make a pre-policy application image a normal production rollback.
 
 The completed migration evidence is archived in
 [`docs/archive/2026-07-28-usd30-migration.md`](../docs/archive/2026-07-28-usd30-migration.md).

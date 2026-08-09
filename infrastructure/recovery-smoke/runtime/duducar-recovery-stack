@@ -1,0 +1,374 @@
+#!/bin/bash
+set -euo pipefail
+umask 0077
+
+host_config=/etc/duducar-recovery/host.env
+release_config=/etc/duducar-recovery/release.env
+runtime_dir=/run/duducar-recovery
+network=duducar-recovery
+network_subnet=172.31.0.0/24
+recovery_docker_root=/var/lib/duducar-recovery/docker
+recovery_ca_path="$runtime_dir/caddy-data/caddy/pki/authorities/local/root.crt"
+
+for config in "$host_config" "$release_config"; do
+  if [ ! -r "$config" ]; then
+    echo "Missing recovery configuration: $config" >&2
+    exit 1
+  fi
+done
+
+set -a
+source "$host_config"
+source "$release_config"
+set +a
+
+ensure_mounted_clone() {
+  /usr/local/sbin/duducar-recovery-mount verify-mounted >/dev/null
+}
+
+contain_untrusted_docker() {
+  # This host is disposable. If an unexpected daemon state is detected after a
+  # start attempt, stop every temporary-host container before masking Docker so
+  # a copied `unless-stopped` container cannot survive under live-restore.
+  while read -r container_id; do
+    [ -n "$container_id" ] && docker stop --time 30 "$container_id" >/dev/null 2>&1 || true
+  done < <(docker ps -aq 2>/dev/null || true)
+  systemctl stop docker.service docker.socket >/dev/null 2>&1 || true
+  systemctl mask docker.service docker.socket >/dev/null 2>&1 || true
+}
+
+ensure_recovery_docker_config() {
+  daemon_config=/etc/docker/daemon.json
+  if [ ! -f "$daemon_config" ]; then
+    echo "Refusing to start Docker without the recovery daemon configuration." >&2
+    exit 1
+  fi
+  daemon_owner=$(stat -c '%U:%G' "$daemon_config")
+  daemon_mode=$(stat -c '%a' "$daemon_config")
+  if [ "$daemon_owner" != "root:root" ] || [ $((8#$daemon_mode & 0022)) -ne 0 ]; then
+    echo "Refusing unsafe Docker daemon configuration ownership or mode." >&2
+    exit 1
+  fi
+  if ! jq -e --arg data_root "$recovery_docker_root" '
+    (keys | sort) == ["data-root", "live-restore", "log-driver", "no-new-privileges"] and
+    .["data-root"] == $data_root and
+    .["log-driver"] == "journald" and
+    .["live-restore"] == true and
+    .["no-new-privileges"] == true
+  ' "$daemon_config" >/dev/null; then
+    echo "Refusing Docker daemon configuration that is not the exact recovery-only data-root policy." >&2
+    exit 1
+  fi
+
+  # A normal local unit replacement or drop-in can change dockerd's config
+  # path, data root, or listener before `docker info` is available. The only
+  # allowed local unit path before first start is systemd's /dev/null mask.
+  for unit in docker.service docker.socket; do
+    for unit_path in "/etc/systemd/system/$unit" "/run/systemd/system/$unit"; do
+      if [ -e "$unit_path" ] || [ -L "$unit_path" ]; then
+        if [ ! -L "$unit_path" ] || [ "$(readlink "$unit_path")" != "/dev/null" ]; then
+          echo "Refusing local systemd replacement for $unit before Docker starts." >&2
+          exit 1
+        fi
+      fi
+    done
+    for dropin_dir in "/etc/systemd/system/$unit.d" "/run/systemd/system/$unit.d"; do
+      if [ -d "$dropin_dir" ] && [ -n "$(find "$dropin_dir" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+        echo "Refusing local systemd drop-in for $unit before Docker starts." >&2
+        exit 1
+      fi
+    done
+  done
+}
+
+ensure_isolated_docker() {
+  # Docker is deliberately masked by bootstrap. Do not start it until after the
+  # clone passed read-only inspection and mounted at the expected path. Check
+  # the daemon file and all local systemd override paths *before* unmasking so
+  # a cloned Docker root cannot auto-start copied restart-policy containers.
+  ensure_recovery_docker_config
+  if ! systemctl is-active --quiet docker.service; then
+    if [ "$(systemctl is-enabled docker.service 2>/dev/null || true)" != "masked" ] || \
+       [ "$(systemctl is-enabled docker.socket 2>/dev/null || true)" != "masked" ]; then
+      echo "Refusing to start Docker from an unexpected unmasked inactive state." >&2
+      exit 1
+    fi
+    systemctl unmask docker.service docker.socket >/dev/null 2>&1 || true
+    systemctl start docker.service
+  fi
+  docker_root=$(docker info --format '{{.DockerRootDir}}')
+  if [ "$docker_root" != "$recovery_docker_root" ]; then
+    echo "Refusing Docker data-root '$docker_root'; expected '$recovery_docker_root'." >&2
+    contain_untrusted_docker
+    exit 1
+  fi
+
+  foreign_containers=$(docker ps -a --format '{{.Names}}' | \
+    grep '^duducar-' | grep -v '^duducar-recovery-' || true)
+  if [ -n "$foreign_containers" ]; then
+    echo "Refusing to run alongside non-recovery DUDU containers:" >&2
+    printf '%s\n' "$foreign_containers" >&2
+    contain_untrusted_docker
+    exit 1
+  fi
+}
+
+login_ecr() {
+  docker_auth="$runtime_dir/docker-auth"
+  install -d -o root -g root -m 0700 "$docker_auth"
+  export DOCKER_CONFIG="$docker_auth"
+  trap 'rm -f "$docker_auth/config.json"' RETURN
+  registry=${BACKEND_IMAGE%%/*}
+  aws ecr get-login-password --region "$AWS_REGION" |
+    docker login --username AWS --password-stdin "$registry" >/dev/null
+  docker pull "$BACKEND_IMAGE"
+  docker pull "$POSTGRES_IMAGE"
+  docker pull "$CADDY_IMAGE"
+}
+
+ensure_network() {
+  if ! docker network inspect "$network" >/dev/null 2>&1; then
+    # The application containers never need direct network egress for this
+    # smoke. Image and exact-backup reads happen on the host before this
+    # internal bridge is created. This prevents an accidental dashboard action
+    # from reaching production AWS APIs even if its IAM role later grows.
+    docker network create --internal --subnet "$network_subnet" "$network" >/dev/null
+  fi
+
+  configured_internal=$(docker network inspect --format '{{.Internal}}' "$network")
+  configured_subnet=$(docker network inspect --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}' "$network")
+  if [ "$configured_internal" != true ] || [ "$configured_subnet" != "$network_subnet" ]; then
+    echo "Refusing unexpected recovery Docker network (internal=$configured_internal subnet=$configured_subnet)." >&2
+    exit 1
+  fi
+}
+
+wait_for_database() {
+  for attempt in $(seq 1 60); do
+    status=$(docker inspect --format '{{.State.Health.Status}}' duducar-recovery-postgres 2>/dev/null || true)
+    case "$status" in
+      healthy) return ;;
+      unhealthy)
+        docker logs --tail 60 duducar-recovery-postgres >&2
+        return 1
+        ;;
+    esac
+    sleep 2
+  done
+  echo "Recovery PostgreSQL did not become healthy within two minutes." >&2
+  return 1
+}
+
+wait_for_web() {
+  for attempt in $(seq 1 60); do
+    status=$(docker inspect --format '{{.State.Health.Status}}' duducar-recovery-web 2>/dev/null || true)
+    case "$status" in
+      healthy) return ;;
+      unhealthy)
+        docker logs --tail 60 duducar-recovery-web >&2
+        return 1
+        ;;
+    esac
+    sleep 2
+  done
+  echo "Recovery Django did not become healthy within two minutes." >&2
+  return 1
+}
+
+start_existing_container_if_stopped() {
+  container_name=$1
+  if ! docker container inspect "$container_name" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  running=$(docker inspect --format '{{.State.Running}}' "$container_name")
+  case "$running" in
+    true)
+      # A restore step may already have started PostgreSQL. Treat that as the
+      # intended idempotent state rather than issuing `docker start` again.
+      return 0
+      ;;
+    false)
+      docker start "$container_name" >/dev/null || return 1
+      return 0
+      ;;
+    *)
+      echo "Unexpected running state for recovery container $container_name: $running" >&2
+      return 1
+      ;;
+  esac
+}
+
+create_database() {
+  docker run -d \
+    --name duducar-recovery-postgres \
+    --restart no \
+    --network "$network" \
+    --log-driver journald \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 640m \
+    --cpus 1.0 \
+    --env-file "$runtime_dir/postgres.env" \
+    --volume /srv/duducar/postgres:/var/lib/postgresql/data \
+    --volume /srv/duducar/postgres-secrets:/run/postgres-local-secrets:ro \
+    --volume /srv/duducar/postgres-tls:/run/postgres-tls:ro \
+    --volume "$runtime_dir/postgres-secrets:/run/postgres-runtime-secrets:ro" \
+    --volume /etc/duducar-recovery/postgres-init/postgres-init-roles.sh:/docker-entrypoint-initdb.d/010-roles.sh:ro \
+    --volume /etc/duducar-recovery/postgres-init/postgres-runtime-grants.sql:/docker-entrypoint-initdb.d/020-runtime-grants.sql:ro \
+    --volume /etc/duducar-recovery/postgres-init/postgres-runtime-grants.sql:/run/postgres-config/runtime-grants.sql:ro \
+    --volume /etc/duducar-recovery/pg_hba.conf:/run/postgres-config/pg_hba.conf:ro \
+    --health-cmd 'pg_isready -U duducar_admin -d signage' \
+    --health-interval 10s \
+    --health-timeout 5s \
+    --health-retries 12 \
+    "$POSTGRES_IMAGE" \
+    -c ssl=on \
+    -c ssl_cert_file=/run/postgres-tls/server.crt \
+    -c ssl_key_file=/run/postgres-tls/server.key \
+    -c ssl_min_protocol_version=TLSv1.2 \
+    -c hba_file=/run/postgres-config/pg_hba.conf \
+    -c listen_addresses='*' \
+    -c password_encryption=scram-sha-256 \
+    -c shared_buffers=128MB \
+    -c max_connections=50 >/dev/null
+}
+
+start_database() {
+  ensure_mounted_clone
+  ensure_isolated_docker
+  /usr/local/sbin/render-recovery-runtime-env
+  login_ecr
+  ensure_network
+  if docker container inspect duducar-recovery-postgres >/dev/null 2>&1; then
+    start_existing_container_if_stopped duducar-recovery-postgres
+  else
+    create_database
+  fi
+  wait_for_database
+}
+
+create_web() {
+  docker run -d \
+    --name duducar-recovery-web \
+    --restart no \
+    --network "$network" \
+    --log-driver journald \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
+    --env-file "$runtime_dir/application.env" \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m \
+    --volume /srv/duducar/backups:/backups:ro \
+    --volume "$runtime_dir/backend-secrets:/run/duducar-recovery/backend-secrets:ro" \
+    --health-cmd "python -c \"import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/health/live/', headers={'Host':'$RECOVERY_HOSTNAME'}); urllib.request.urlopen(req, timeout=3)\"" \
+    --health-interval 30s \
+    --health-timeout 5s \
+    --health-retries 5 \
+    "$BACKEND_IMAGE" >/dev/null
+}
+
+create_caddy() {
+  install -d -o root -g root -m 0700 "$runtime_dir/caddy-data" "$runtime_dir/caddy-config"
+  docker run -d \
+    --name duducar-recovery-caddy \
+    --restart no \
+    --network "$network" \
+    --log-driver journald \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 128 \
+    --memory 128m \
+    --cpus 0.5 \
+    --publish "127.0.0.1:${RECOVERY_CADDY_PORT}:${RECOVERY_CADDY_PORT}" \
+    --volume /etc/duducar-recovery/Caddyfile.recovery:/etc/caddy/Caddyfile:ro \
+    --volume "$runtime_dir/caddy-data:/data" \
+    --volume "$runtime_dir/caddy-config:/config" \
+    "$CADDY_IMAGE" >/dev/null
+}
+
+start_stack() {
+  start_database
+  if docker container inspect duducar-recovery-web >/dev/null 2>&1; then
+    start_existing_container_if_stopped duducar-recovery-web
+  else
+    create_web
+  fi
+  wait_for_web
+
+  if docker container inspect duducar-recovery-caddy >/dev/null 2>&1; then
+    start_existing_container_if_stopped duducar-recovery-caddy
+  else
+    create_caddy
+  fi
+
+  for attempt in $(seq 1 30); do
+    if [ -s "$recovery_ca_path" ] && curl --fail --silent --show-error \
+      --cacert "$recovery_ca_path" \
+      --resolve "${RECOVERY_HOSTNAME}:${RECOVERY_CADDY_PORT}:127.0.0.1" \
+      "https://${RECOVERY_HOSTNAME}:${RECOVERY_CADDY_PORT}/health/ready/" >/dev/null; then
+      echo "Recovery Caddy and Django are healthy on loopback only."
+      echo "Recovery-only CA: $recovery_ca_path"
+      return
+    fi
+    sleep 2
+  done
+  docker logs --tail 80 duducar-recovery-caddy >&2 || true
+  echo "Recovery Caddy did not proxy the ready endpoint." >&2
+  return 1
+}
+
+stop_stack() {
+  for name in duducar-recovery-caddy duducar-recovery-web duducar-recovery-postgres; do
+    if docker container inspect "$name" >/dev/null 2>&1; then
+      docker stop --time 120 "$name" >/dev/null || true
+      docker rm "$name" >/dev/null || true
+    fi
+  done
+  if docker network inspect "$network" >/dev/null 2>&1; then
+    docker network rm "$network" >/dev/null || true
+  fi
+}
+
+status_stack() {
+  ensure_mounted_clone
+  ensure_isolated_docker
+  docker ps -a --filter name=duducar-recovery- \
+    --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+}
+
+tls_info() {
+  if [ ! -s "$recovery_ca_path" ]; then
+    echo "Recovery-only Caddy CA is unavailable; start the recovery stack first." >&2
+    exit 1
+  fi
+  echo "hostname=$RECOVERY_HOSTNAME"
+  echo "port=$RECOVERY_CADDY_PORT"
+  echo "ca_path=$recovery_ca_path"
+  openssl x509 -in "$recovery_ca_path" -noout -subject -issuer -fingerprint -sha256
+}
+
+case "${1:-}" in
+  database)
+    start_database
+    ;;
+  start)
+    start_stack
+    ;;
+  stop)
+    stop_stack
+    ;;
+  status)
+    status_stack
+    ;;
+  tls-info)
+    tls_info
+    ;;
+  *)
+    echo "Usage: duducar-recovery-stack {database|start|stop|status|tls-info}" >&2
+    exit 2
+    ;;
+esac
