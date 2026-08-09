@@ -51,6 +51,7 @@ locals {
   initialized_backend        = try(local.backend_metadata.backend, {})
   initialized_backend_config = try(local.initialized_backend.config, {})
   recovery_asset_separator   = "__DUDUCAR_RECOVERY_ASSET_SEPARATOR_V1__"
+  recovery_asset_heredoc     = "__DUDUCAR_RECOVERY_ASSET_BUNDLE_EOF_V1__"
   recovery_asset_sources = [
     file("${path.module}/../terraform/ec2/runtime/pg_hba.conf"),
     file("${path.module}/../terraform/ec2/runtime/postgres-init-roles.sh"),
@@ -90,9 +91,11 @@ locals {
     source_media_version_id_b64       = base64encode(var.source_media_version_id)
     source_media_sha256_b64           = base64encode(var.source_media_sha256)
     source_media_size_bytes_b64       = base64encode(tostring(var.source_media_size_bytes))
-    # A single compressed source bundle avoids the 16 KiB EC2 raw user-data
-    # limit while retaining self-contained, reviewable runtime sources.
-    recovery_assets_b64 = base64gzip(local.recovery_asset_bundle)
+    # The whole user-data script is gzip-compressed by base64gzip. Keep this
+    # static source bundle raw inside that outer stream: nesting a base64-gzip
+    # payload would make its bytes largely incompressible and exceed EC2's
+    # 16 KiB raw user-data limit.
+    recovery_assets_raw = local.recovery_asset_bundle
   }))
   recovery_user_data_raw_bytes = floor(length(local.recovery_user_data_base64) / 4) * 3 - (
     endswith(local.recovery_user_data_base64, "==") ? 2 :
@@ -136,8 +139,11 @@ resource "terraform_data" "guardrails" {
     }
 
     precondition {
-      condition     = alltrue([for source in local.recovery_asset_sources : !strcontains(source, local.recovery_asset_separator)])
-      error_message = "Recovery runtime asset source contains the reserved bundle separator."
+      condition = alltrue([for source in local.recovery_asset_sources : (
+        !strcontains(source, local.recovery_asset_separator) &&
+        !strcontains(source, local.recovery_asset_heredoc)
+      )])
+      error_message = "Recovery runtime asset source contains a reserved bundle separator or heredoc terminator."
     }
 
     precondition {

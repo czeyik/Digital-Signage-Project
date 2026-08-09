@@ -243,6 +243,37 @@ The root and data volumes have different recovery responsibilities:
 - Secrets Manager remains authoritative for Django, SMTP, Play Integrity,
   CloudFront signing, and the `signage_app` database password.
 
+### Crash-consistent XFS clone handling
+
+A DLM volume snapshot can contain an XFS journal that needs kernel replay. For
+the pilot recovery procedure, use only the recovery root's
+`duducar-recovery-mount` helper for the clone; do not issue a direct `mount`,
+write an `/etc/fstab` entry, or run a generic XFS repair command. `inspect`
+does the required read-only `nouuid,norecovery` layout check and unmounted
+`xfs_repair -n` check. A clean result creates the receipt that permits the
+normal `mount` helper command.
+
+If and only if `inspect` reports its recognized dirty-journal/no-modify result
+(exit status `3`), review the root-only diagnostic and explicitly confirm the
+clone-only replay with:
+
+```sh
+sudo /usr/local/sbin/duducar-recovery-mount replay-journal \
+  --confirm "REPLAY-JOURNAL <operation-id>"
+```
+
+Replace `<operation-id>` with the exact ID for this drill. The helper accepts
+the confirmation only when its pending receipt still binds the selected clone,
+source snapshot, and source volume to that operation; the clone is unmounted;
+and Docker's service and socket are inactive and masked. It replays the journal
+only through a brief writable `rw,nouuid,nodev,nosuid,noexec,noatime` mount at a
+temporary directory on the disposable recovery host, synchronizes and
+unmounts it, then requires a clean post-replay `xfs_repair -n` before allowing
+the normal writable mount. Never run `xfs_repair -L`: losing an XFS journal is
+not an accepted recovery action. This touch is confined to the disposable
+clone; it does not modify the source snapshot, source data volume, production
+host, or production data plane.
+
 Use this isolated recovery procedure:
 
 1. Record the exact snapshot ID, source-volume ID, creation time, tags,
@@ -253,13 +284,14 @@ Use this isolated recovery procedure:
 3. Build a separate recovery root instance from the current reviewed source.
    Permit Session Manager access only; do not associate the production Elastic
    IP, publish application ports, start timers, or change public DNS.
-4. Before starting Docker, attach the cloned volume. Resolve its exact device
-   with `lsblk -f` and `blkid`, verify that it is XFS, and first inspect it
-   read-only with XFS `nouuid,norecovery`. Abort rather than formatting any
-   device that already contains a filesystem.
-5. Unmount the inspection mount, configure the recovery host's `/etc/fstab`
-   for the exact restored device/UUID as appropriate, and mount it at
-   `/srv/duducar`. Confirm the restored
+4. Before starting Docker, attach the cloned volume and use the reviewed
+   recovery helper only: run `duducar-recovery-mount inspect`; if it reports
+   the explicit pending dirty-journal state, follow the confirmed
+   `replay-journal` procedure above; then run
+   `duducar-recovery-mount mount` and `verify-mounted`. Do not mount the
+   device directly, add it to `/etc/fstab`, format it, or run
+   `xfs_repair -L`.
+5. After `verify-mounted` succeeds, confirm the restored
    `/srv/duducar/postgres-secrets` files retain restrictive ownership and
    modes. They must match the role hashes in the restored PostgreSQL data; do
    not regenerate or replace them.
@@ -419,14 +451,28 @@ the repository with mode `0600`.
    used solely for outbound HTTPS. Keep the SSM port-forward session local to
    the reviewing operator.
 
-2. Run only `duducar-recovery-mount inspect` and then
-   `duducar-recovery-mount mount`; do not mount the device directly. `mount`
-   fails closed unless the recovery-only root-volume receipt proves a successful
-   read-only XFS `nouuid,norecovery` layout inspection followed by an unmounted
+2. Run only `duducar-recovery-mount inspect`; do not mount the device directly.
+   A clean inspection authorizes `duducar-recovery-mount mount`. If `inspect`
+   reports its recognized crash-consistent dirty-journal/no-modify state (exit
+   `3`), review its root-only diagnostic and run exactly
+   `duducar-recovery-mount replay-journal --confirm "REPLAY-JOURNAL
+   <operation-id>"` before `mount`. Substitute the same 32-character operation
+   ID used for this drill. Any other nonzero inspection result, failed replay,
+   or failed post-replay check blocks the drill. The helper fails closed unless
+   its root-volume receipt proves a successful read-only XFS
+   `nouuid,norecovery` layout inspection followed by an unmounted clean
    `xfs_repair -n`, tied to this operation, clone device, source snapshot, and
    source volume. The renderer, restore helper, and stack revalidate that exact
    mounted clone and receipt before they read a secret or start Docker. Never
    attach or mount the source volume on the production host.
+
+   The confirmed replay is the only allowed pre-mount writable action: while
+   Docker remains inactive and masked, the helper mounts only the disposable
+   clone at a temporary directory using
+   `rw,nouuid,nodev,nosuid,noexec,noatime`, synchronizes/unmounts it, and
+   requires clean post-replay XFS validation. It starts no containers or
+   services and has no production data-plane effect. Never mount the clone by
+   hand, add it to `/etc/fstab`, or run `xfs_repair -L`.
 
 3. **Quarantine the cloned Docker state before starting Docker.** The data
    volume contains `/srv/duducar/docker`, which is the production Docker

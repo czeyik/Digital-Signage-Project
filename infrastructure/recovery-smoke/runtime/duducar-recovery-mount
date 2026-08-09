@@ -6,6 +6,9 @@ host_config=/etc/duducar-recovery/host.env
 recovery_mountpoint=/srv/duducar
 receipt_dir=/var/lib/duducar-recovery
 inspection_receipt="$receipt_dir/inspection-receipt"
+pre_replay_receipt="$receipt_dir/pre-replay-inspection-receipt"
+pre_replay_xfs_log="$receipt_dir/pre-replay-xfs-repair.log"
+post_replay_xfs_log="$receipt_dir/post-replay-xfs-repair.log"
 
 if [ ! -r "$host_config" ]; then
   echo "Missing recovery host configuration." >&2
@@ -61,16 +64,120 @@ assert_expected_layout() {
   done
 }
 
+clear_inspection_evidence() {
+  clear_authorization_receipts
+  rm -f "$pre_replay_xfs_log" "$post_replay_xfs_log"
+}
+
+clear_authorization_receipts() {
+  rm -f "$inspection_receipt" "$pre_replay_receipt"
+}
+
+write_receipt() {
+  local receipt_path=$1
+  local stage=$2
+  shift 2
+
+  # Root-volume receipt binds this clone to its reviewed recovery point.
+  install -d -o root -g root -m 0700 "$receipt_dir"
+  local device_uuid
+  local receipt_tmp
+  device_uuid=$(blkid -o value -s UUID "$device")
+  receipt_tmp=$(mktemp "$receipt_dir/.inspection-receipt.XXXXXX")
+  {
+    printf 'format=2\n'
+    printf 'stage=%s\n' "$stage"
+    printf 'operation_id=%s\n' "$RECOVERY_OPERATION_ID"
+    printf 'device=%s\n' "$device"
+    printf 'device_uuid=%s\n' "$device_uuid"
+    printf 'source_snapshot_id=%s\n' "$SOURCE_SNAPSHOT_ID"
+    printf 'source_data_volume_id=%s\n' "$SOURCE_DATA_VOLUME_ID"
+    printf 'inspected_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '%s\n' "$@"
+  } > "$receipt_tmp"
+  chown root:root "$receipt_tmp"
+  chmod 0600 "$receipt_tmp"
+  mv -f "$receipt_tmp" "$receipt_path"
+}
+
+require_receipt_basics() {
+  local receipt_path=$1
+  local receipt_label=$2
+  if [ ! -f "$receipt_path" ]; then
+    echo "Missing $receipt_label receipt." >&2
+    exit 1
+  fi
+
+  local receipt_owner
+  local receipt_mode
+  receipt_owner=$(stat -c '%U:%G' "$receipt_path")
+  receipt_mode=$(stat -c '%a' "$receipt_path")
+  if [ "$receipt_owner" != "root:root" ] || [ "$receipt_mode" != "600" ]; then
+    echo "Refusing unsafe $receipt_label receipt ownership or mode." >&2
+    exit 1
+  fi
+
+  local device_uuid
+  device_uuid=$(blkid -o value -s UUID "$device")
+  for expected in \
+    'format=2' \
+    "operation_id=$RECOVERY_OPERATION_ID" \
+    "device=$device" \
+    "device_uuid=$device_uuid" \
+    "source_snapshot_id=$SOURCE_SNAPSHOT_ID" \
+    "source_data_volume_id=$SOURCE_DATA_VOLUME_ID"; do
+    if ! grep -Fqx "$expected" "$receipt_path"; then
+      echo "Refusing $receipt_label receipt that does not match this recovery operation/device/snapshot." >&2
+      exit 1
+    fi
+  done
+
+  if ! grep -Eq '^inspected_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$receipt_path"; then
+    echo "Refusing $receipt_label receipt with no valid inspection timestamp." >&2
+    exit 1
+  fi
+}
+
+run_xfs_check() {
+  local log_path=$1
+  local log_tmp
+  install -d -o root -g root -m 0700 "$receipt_dir"
+  log_tmp=$(mktemp "$receipt_dir/.xfs-repair.XXXXXX")
+  local check_status
+  if LC_ALL=C xfs_repair -n "$device" > "$log_tmp" 2>&1; then
+    check_status=0
+  else
+    check_status=$?
+  fi
+  chown root:root "$log_tmp"
+  chmod 0600 "$log_tmp"
+  mv -f "$log_tmp" "$log_path"
+  xfs_check_status=$check_status
+  return "$check_status"
+}
+
+is_dirty_log_no_modify_result() {
+  # Status one is valid only for this exact no-modify warning; post-replay
+  # success remains the authorization gate.
+  [ "${xfs_check_status:-missing}" = 1 ] && \
+    grep -Fq 'ALERT: The filesystem has valuable metadata changes in a log which is being' "$pre_replay_xfs_log" && \
+    grep -Fq 'ignored because the -n option was used.  Expect spurious inconsistencies' "$pre_replay_xfs_log" && \
+    grep -Fq 'which may be resolved by first mounting the filesystem to replay the log.' "$pre_replay_xfs_log" && \
+    grep -Fq 'No modify flag set, skipping filesystem flush and exiting.' "$pre_replay_xfs_log"
+}
+
 inspect_read_only() {
   wait_for_device
   require_xfs
+  assert_docker_quarantined
   if findmnt --target "$recovery_mountpoint" >/dev/null 2>&1; then
     echo "Refusing read-only inspection while $recovery_mountpoint is already mounted." >&2
     exit 1
   fi
 
-  # Any old receipt is invalid until this exact device is inspected again.
-  rm -f "$inspection_receipt"
+  # Any old evidence is invalid until this exact clone is inspected again.
+  clear_inspection_evidence
+  local inspection_dir
   inspection_dir=$(mktemp -d /mnt/duducar-recovery-inspection.XXXXXX)
   cleanup() {
     umount "$inspection_dir" 2>/dev/null || true
@@ -78,71 +185,161 @@ inspect_read_only() {
   }
   trap cleanup EXIT
 
-  mount -o ro,nouuid,norecovery,nodev,nosuid "$device" "$inspection_dir"
+  mount -o ro,nouuid,norecovery,nodev,nosuid,noexec "$device" "$inspection_dir"
   recovery_mountpoint="$inspection_dir"
   assert_expected_layout
   findmnt --target "$inspection_dir" --output SOURCE,FSTYPE,OPTIONS,TARGET
-  # xfs_repair -n is non-mutating and must run while the clone is unmounted.
   umount "$inspection_dir"
-  xfs_repair -n "$device"
 
-  # The receipt is stored on the disposable encrypted root volume, never on
-  # the clone. A writable mount cannot happen unless this exact operation,
-  # device, filesystem UUID, and selected source snapshot passed both gates.
-  install -d -o root -g root -m 0700 "$receipt_dir"
-  device_uuid=$(blkid -o value -s UUID "$device")
-  receipt_tmp=$(mktemp "$receipt_dir/.inspection-receipt.XXXXXX")
-  {
-    printf 'format=1\n'
-    printf 'operation_id=%s\n' "$RECOVERY_OPERATION_ID"
-    printf 'device=%s\n' "$device"
-    printf 'device_uuid=%s\n' "$device_uuid"
-    printf 'source_snapshot_id=%s\n' "$SOURCE_SNAPSHOT_ID"
-    printf 'source_data_volume_id=%s\n' "$SOURCE_DATA_VOLUME_ID"
-    printf 'inspected_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  } > "$receipt_tmp"
-  chown root:root "$receipt_tmp"
-  chmod 0600 "$receipt_tmp"
-  mv -f "$receipt_tmp" "$inspection_receipt"
-  echo "Read-only XFS inspection and xfs_repair -n completed; inspection receipt created."
+  # A crash-consistent snapshot needs an explicit dirty-log path, never -L.
+  if run_xfs_check "$pre_replay_xfs_log"; then
+    write_receipt "$inspection_receipt" clean_pre_mount_check \
+      "xfs_repair_log_sha256=$(sha256sum "$pre_replay_xfs_log" | awk '{print $1}')"
+    echo "Read-only XFS inspection and xfs_repair -n completed; writable-mount receipt created."
+    return
+  fi
+
+  if ! is_dirty_log_no_modify_result; then
+    echo "Read-only layout inspection passed, but xfs_repair -n found a non-dirty-log problem. Review $pre_replay_xfs_log; no writable mount is authorized." >&2
+    exit 1
+  fi
+
+  write_receipt "$pre_replay_receipt" journal_replay_required \
+    "pre_replay_xfs_repair_log_sha256=$(sha256sum "$pre_replay_xfs_log" | awk '{print $1}')"
+  echo "Read-only layout inspection passed, but this crash-consistent clone needs an explicit clone-only journal replay. Docker remains masked and no writable mount is authorized. Review $pre_replay_xfs_log, then run: duducar-recovery-mount replay-journal --confirm 'REPLAY-JOURNAL $RECOVERY_OPERATION_ID'" >&2
+  exit 3
 }
 
 require_inspection_receipt() {
-  if [ ! -f "$inspection_receipt" ]; then
-    echo "Refusing writable mount: run duducar-recovery-mount inspect successfully first." >&2
+  require_receipt_basics "$inspection_receipt" writable-mount
+  if ! grep -Eq '^stage=(clean_pre_mount_check|journal_replayed_clean)$' "$inspection_receipt"; then
+    echo "Refusing writable mount without a completed XFS check receipt." >&2
     exit 1
   fi
+}
 
-  receipt_owner=$(stat -c '%U:%G' "$inspection_receipt")
-  receipt_mode=$(stat -c '%a' "$inspection_receipt")
-  if [ "$receipt_owner" != "root:root" ] || [ "$receipt_mode" != "600" ]; then
-    echo "Refusing writable mount: inspection receipt ownership or mode is unsafe." >&2
+require_pending_replay_receipt() {
+  require_receipt_basics "$pre_replay_receipt" journal-replay
+  if ! grep -Fqx 'stage=journal_replay_required' "$pre_replay_receipt"; then
+    echo "Refusing journal replay without the recognized dirty-log inspection receipt." >&2
     exit 1
   fi
+  if [ -e "$inspection_receipt" ]; then
+    echo "Refusing journal replay when a writable-mount receipt already exists; run a fresh inspection instead." >&2
+    exit 1
+  fi
+  if [ ! -f "$pre_replay_xfs_log" ]; then
+    echo "Refusing journal replay without its root-only pre-replay XFS diagnostic." >&2
+    exit 1
+  fi
+  local log_owner
+  local log_mode
+  local expected_hash
+  local actual_hash
+  log_owner=$(stat -c '%U:%G' "$pre_replay_xfs_log")
+  log_mode=$(stat -c '%a' "$pre_replay_xfs_log")
+  if [ "$log_owner" != "root:root" ] || [ "$log_mode" != "600" ]; then
+    echo "Refusing journal replay with unsafe pre-replay XFS diagnostic ownership or mode." >&2
+    exit 1
+  fi
+  expected_hash=$(sed -n 's/^pre_replay_xfs_repair_log_sha256=//p' "$pre_replay_receipt")
+  actual_hash=$(sha256sum "$pre_replay_xfs_log" | awk '{print $1}')
+  if ! [[ "$expected_hash" =~ ^[0-9a-f]{64}$ ]] || [ "$expected_hash" != "$actual_hash" ]; then
+    echo "Refusing journal replay because its pre-replay XFS diagnostic does not match the receipt." >&2
+    exit 1
+  fi
+}
 
-  device_uuid=$(blkid -o value -s UUID "$device")
-  for expected in \
-    'format=1' \
-    "operation_id=$RECOVERY_OPERATION_ID" \
-    "device=$device" \
-    "device_uuid=$device_uuid" \
-    "source_snapshot_id=$SOURCE_SNAPSHOT_ID" \
-    "source_data_volume_id=$SOURCE_DATA_VOLUME_ID"; do
-    if ! grep -Fqx "$expected" "$inspection_receipt"; then
-      echo "Refusing writable mount: inspection receipt does not match this recovery operation/device/snapshot." >&2
+assert_docker_quarantined() {
+  local unit
+  for unit in docker.service docker.socket; do
+    if systemctl is-active --quiet "$unit"; then
+      echo "Refusing recovery clone action while $unit is active." >&2
+      exit 1
+    fi
+    if [ "$(systemctl is-enabled "$unit" 2>/dev/null || true)" != "masked" ]; then
+      echo "Refusing recovery clone action while $unit is not masked." >&2
       exit 1
     fi
   done
+}
 
-  if ! grep -Eq '^inspected_at=[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' "$inspection_receipt"; then
-    echo "Refusing writable mount: inspection receipt has no valid inspection timestamp." >&2
+assert_clone_unmounted_everywhere() {
+  local expected_source
+  expected_source=$(readlink -f "$device")
+  if findmnt --source "$expected_source" >/dev/null 2>&1; then
+    echo "Refusing journal replay while the recovery clone is already mounted." >&2
     exit 1
   fi
+}
+
+replay_journal() {
+  wait_for_device
+  require_xfs
+  require_pending_replay_receipt
+  if [ "$(uname -m)" != aarch64 ]; then
+    echo "Refusing XFS journal replay on a non-ARM64 recovery host." >&2
+    exit 1
+  fi
+  assert_docker_quarantined
+  assert_clone_unmounted_everywhere
+
+  # An interrupted replay must require a fresh read-only inspection.
+  clear_authorization_receipts
+
+  local replay_dir
+  local expected_source
+  local mounted_source
+  local mounted_filesystem
+  local mounted_options
+  local replay_succeeded=false
+  replay_dir=$(mktemp -d /mnt/duducar-recovery-journal-replay.XXXXXX)
+  replay_cleanup() {
+    local status=$?
+    umount "$replay_dir" 2>/dev/null || true
+    rmdir "$replay_dir" 2>/dev/null || true
+    if [ "$replay_succeeded" != true ]; then
+      # Preserve diagnostics but never leave a mount authorization behind.
+      clear_authorization_receipts
+    fi
+    return "$status"
+  }
+  trap replay_cleanup EXIT
+
+  # Only the clone's journal is replayed; /srv and Docker are untouched.
+  mount -o rw,nouuid,nodev,nosuid,noexec,noatime "$device" "$replay_dir"
+  expected_source=$(readlink -f "$device")
+  mounted_source=$(findmnt --noheadings --output SOURCE --target "$replay_dir" | xargs)
+  mounted_filesystem=$(findmnt --noheadings --output FSTYPE --target "$replay_dir" | xargs)
+  mounted_options=$(findmnt --noheadings --output OPTIONS --target "$replay_dir" | xargs)
+  if [ -z "$mounted_source" ] || [ "$(readlink -f "$mounted_source")" != "$expected_source" ] || \
+     [ "$mounted_filesystem" != xfs ] || [[ ",$mounted_options," != *,rw,* ]] || \
+     [[ ",$mounted_options," != *,nouuid,* ]]; then
+    echo "Refusing unexpected XFS journal-replay mount (source=$mounted_source fstype=$mounted_filesystem options=$mounted_options)." >&2
+    exit 1
+  fi
+  sync
+  umount "$replay_dir"
+
+  if ! run_xfs_check "$post_replay_xfs_log"; then
+    echo "XFS journal replay completed on the clone, but the post-replay xfs_repair -n check failed. Review $post_replay_xfs_log; run a fresh read-only inspection before any retry." >&2
+    exit 1
+  fi
+
+  write_receipt "$inspection_receipt" journal_replayed_clean \
+    "pre_replay_xfs_repair_log_sha256=$(sha256sum "$pre_replay_xfs_log" | awk '{print $1}')" \
+    "post_replay_xfs_repair_log_sha256=$(sha256sum "$post_replay_xfs_log" | awk '{print $1}')" \
+    "journal_replayed_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  replay_succeeded=true
+  trap - EXIT
+  rmdir "$replay_dir"
+  echo "Clone-only XFS journal replay and post-replay xfs_repair -n completed; writable-mount receipt created."
 }
 
 mount_writable() {
   wait_for_device
   require_xfs
+  assert_docker_quarantined
   require_inspection_receipt
   if findmnt --target "$recovery_mountpoint" >/dev/null 2>&1; then
     echo "$recovery_mountpoint is already mounted; refusing to remount an ambiguous target." >&2
@@ -150,8 +347,7 @@ mount_writable() {
   fi
 
   install -d -o root -g root -m 0755 "$recovery_mountpoint"
-  # The source XFS UUID is intentionally retained. nouuid permits this clone
-  # to mount on the disposable host after the required read-only inspection.
+  # nouuid is allowed only after a final clean XFS receipt.
   mount -o nouuid,nodev,nosuid "$device" "$recovery_mountpoint"
   cleanup_failed_mount() {
     status=$?
@@ -204,13 +400,21 @@ unmount_recovery() {
   systemctl stop docker.service docker.socket >/dev/null 2>&1 || true
   systemctl disable docker.service docker.socket >/dev/null 2>&1 || true
   systemctl mask docker.service docker.socket >/dev/null 2>&1 || true
-  rm -f "$inspection_receipt"
+  clear_authorization_receipts
   echo "Recovery volume is detached from the filesystem; Terraform can now destroy only its tagged resources."
 }
 
 case "${1:-}" in
   inspect)
     inspect_read_only
+    ;;
+  replay-journal)
+    if [ "$#" -ne 3 ] || [ "${2:-}" != "--confirm" ] || \
+       [ "${3:-}" != "REPLAY-JOURNAL $RECOVERY_OPERATION_ID" ]; then
+      echo "Usage: duducar-recovery-mount replay-journal --confirm \"REPLAY-JOURNAL $RECOVERY_OPERATION_ID\"" >&2
+      exit 2
+    fi
+    replay_journal
     ;;
   mount)
     mount_writable
@@ -222,7 +426,7 @@ case "${1:-}" in
     unmount_recovery
     ;;
   *)
-    echo "Usage: duducar-recovery-mount {inspect|mount|verify-mounted|unmount}" >&2
+    echo "Usage: duducar-recovery-mount {inspect|replay-journal --confirm \"REPLAY-JOURNAL <operation-id>\"|mount|verify-mounted|unmount}" >&2
     exit 2
     ;;
 esac

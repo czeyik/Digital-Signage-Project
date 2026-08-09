@@ -37,12 +37,13 @@ initialize this directory using `production/terraform.tfstate`.
   KMS decrypt is constrained to the exact backup/media bucket encryption
   contexts rather than incorrect object-prefix contexts.
 - Docker uses `/var/lib/duducar-recovery/docker` on the encrypted disposable
-  root volume. It is masked until after XFS inspection. Before it is unmasked,
-  the helper validates the root-owned Docker configuration and rejects local
-  systemd replacements/drop-ins that could select another data root or listener.
-  Never use the cloned `/srv/duducar/docker`: it can contain production
-  `--restart unless-stopped` metadata that would otherwise start cloned
-  containers when Docker starts.
+  root volume. Docker's service and socket remain masked through the read-only
+  XFS inspection and any explicit XFS journal replay. Before Docker is
+  unmasked, the helper validates the root-owned Docker configuration and
+  rejects local systemd replacements/drop-ins that could select another data
+  root or listener. Never use the cloned `/srv/duducar/docker`: it can contain
+  production `--restart unless-stopped` metadata that would otherwise start
+  cloned containers when Docker starts.
 - The recovery stack has its own `duducar-recovery-*` names and bridge network,
   no PostgreSQL host port, no systemd DUDU service, no timers, and an internal
   Docker network with no application-container egress. Caddy uses an internal,
@@ -58,6 +59,15 @@ login audit event, session, and CSV export audit event. They do not authorize
 media upload, preview, password reset, enrollment, playlist publication,
 scheduled commands, a fresh backup to the production bucket, or a traffic
 cutover.
+
+A DLM snapshot is crash-consistent, so its XFS journal can legitimately still
+need replay. The recovery helper treats that as a distinct, fail-closed state:
+it records the read-only inspection, requires a confirmation bound to this
+operation before replay, and re-runs `xfs_repair -n` after the replay. The only
+writable filesystem operation before the normal clone mount is a brief,
+helper-controlled mount of the **clone** at an unpredictable temporary
+directory while Docker remains masked. It cannot modify the source snapshot,
+source volume, production host, or production data plane.
 
 ## Required authority and inputs
 
@@ -145,7 +155,13 @@ unmounted. Connect only with Session Manager; do not add ingress rules or use
 SSH.
 
 ```sh
+# Do not mount the cloned device yourself.
 sudo /usr/local/sbin/duducar-recovery-mount inspect
+```
+
+If `inspect` returns `0`, it has created the receipt required by `mount`; run:
+
+```sh
 sudo /usr/local/sbin/duducar-recovery-mount mount
 sudo /usr/local/sbin/duducar-recovery-mount verify-mounted
 
@@ -158,6 +174,35 @@ sudo /usr/local/sbin/duducar-recovery-stack start
 sudo /usr/local/sbin/duducar-recovery-stack status
 sudo /usr/local/sbin/duducar-recovery-stack tls-info
 ```
+
+`inspect` first mounts the clone read-only with `nouuid,norecovery`, checks the
+expected layout, unmounts it, and runs `xfs_repair -n`. If that check reports
+only its recognized dirty-journal/no-modify condition, it writes a pending
+receipt and exits `3`; it does **not** authorize `mount`. Review the root-only
+diagnostic. **Only for that exit-3 case**, then run:
+
+```sh
+sudo /usr/local/sbin/duducar-recovery-mount replay-journal \
+  --confirm "REPLAY-JOURNAL <operation-id>"
+sudo /usr/local/sbin/duducar-recovery-mount mount
+sudo /usr/local/sbin/duducar-recovery-mount verify-mounted
+```
+
+The helper verifies the pending receipt, clone identity, source
+snapshot/source-volume IDs, ARM64 host, inactive and masked Docker
+service/socket, and that the clone is unmounted everywhere. It then mounts
+only that clone briefly at a temporary directory with `rw,nouuid,nodev,nosuid,
+noexec,noatime`, synchronizes and unmounts it, and requires a clean post-replay
+`xfs_repair -n` before it creates the final writable-mount receipt.
+
+Never mount the recovery device directly, add it to `/etc/fstab`, or substitute
+a generic XFS repair command for this helper. In particular, never run
+`xfs_repair -L`: discarding a journal is not an accepted recovery action. Any
+other inspection failure, a failed replay, or a failed post-replay check stops
+the drill; preserve the root-only diagnostic and investigate before creating a
+fresh recovery operation. The replay writes only the disposable clone and
+starts no Docker container, service, timer, or production-facing data-plane
+operation.
 
 From the local operator workstation, use the non-secret command emitted by
 `recovery_ssm_port_forward_command`. The output

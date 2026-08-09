@@ -14,7 +14,7 @@ systemctl mask docker.service docker.socket >/dev/null 2>&1 || true
 # Do not request the obsolete/nonexistent AWS CLI package token: a failed package
 # transaction prevents the remaining recovery-only bootstrap safeguards from
 # being installed. Require the preinstalled CLI explicitly below instead.
-dnf install -y docker gzip jq openssl xfsprogs
+dnf install -y docker jq openssl xfsprogs
 command -v aws >/dev/null
 aws --version >/dev/null
 systemctl enable --now amazon-ssm-agent
@@ -88,7 +88,10 @@ chmod 0600 /etc/duducar-recovery/release.env
 
 recovery_asset_separator='__DUDUCAR_RECOVERY_ASSET_SEPARATOR_V1__'
 recovery_asset_bundle=$(mktemp /var/lib/duducar-recovery/assets.XXXXXX)
-printf '%s' '${recovery_assets_b64}' | base64 -d | gzip -d > "$recovery_asset_bundle"
+# The outer Terraform gzip compresses this static quoted source bundle.
+cat > "$recovery_asset_bundle" <<'__DUDUCAR_RECOVERY_ASSET_BUNDLE_EOF_V1__'
+${recovery_assets_raw}
+__DUDUCAR_RECOVERY_ASSET_BUNDLE_EOF_V1__
 asset_count=$(awk -v separator="$recovery_asset_separator" 'BEGIN { RS = "\n" separator "\n" } END { print NR }' "$recovery_asset_bundle")
 if [ "$asset_count" != 8 ]; then
   echo "Recovery runtime asset bundle has an unexpected record count: $asset_count" >&2
