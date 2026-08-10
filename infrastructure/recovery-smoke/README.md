@@ -276,7 +276,14 @@ Then perform:
 
 1. one known account-owner login;
 2. a protected dashboard request after login; and
-3. one representative playback CSV export.
+3. one unfiltered playback CSV export.
+
+The unfiltered CSV must download successfully with its privacy-preserving
+headers. A data row is not required: if the selected source has no
+`PlaybackEvent` records, a header-only CSV is an acceptable zero-row result.
+Record that result without seeding or fabricating playback evidence. It proves
+that the recovered export route works, not that proof-of-play evidence was
+restored.
 
 Do not use production DNS for this test. The SSM tunnel plus loopback listener
 is the only permitted application path. Record the expected clone-only audit
