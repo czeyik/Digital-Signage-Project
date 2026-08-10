@@ -1,138 +1,67 @@
 # Isolated Application Restore Smoke
 
-This Terraform root creates one explicitly tagged, disposable recovery host and
-one encrypted clone of a selected production DLM snapshot. It exists only to
-complete the application-layer restore gate: start the restored Django/Caddy
-stack, prove an account-owner login and protected dashboard access, and export
-one representative report without routing any public traffic to the clone. It
-also verifies one exact versioned normalized-media object against the restored
-`MediaAsset` record's key, SHA-256, and size.
+This Terraform root creates one tagged recovery host and one encrypted clone of
+a selected production DLM snapshot. It validates a snapshot restore, an exact
+logical archive, one exact normalized-media object, owner login, protected
+dashboard access, and a representative playback CSV without public routing.
 
-It is deliberately separate from `infrastructure/terraform/`. The production
-root owns the live EC2 host, Elastic IP, DNS, data volume, and production state
-key. Do not add this root's resources to the production state, and never
-initialize this directory using `production/terraform.tfstate`.
+It is separate from `infrastructure/terraform/`. Never place recovery resources
+in production state or initialize this root with
+`production/terraform.tfstate`. The authoritative control sequence is
+[`docs/backup-restore.md`](../../docs/backup-restore.md); this page contains the
+exact recovery-root commands.
 
-## Safety properties
+## Safety boundary
 
-- Every resource has a unique 32-hex `OperationId`, `Temporary=true`, and
-  `CleanupRequired=true` tag.
-- This root is fixed to account `173454940059`, Region `ap-southeast-5`, and
-  `Project=duducar-signage`; tfvars cannot retarget those constraints. The
-  backend image must resolve to a digest in the fixed production
-  `duducar-signage-backend` ECR repository during planning.
-- The recovery security group has **zero ingress**. It does not reuse the live
-  web security group. Its only egress is DNS to the VPC resolver and HTTPS for
-  SSM, AWS APIs, package repositories, and image pulls.
-- The temporary host receives an ordinary, ephemeral public IPv4 address only
-  because the existing public subnet has no NAT or interface endpoints. It has
-  no Elastic IP, Route 53 record, public application listener, SSH access, or
-  production security-group attachment. Security groups block all inbound
-  traffic; the application is additionally bound to host loopback.
-- The instance role can use SSM, pull the exact backend image, read the one
-  application secret, and read only the three selected versioned S3 objects:
-  logical archive, checksum sidecar, and normalized media sample. It has no
-  `s3:Put*`, `s3:Delete*`, `sns:Publish`, ECS run/list/pass-role, or KMS
-  encrypt/generate permissions. Because both live buckets use S3 Bucket Keys,
-  KMS decrypt is constrained to the exact backup/media bucket encryption
-  contexts rather than incorrect object-prefix contexts.
-- Docker uses `/var/lib/duducar-recovery/docker` on the encrypted disposable
-  root volume. Docker's service and socket remain masked through the read-only
-  XFS inspection and any explicit XFS journal replay. Before Docker is
-  unmasked, the helper validates the root-owned Docker configuration and
-  rejects local systemd replacements/drop-ins that could select another data
-  root or listener. Never use the cloned `/srv/duducar/docker`: it can contain
-  production `--restart unless-stopped` metadata that would otherwise start
-  cloned containers when Docker starts.
-- The downloaded logical archive and checksum stay in a root-only `0700`
-  directory with `0600` files. Only the catalogue and logical `pg_restore`
-  readers are explicitly run as container root; both remain read-only,
-  capability-free, and resource-limited. The catalogue reader has
-  `--network none`; the restore reader has only the internal recovery network,
-  no metadata access, and no `backend-secrets`, Docker-socket, or cloned-data
-  mount. Its appuser-owned owner-password source remains `10001:10001` with
-  `0500`/`0400` protection; immediately before the root restore, the helper
-  copies it into a fresh root-owned `0700` tmpfs directory as a `0400` file,
-  mounts only that copy read-only, and removes the directory through an exit
-  trap on success or failure.
-- The recovery stack has its own `duducar-recovery-*` names and bridge network,
-  no PostgreSQL host port, no systemd DUDU service, no timers, and an internal
-  Docker network with no application-container egress. Caddy has one static
-  address (`172.31.0.10`) on that bridge and no Docker-published port. It uses
-  an internal, recovery-only certificate and never requests a production ACME
-  certificate or reuses production Caddy state.
-- A root-owned, non-enabled systemd socket unit is the only host exposure: it
-  listens exactly on `127.0.0.1:8443` (or the reviewed
-  `recovery_caddy_port`) and starts a dynamically unprivileged
-  `systemd-socket-proxyd` process that may connect only to Caddy's static
-  internal address. The helper validates unit ownership, exact listener and
-  target, Caddy's one internal network/static IP/no Docker port binding, and a
-  real loopback listener before its health request; stop removes that listener
-  and its health receipt, and fails (blocking unmount) if any listener on that
-  port remains. It never adds Caddy to a second bridge or host network.
-  Bootstrap explicitly installs `systemd` and fails before clone use
-  if the ARM64 AMI does not provide `/usr/lib/systemd/systemd-socket-proxyd`.
-- Caddy drops every Linux capability except `NET_BIND_SERVICE`. The pinned
-  official image marks `/usr/bin/caddy` with that file capability; retaining
-  only it lets the executable run with Docker's `no-new-privileges` policy.
-  This does not create an internet listener: only the hardened host socket
-  proxy owns the unprivileged loopback port.
-- The rendered application disables SMTP delivery and metadata credentials in
-  the container. It does not configure a backup destination, and the IAM role
-  cannot write a production backup even if a forbidden command is attempted.
+- Every resource uses a fresh 32-hex `OperationId` and the tags
+  `Temporary=true` and `CleanupRequired=true`.
+- Account `173454940059`, Region `ap-southeast-5`, project tag, recovery
+  hostname, and backend ECR repository are fixed in code. The backend image
+  must be an approved digest from that repository.
+- The temporary security group has zero ingress. The host has no EIP, DNS,
+  public application listener, SSH, or production security-group attachment;
+  its ephemeral public address supports outbound HTTPS only. Administration is
+  through SSM.
+- The role may use SSM, pull approved images, and read only the selected secret
+  and versioned backup/media objects. It cannot write S3, publish SNS, run ECS,
+  or mutate production KMS, IAM, database, snapshot, or application resources.
+- Recovery Docker uses `/var/lib/duducar-recovery/docker`, never the cloned
+  `/srv/duducar/docker`. Docker remains masked until mount checks pass.
+- Recovery containers use separate names, a recovery-only network with no app
+  egress, no PostgreSQL host port, no timers, and a TLS listener bound to
+  `127.0.0.1`. SMTP, metadata credentials, backups, media dispatch, alerts, and
+  other production writes are disabled.
 
-These properties make the smoke safe for clone-only writes such as a Django
-login audit event, session, and CSV export audit event. They do not authorize
-media upload, preview, password reset, enrollment, playlist publication,
-scheduled commands, a fresh backup to the production bucket, or a traffic
-cutover.
-
-A DLM snapshot is crash-consistent, so its XFS journal can legitimately still
-need replay. The recovery helper treats that as a distinct, fail-closed state:
-it records the read-only inspection, requires a confirmation bound to this
-operation before replay, and re-runs `xfs_repair -n` after the replay. The only
-writable filesystem operation before the normal clone mount is a brief,
-helper-controlled mount of the **clone** at an unpredictable temporary
-directory while Docker remains masked. It cannot modify the source snapshot,
-source volume, production host, or production data plane.
+Clone-only login, session, and export audit rows are expected. The drill does
+not authorize upload, preview, password reset, enrollment, publication,
+scheduled commands, backup creation, or traffic cutover.
 
 ## Required authority and inputs
 
-Use this root only after the project owner authorizes the short-lived recovery
-cost and the selected exact recovery points. The operator must record:
+Obtain owner approval for the exact recovery points and temporary cost. Record:
 
-1. a new `operation_id` from `openssl rand -hex 16`;
-2. the completed encrypted DLM snapshot ID, source data-volume ID, source KMS
-   key, source availability zone, and the required `dlm:managed=true` and
-   `DLMBackup=duducar-signage-production-ec2-target-data` tags;
-3. the exact logical archive and `.sha256` sidecar S3 keys **and version IDs**;
-4. one exact normalized `validated/` media key and version ID, plus the
-   non-secret expected `MediaAsset` SHA-256 and size recorded during preflight;
-5. the current application secret ARN/KMS key, backup/media bucket names and
-   storage KMS key, all obtained without printing secret values;
-6. reviewed ARM64 AMI ID, backend/PostgreSQL/Caddy digests, required Android
-   version, Play Integrity project number, and CloudFront non-secret settings;
-7. the existing VPC and a public subnet in the selected recovery AZ; and
-8. a named owner who will enter their password locally, an approver, a two-hour
-   stop/cleanup deadline, and a rollback operator.
+1. a new operation ID from `openssl rand -hex 16`;
+2. the completed encrypted DLM snapshot, source volume/KMS key/AZ, and required
+   DLM tags;
+3. exact archive and sidecar keys and S3 version IDs;
+4. one exact `validated/` media key/version plus its expected `MediaAsset`
+   SHA-256 and size;
+5. current secret/KMS ARNs and backup/media bucket names, without secret values;
+6. reviewed ARM64 AMI and backend/PostgreSQL/Caddy digests, Android version,
+   Play Integrity project number, and non-secret CloudFront settings;
+7. the existing VPC and a public subnet in the recovery AZ; and
+8. owner, approver, rollback operator, and a two-hour cleanup deadline.
 
-Do not infer the deployed backend image from the newest ECR tag. Confirm the
-digest from the live host's root-owned release configuration in a controlled
-read-only session, then record it. Never put a secret value, owner password,
-private signing key, or production tfvars file into this repository, command
-arguments, terminal transcript, or Terraform input.
+Confirm the deployed backend digest from the live root-owned release
+configuration, never from the newest ECR tag. Keep secrets, passwords, signing
+keys, production tfvars, and personal data out of Git, arguments, transcripts,
+and Terraform inputs.
 
 ## Prepare and review
 
-Create an ignored file from `terraform.tfvars.example`, then run a read-only
-account/snapshot/object preflight before any apply. Use
-`recovery-terraform` for **every** Terraform command in this root; it fixes and
-verifies the remote backend key against the operation ID, while a Terraform
-guardrail independently rejects unsafe initialized metadata. Do not run a raw
-`terraform plan`, `apply`, or `destroy` here. The wrapper clears inherited
-`TF_DATA_DIR`/CLI argument settings and forces the default workspace before it
-initializes or accepts a stateful command, so it cannot silently reuse another
-directory's backend metadata.
+Create an ignored `terraform.tfvars` from the example. Use the wrapper for every
+command; it fixes the backend key, clears inherited Terraform indirection, and
+requires the default workspace.
 
 ```sh
 operation_id=$(openssl rand -hex 16)
@@ -147,27 +76,14 @@ recovery_tf=./infrastructure/recovery-smoke/recovery-terraform
   "/secure/duducar-recovery/recovery-${operation_id}.tfplan"
 ```
 
-The reviewed plan may create only the following resources, all named/tagged
-with the operation ID:
+The plan may create only one operation-tagged zero-ingress security group, one
+least-privilege role/profile, one encrypted 32-GiB snapshot clone, one reviewed
+root volume, and one ARM64 `t4g.small`. Stop if it touches a live instance,
+volume, EIP, DNS, CloudFront, S3, KMS, ECS, production IAM, or production state.
 
-- one zero-ingress security group;
-- one least-privilege EC2 role and instance profile;
-- one encrypted 32 GiB EBS volume created from the stated snapshot;
-- one encrypted 16 GiB (or reviewed size) root volume attached to one ARM64
-  `t4g.small`; and
-- one temporary EC2 instance plus its volume attachment.
-
-Stop if the plan touches a live EC2 instance, existing EBS volume, EIP, DNS,
-CloudFront distribution, S3 bucket, KMS key, ECS resource, production IAM role,
-or the `production/terraform.tfstate` key. Terraform apply and destroy require
-separate, explicit operator approval.
-
-Keep the independently reviewed saved plan as evidence, but never pass it to
-`apply`: saved plans embed backend information. The wrapper regenerates a new
-private plan only after rechecking its recovery backend/default workspace,
-displays it, and asks for its own `APPLY <operation-id>` confirmation. Use the
-same explicit variables file, without a positional plan path or
-`-auto-approve`:
+Retain the reviewed saved plan as evidence but do not apply it: saved plans
+embed backend data. The wrapper regenerates and displays a private plan, then
+requires `APPLY <operation-id>`:
 
 ```sh
 "$recovery_tf" apply --operation-id "$operation_id" \
@@ -175,26 +91,22 @@ same explicit variables file, without a positional plan path or
 "$recovery_tf" output --operation-id "$operation_id"
 ```
 
-## Smoke procedure after an approved apply
+Apply does not authorize cutover, DNS, source deletion, or production writes.
 
-The recovery host arrives with Docker masked and the clone deliberately
-unmounted. Connect only with Session Manager; do not add ingress rules or use
-SSH.
+## Restore and smoke
+
+Connect through SSM only. The host starts with Docker masked and the clone
+unmounted. Inspect it only through the helper:
 
 ```sh
-# Do not mount the cloned device yourself.
 sudo /usr/local/sbin/duducar-recovery-mount inspect
 ```
 
-If `inspect` returns `0`, it has created the receipt required by `mount`; run:
+If inspection exits `0`, run:
 
 ```sh
 sudo /usr/local/sbin/duducar-recovery-mount mount
 sudo /usr/local/sbin/duducar-recovery-mount verify-mounted
-
-# Snapshot path: apply clone-only schema migrations after the snapshot's WAL
-# recovery, prove the exact normalized media object, then start the
-# internal-TLS dashboard.
 sudo /usr/local/sbin/duducar-recovery-restore snapshot-schema
 sudo /usr/local/sbin/duducar-recovery-restore media
 sudo /usr/local/sbin/duducar-recovery-stack start
@@ -202,11 +114,8 @@ sudo /usr/local/sbin/duducar-recovery-stack status
 sudo /usr/local/sbin/duducar-recovery-stack tls-info
 ```
 
-`inspect` first mounts the clone read-only with `nouuid,norecovery`, checks the
-expected layout, unmounts it, and runs `xfs_repair -n`. If that check reports
-only its recognized dirty-journal/no-modify condition, it writes a pending
-receipt and exits `3`; it does **not** authorize `mount`. Review the root-only
-diagnostic. **Only for that exit-3 case**, then run:
+If inspection exits `3` with only the recognized dirty-journal condition,
+review its root-only diagnostic and run the operation-bound replay:
 
 ```sh
 sudo /usr/local/sbin/duducar-recovery-mount replay-journal \
@@ -215,54 +124,36 @@ sudo /usr/local/sbin/duducar-recovery-mount mount
 sudo /usr/local/sbin/duducar-recovery-mount verify-mounted
 ```
 
-The helper verifies the pending receipt, clone identity, source
-snapshot/source-volume IDs, ARM64 host, inactive and masked Docker
-service/socket, and that the clone is unmounted everywhere. It then mounts
-only that clone briefly at a temporary directory with `rw,nouuid,nodev,nosuid,
-noexec,noatime`, synchronizes and unmounts it, and requires a clean post-replay
-`xfs_repair -n` before it creates the final writable-mount receipt.
+The helper validates the receipt, clone/source identity, host architecture,
+Docker state, and mount state; replays only the disposable clone; and requires
+a clean post-replay check. Never direct-mount the device, add it to `/etc/fstab`,
+use a generic repair, or run `xfs_repair -L`. Any other failure stops the drill;
+preserve diagnostics and use a fresh operation only after review.
 
-Never mount the recovery device directly, add it to `/etc/fstab`, or substitute
-a generic XFS repair command for this helper. In particular, never run
-`xfs_repair -L`: discarding a journal is not an accepted recovery action. Any
-other inspection failure, a failed replay, or a failed post-replay check stops
-the drill; preserve the root-only diagnostic and investigate before creating a
-fresh recovery operation. The replay writes only the disposable clone and
-starts no Docker container, service, timer, or production-facing data-plane
-operation.
+Use the `recovery_ssm_port_forward_command` output from the workstation. Map
+only the operation-specific `.test` hostname to `127.0.0.1` in a temporary
+browser profile. Do not alter production DNS/system trust, use a production
+hostname, expose a port, use HTTP, pass `-k`, or accept a certificate warning.
 
-From the local operator workstation, use the non-secret command emitted by
-`recovery_ssm_port_forward_command`. The output
-`recovery_tls_hostname` is an operation-specific reserved hostname such as
-`recovery-<operation-id>.duducar.test`; it has no production DNS record. In a
-temporary browser profile, map that exact hostname to `127.0.0.1`, browse it
-only on `recovery_tls_port`, and import only the public recovery CA at the host
-path emitted by `recovery_tls_ca_path`. Never map or browse a production
-hostname through this tunnel.
-
-Retrieve that **public CA only** through the existing Session Manager shell; do
-not bypass verification with `curl -k` or a browser click-through. On the
-recovery host, run the following after `tls-info`, copy its one-line output,
-and compare the local fingerprint to the `tls-info` fingerprint:
+After `tls-info`, retrieve only the public recovery CA through SSM:
 
 ```sh
 sudo base64 -w0 /run/duducar-recovery/caddy-data/caddy/pki/authorities/local/root.crt
 printf '\n'
 ```
 
-On the local operator workstation, use a temporary file and delete it with the
-temporary browser profile after the smoke:
+Decode it locally and match its SHA-256 fingerprint to `tls-info`:
 
 ```sh
 umask 077
 read -r recovery_ca_b64
 printf '%s' "$recovery_ca_b64" | base64 -d > "/tmp/duducar-recovery-${operation_id}-ca.crt"
 unset recovery_ca_b64
-openssl x509 -in "/tmp/duducar-recovery-${operation_id}-ca.crt" -noout -fingerprint -sha256
+openssl x509 -in "/tmp/duducar-recovery-${operation_id}-ca.crt" \
+  -noout -fingerprint -sha256
 ```
 
-For a non-browser check, use the reserved hostname with `curl --resolve` and
-the retrieved CA (never `-k`):
+Verify readiness through the tunnel:
 
 ```sh
 recovery_host=$("$recovery_tf" output --operation-id "$operation_id" -raw recovery_tls_hostname)
@@ -272,41 +163,26 @@ curl --fail --cacert "/tmp/duducar-recovery-${operation_id}-ca.crt" \
   "https://${recovery_host}:${recovery_port}/health/ready/"
 ```
 
-Then perform:
+In the temporary profile, verify one owner login, a protected dashboard page,
+one unfiltered playback CSV, logout, and the protected redirect. A header-only
+CSV proves the export path only when the source truly has zero playback events.
+Never seed evidence, retain CSV values, or copy driver PII into the record.
 
-1. one known account-owner login;
-2. a protected dashboard request after login; and
-3. one unfiltered playback CSV export.
-
-The unfiltered CSV must download successfully with its privacy-preserving
-headers. A data row is not required: if the selected source has no
-`PlaybackEvent` records, a header-only CSV is an acceptable zero-row result.
-Record that result without seeding or fabricating playback evidence. It proves
-that the recovered export route works, not that proof-of-play evidence was
-restored.
-
-Do not use production DNS for this test. The SSM tunnel plus loopback listener
-is the only permitted application path. Record the expected clone-only audit
-events and report result, but never copy driver personal data into the change
-record.
-
-For the logical backup path, stop the recovery stack, then restore the exact
-versioned archive only into the already-disposable cloned database:
+Next test the logical archive against the same disposable clone:
 
 ```sh
+sudo /usr/local/sbin/duducar-recovery-stack stop
 sudo /usr/local/sbin/duducar-recovery-restore logical
 sudo /usr/local/sbin/duducar-recovery-restore media
 sudo /usr/local/sbin/duducar-recovery-stack start
 ```
 
-Repeat the same owner-login/dashboard/report smoke. The helper verifies the
-sidecar and archive catalogue before dropping the literal `signage` database on
-the **clone**. It never touches the source snapshot or production host.
+Repeat the owner/dashboard/report smoke. The helper verifies the exact sidecar
+and catalogue before recreating only the clone's literal `signage` database.
 
 ## Cleanup and evidence
 
-After the tests, stop containers, unmount the clone, then use the same isolated
-state key and exact `terraform.tfvars` to destroy only this operation.
+Stop, unmount, remove the temporary CA/profile, and destroy only this operation:
 
 ```sh
 sudo /usr/local/sbin/duducar-recovery-stack stop
@@ -314,16 +190,13 @@ sudo /usr/local/sbin/duducar-recovery-mount unmount
 rm -f "/tmp/duducar-recovery-${operation_id}-ca.crt"
 "$recovery_tf" destroy --operation-id "$operation_id" \
   -var-file=terraform.tfvars
+"$recovery_tf" cleanup-check --operation-id "$operation_id"
 ```
 
-The wrapper generates a fresh destruction plan and requires exactly
-`DESTROY <operation-id>` before it applies it. After destroy, run
-`"$recovery_tf" cleanup-check --operation-id "$operation_id"`; it verifies
-account `173454940059`, that no nonterminated recovery instance, cloned volume,
-or recovery security group remains, and the exact named IAM role/profile is
-absent. Do not use Resource Groups Tagging API as a deletion signal: AWS keeps
-previously tagged resources in that historical index. Record source IDs/versions, start/end times,
-owner-login/report/media-proof result, RPO/RTO, cost window,
-instance/volume/role/security-group IDs, destruction result, and approver. Do
-not delete the DLM source snapshot or the separately retained manual bootstrap
-snapshot during this cleanup.
+Destroy requires `DESTROY <operation-id>`. `cleanup-check` must confirm that no
+recovery instance, clone, security group, role, or profile remains; do not use
+the historical Resource Groups Tagging index as deletion proof. Retain the
+empty state path and redacted evidence: source IDs/versions, operation ID,
+timings/RPO/RTO, temporary resource IDs, TLS/loopback checks, aggregate/media
+comparison, owner/report/CSV result, cost, cleanup result, and approver. Never
+delete a source snapshot or retained bootstrap snapshot during drill cleanup.
