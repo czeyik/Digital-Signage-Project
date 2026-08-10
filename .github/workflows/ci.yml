@@ -165,6 +165,8 @@ jobs:
         with:
           platforms: arm64
       - uses: docker/setup-buildx-action@v4
+      - name: Verify backend Docker build-context exclusions
+        run: bash backend/signage/tests/test_docker_build_context.sh
       - name: Build production-architecture backend image
         run: >-
           docker buildx build

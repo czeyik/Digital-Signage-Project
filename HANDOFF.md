@@ -25,9 +25,9 @@ Malaysia pilot on the existing low-cost AWS design. Keep the current Android
   documentation changes.
 - The concise AGENTS revision is commit `c60d259` on
   `docs/condense-agent-playbook`; it is not merged into `main`.
-- Recovery CSV acceptance is on unmerged branch
-  `docs/recovery-header-only-csv-acceptance` (`7d6fabe`); reconcile it into
-  the reviewed release documentation before final go/no-go.
+- Recovery CSV acceptance was merged through PR #46: a header-only unfiltered
+  playback CSV is valid only when the restored source has zero playback events;
+  never seed or fabricate evidence.
 
 ## Decisions and completed evidence
 
