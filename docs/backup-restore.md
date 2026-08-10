@@ -519,11 +519,14 @@ the repository with mode `0600`.
    fingerprint to `tls-info`, and remove it after the smoke. Do not use `-k` or
    a browser certificate click-through. Do not create a Route 53 record, use a
    production hostname, or bypass TLS with plain HTTP. Verify `/health/live/`
-   and `/health/ready/`, sign in as an existing account owner, open one
-   representative report containing restored data, export one representative
-   playback CSV from the **clone**, and log out. Do not retain or copy CSV
-   contents, upload media, publish a playlist, create an enrollment code, or
-   change a user/device.
+   and `/health/ready/`, sign in as an existing account owner, open the
+   protected dashboard's **Proof of play: last 7 days** report, export one
+   unfiltered playback CSV from the **clone**, and log out. A header-only
+   unfiltered CSV is acceptable when the restored source has no playback
+   events; record that zero-row result without seeding or fabricating evidence.
+   It verifies the recovered reporting route, not the restoration of
+   proof-of-play evidence. Do not retain or copy CSV contents, upload media,
+   publish a playlist, create an enrollment code, or change a user/device.
 
 7. Record the source versions, state key, operation ID, image digests,
    recovery host/volume IDs, test start/end times, TLS and loopback evidence,

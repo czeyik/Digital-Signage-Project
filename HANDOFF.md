@@ -1,6 +1,6 @@
 # Digital Signage Project — Deployment Handoff
 
-**Updated:** 2026-08-09 Asia/Kuala_Lumpur
+**Updated:** 2026-08-10 Asia/Kuala_Lumpur
 
 **Scope:** controlled live launch of the 10-vehicle Malaysia pilot.
 **Authoritative operating constraints:** `AGENTS.md` and `docs/architecture.md`.
@@ -22,6 +22,16 @@ The next agent should preserve the pilot topology and its cost/safety limits:
   continuously running worker.
 - The USD 30/month target, private S3/CloudFront delivery, and 24-hour RPO/RTO
   remain non-negotiable pilot constraints.
+
+## Recovery CSV acceptance decision
+
+The owner has confirmed that the current system has no real playback records.
+For the isolated application recovery smoke, a successful header-only,
+unfiltered playback CSV is therefore acceptable when the restored source has
+zero `PlaybackEvent` records. Record the zero-row result, but never seed or
+fabricate playback evidence. This verifies the recovered reporting route only;
+it does not prove proof-of-play recovery and does not change the product's
+evidence or reporting requirements once real playback exists.
 
 ## Source-control and CI handoff
 

@@ -1,5 +1,7 @@
+import csv
 import importlib
 from datetime import timedelta
+from io import StringIO
 
 import pytest
 from django.apps import apps
@@ -85,6 +87,39 @@ def test_marketing_user_cannot_see_driver_name_in_csv(client):
     assert response.status_code == 200
     assert "driver_internal_id" in response.content.decode()
     assert "driver_name" not in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_playback_csv_is_header_only_when_no_events(client):
+    user = User.objects.create_user(
+        "marketing@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    client.force_login(user)
+
+    response = client.get(reverse("playback-csv"))
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "text/csv"
+    assert list(csv.reader(StringIO(response.content.decode()))) == [
+        [
+            "event_id",
+            "device",
+            "vehicle",
+            "driver_internal_id",
+            "playlist",
+            "media",
+            "started_at",
+            "status",
+            "duration_ms",
+            "captured_offline",
+            "report_state",
+            "latest_correction_status",
+            "failure_category",
+            "evidence_notice",
+        ]
+    ]
 
 
 @pytest.mark.django_db
