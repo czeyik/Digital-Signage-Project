@@ -1,28 +1,22 @@
-# Production Deployment Readiness
+# Production Readiness Checks
 
-Production currently runs on one ARM `t4g.small`: Caddy fronts the
-Django/Gunicorn container, PostgreSQL 16 runs on the encrypted local data
-volume, validated media is delivered from private S3 through signed CloudFront
-URLs, and each upload may dispatch one isolated Fargate worker task. There is
-no ECS web service, continuous media worker, ALB, or live RDS instance.
+Use these checks for the EC2 topology in [`architecture.md`](architecture.md).
+The [production runbook](production-deployment-runbook.md) remains the release
+and canary authority.
 
-## Application readiness
+## Application
 
-Run the production check in a production-like environment before building the
-release image:
+Before building the release image, run in a production-like environment:
 
 ```sh
 python manage.py check_deployment_readiness --environment production
 ```
 
-The check verifies that debug mode is off, PostgreSQL and private object
-storage are configured, production hostnames are present, secure cookies,
-HTTPS redirect, trusted proxy HTTPS detection, SMTP email, and media-processing
-tools are available. Console-only email is a production error because password
-reset must work before launch.
+This must confirm production hostnames, PostgreSQL, private object storage,
+secure cookies/HTTPS/proxy handling, SMTP, and media tools, with debug and
+console-only email disabled.
 
-After deploying the pinned image, connect to the EC2 host through Session
-Manager and run the host-managed check:
+After deploying the pinned image through SSM, run:
 
 ```sh
 sudo /usr/local/sbin/duducar-command readiness
@@ -30,15 +24,13 @@ sudo /usr/local/sbin/duducar-stack status
 sudo systemctl is-active duducar.service
 ```
 
-The web container must run its default Gunicorn command behind Caddy. Do not
-start `process_media --loop` in production. A real test upload must dispatch
-the bounded `duducar-signage-production-ec2-media-worker` Fargate task, pass
-quarantine/scanning/normalization, and let the task exit.
+Django/Gunicorn must run behind Caddy. Production must not run
+`process_media --loop`; a test upload must launch the bounded isolated Fargate
+worker, complete quarantine/scanning/normalization, and let the task exit.
 
-## Timers, backups, and public routes
+## Timers and recovery layers
 
-The former Fargate schedules are replaced by five systemd timers on the EC2
-host. Verify all are enabled and waiting:
+Verify all five host timers:
 
 ```sh
 sudo systemctl is-active \
@@ -50,31 +42,29 @@ sudo systemctl is-active \
 sudo systemctl list-timers 'duducar-*'
 ```
 
-Run and verify the production logical-backup workflow through its managed
-wrapper:
+Run the managed backup once:
 
 ```sh
 sudo /usr/local/sbin/duducar-command backup
 ```
 
-Confirm the new archive and SHA-256 sidecar exist in the private versioned
-backup bucket, and confirm a current DLM-managed data-volume snapshot exists.
-An enabled DLM policy without a completed snapshot is not recovery coverage.
+Require a versioned private archive, matching SHA-256 sidecar, and a current
+completed DLM data-volume snapshot. An enabled policy is not restore evidence;
+follow [`backup-restore.md`](backup-restore.md) for the recovery gate.
 
-Verify Caddy, DNS, TLS, and application routing from outside the host:
+## Public routes and media
+
+From outside the host, verify:
 
 ```sh
 curl --fail --show-error https://marketing.duducaradmin.com/health/live/
 curl --fail --show-error https://api.marketing.duducaradmin.com/health/ready/
 ```
 
-Also verify unsigned or expired CloudFront media requests are denied and a
-fresh signed validated-media URL succeeds.
+Also require HTTP-to-HTTPS redirection, valid TLS, a successful fresh signed
+validated-media request, and denial of unsigned, expired, modified,
+quarantined, or arbitrary object requests.
 
-Development and production must use separate databases, buckets, secrets,
-credentials, enrollment codes, backup roots, and device identities. Set
-`DEPLOYMENT_ENV` explicitly in each environment and never reuse production
-credentials locally.
-
-See `docs/production-deployment-runbook.md` for the complete change and canary
-gate, and `docs/backup-restore.md` for current recovery procedures.
+Stop if development and production share a database, bucket, secret,
+credential, enrollment code/root, backup root, or device identity. Set
+`DEPLOYMENT_ENV` explicitly and never use production credentials locally.

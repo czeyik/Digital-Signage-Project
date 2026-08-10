@@ -1,19 +1,10 @@
 # USD 30 Production Infrastructure Operations
 
-The live production topology is:
-
-- one ARM64 `t4g.small` EC2 host with an Elastic IP;
-- Caddy, Django, and local PostgreSQL containers managed by systemd;
-- Route 53 application records pointing directly to the EC2 Elastic IP;
-- private S3 media objects delivered through CloudFront signed URLs;
-- one isolated Fargate media-worker task started on demand for each upload;
-- local systemd timers for health, playlists, media reconciliation, retention,
-  and logical backups; and
-- encrypted EBS storage, daily logical S3 backups, and DLM snapshots.
-
-There is no live ECS web service, EventBridge application schedule, ALB, RDS
-instance, continuous media worker, or ECS Container Insights. The ECS cluster
-remains only because the application dispatches isolated Fargate media tasks.
+This is the command reference for the production topology defined in
+[`docs/architecture.md`](../docs/architecture.md): one ARM64 EC2 host, private
+CloudFront/S3 media, on-demand Fargate processing, systemd timers, and layered
+backups. ECS web services and schedules, ALB, live RDS, the continuous worker,
+and Container Insights are retired and are not recovery paths.
 
 The Terraform names `ec2_target`, `migration_target`, and `legacy_*` are
 migration-era state addresses. They are intentionally retained to avoid
@@ -99,89 +90,22 @@ deployment procedure.
 
 ## Isolated application recovery smoke
 
-The application-level restore gate uses the separate
-`infrastructure/recovery-smoke` Terraform root, not a workspace or target of
-the production root. Each authorised drill has a fresh 32-hex-character
-operation ID and its own encrypted, locked state key:
+Use only the separate `infrastructure/recovery-smoke` root and its
+`recovery-terraform` wrapper. Each authorized drill needs a fresh 32-hex
+operation ID and isolated state key; it must never use production state, raw
+Terraform, SSH, ingress, production DNS, or production writes.
 
-```text
-recovery-smoke/<operation-id>.tfstate
-```
+The reviewed plan may create only operation-tagged recovery resources: one
+zero-ingress host/security group/role and one encrypted snapshot clone. Use the
+recovery mount helper exclusively; direct mounts, `/etc/fstab`, generic repairs,
+and `xfs_repair -L` are forbidden. A recognized dirty journal requires the
+operation-bound `REPLAY-JOURNAL <operation-id>` flow while Docker remains
+masked. Access the loopback recovery TLS listener only through SSM.
 
-Initialize it only through its mandatory wrapper; it fixes and verifies the
-backend metadata/default workspace before every stateful command. The Terraform
-guardrail is a second check for the normal local data directory; the wrapper is
-what prevents Terraform environment indirection. Never initialize this root
-against `production/terraform.tfstate`:
-
-```sh
-./infrastructure/recovery-smoke/recovery-terraform init \
-  --operation-id "$recovery_operation_id"
-```
-
-The recovery root accepts explicit source snapshot, source-volume, archive,
-sidecar, and normalized-media version identifiers, plus the reviewed recovery
-subnet, KMS/secret ARNs, ARM64 AMI, and digest-pinned images. Account, Region,
-Project tag, recovery hostname, and backend ECR repository are fixed in the
-root rather than accepted from tfvars. It must not use production Terraform
-state as an input. Its outputs identify the temporary instance, clone, security
-group, instance profile, operation ID, recovery-only TLS hostname/CA path, an
-SSM port-forward command, and a tagged-resource cleanup query.
-
-Before an authorised apply, review the saved plan for all of these non-negotiable
-properties:
-
-- each temporary resource is tagged with the exact operation ID;
-- the recovery security group has **zero ingress**, no Elastic IP/DNS/public
-  listener exists, and its ordinary ephemeral public IPv4 is used only for
-  outbound HTTPS because the public subnet has no NAT or interface endpoints;
-  Systems Manager is the only administrative path;
-- the temporary role can read only the selected versioned backup/media objects,
-  application secret, ECR images, and SSM channels, but has no production
-  write capability; and
-- no production host, data volume, snapshot, backup object/version, Route 53
-  record, IAM role, or production state object will change.
-
-The clone includes `/srv/duducar/docker`, the normal production Docker
-data-root. Pointing Docker at that copied directory can automatically restart
-cloned containers under their saved restart policies. The recovery root must
-use its recovery-only local Docker data-root and recovery runtime/Caddy
-configuration before Docker starts; do not run the normal production stack
-helper against the clone.
-
-Because a DLM snapshot is crash-consistent, its XFS journal can require replay.
-Use only `duducar-recovery-mount inspect` for the initial read-only
-`nouuid,norecovery` check. A clean inspection permits the helper's normal
-`mount`; the helper's recognized pending dirty-log result instead requires the
-explicit, operation-bound confirmation `replay-journal --confirm
-"REPLAY-JOURNAL <operation-id>"`. That helper keeps Docker's service and socket
-masked and inactive, confirms the clone is unmounted, mounts only the
-disposable clone briefly at a temporary directory to replay its journal, then
-requires a clean post-replay `xfs_repair -n` before allowing the normal clone
-mount. Never mount the recovery device directly, add it to `/etc/fstab`, or
-run `xfs_repair -L`. Journal replay writes only the disposable clone: it cannot
-change the source snapshot, source volume, production host, or production data
-plane. The detailed operation procedure is in
-[`infrastructure/recovery-smoke/README.md`](recovery-smoke/README.md).
-
-The recovery Caddy listener uses recovery-only TLS, a loopback bind, and an
-operation-specific reserved `.test` hostname. Open it only through the root's
-SSM port-forward output and map only that hostname locally; do not create DNS,
-expose a public port, use production hostnames/certificates, or convert the
-smoke test into a traffic cutover. Disable all application timers and never run
-the production backup command: this drill must not write a backup, media
-object, alert, email, task, or other mutation to production.
-
-The root deliberately does not auto-clean temporary resources. After the
-owner-login and representative-report smoke passes, confirm a
-`DESTROY <operation-id>` prompt, destroy only that recovery root, and execute
-its `cleanup-check`. The check verifies the guarded account, native EC2
-liveness (no nonterminated recovery instance, cloned volume, or recovery
-security group), and the named temporary IAM role/profile. It intentionally
-does not use Resource Groups Tagging API, which returns previously tagged
-resources after deletion. Retain the empty per-operation state path and cleanup
-result as evidence. The full preflight, restore, TLS-tunnel test, and cleanup
-procedure is in [`docs/backup-restore.md`](../docs/backup-restore.md).
+Follow [the recovery-smoke command guide](recovery-smoke/README.md) exactly and
+the [recovery control sequence](../docs/backup-restore.md). Finish with the
+wrapper's `DESTROY <operation-id>` confirmation and `cleanup-check`, and retain
+redacted evidence.
 
 ## Build and release
 
@@ -207,9 +131,9 @@ reviewed backend ECR repository and a semantic Android version only when both
 exactly match the Terraform release selection embedded in the document. It
 atomically changes only those two assignments, preserves a root-only operation
 backup, and does not print the configuration or restart a service. The required
-app version must equal the signed APK version name. Use the exact pinned Terraform/SSM
-`Mode=validate`, `Mode=install`, status-polling, confirmation, and rollback
-procedure in the [production deployment runbook](../docs/production-deployment-runbook.md#deploy-the-ec2-release).
+app version must equal the signed APK version name. Use the pinned Terraform/SSM
+`Mode=validate`, `Mode=install`, confirmation, and rollback sequence in the
+[production deployment runbook](../docs/production-deployment-runbook.md#configure-and-deploy-through-ssm).
 Record the full commit, document version and hash, command IDs, digest, app
 version, and one 32-hex operation ID.
 
@@ -481,29 +405,15 @@ audited Session Manager session and `/usr/local/sbin/duducar-command`.
 
 ## Backup, recovery, and rollback
 
-The current database is local PostgreSQL on the encrypted EC2 data volume.
-RDS snapshots are historical decommission evidence and do not contain current
-production writes.
-
-Use the current logical backup command and verify its S3 archive and checksum:
+The current database is PostgreSQL on encrypted EC2 data storage. RDS snapshots
+contain only stale historical data. Create logical backups through the managed
+command:
 
 ```sh
 sudo /usr/local/sbin/duducar-command backup
 ```
 
-Daily DLM snapshots are a second, crash-consistent recovery layer; they do not
-replace logical backups or restore tests. Restore into an isolated database or
-volume, reconcile immutable record counts, and record RPO/RTO evidence before
-relying on a backup.
-
-A rollback is a host image/configuration rollback plus a reviewed database
-recovery decision. It is never performed by enabling the retired ALB, ECS web
-service, schedules, or RDS controls. After
-`0010_battery_backed_player_policy`, historic-column compatibility is for
-old-image reads in isolated recovery only: it does not restore the former
-policy or make a pre-policy application image a normal production rollback.
-
-The completed migration evidence is archived in
-[`docs/archive/2026-07-28-usd30-migration.md`](../docs/archive/2026-07-28-usd30-migration.md).
-Current recovery procedures remain in
-[`docs/backup-restore.md`](../docs/backup-restore.md).
+Verify its versioned archive and checksum. DLM snapshots supplement, but never
+replace, logical backups and restore tests. Current restore and rollback rules
+are in [`docs/backup-restore.md`](../docs/backup-restore.md); completed migration
+evidence is [archived separately](../docs/archive/2026-07-28-usd30-migration.md).

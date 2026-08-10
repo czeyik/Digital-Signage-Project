@@ -38,7 +38,7 @@ production tfvars to this exact `productionVersionName`. The server compares
 that value to the APK version name in every heartbeat; a mismatch produces an
 outdated-app alert even when the APK is otherwise valid.
 
-### Approved first production release identity — 2026-08-08
+## Approved first production release identity — 2026-08-08
 
 The pending first production canary uses previous version code `0`, production
 version code `1`, and production version name `1.0.0`. The production tfvars
