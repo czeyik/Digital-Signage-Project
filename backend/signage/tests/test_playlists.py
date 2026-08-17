@@ -5,12 +5,12 @@ from threading import Barrier
 import pytest
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import close_old_connections, connection, connections
+from django.db import close_old_connections, connection, connections, transaction
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from signage.models import MediaAsset, Playlist, PlaylistItem, User
+from signage.models import MediaAsset, MediaDeletion, Playlist, PlaylistItem, User
 from signage.services import delete_media_binary, publish_playlist
 
 TEST_STATICFILES_STORAGES = {
@@ -323,7 +323,7 @@ def test_media_binary_deletion_is_blocked_when_referenced_by_future_playlist():
 
 
 @pytest.mark.django_db
-def test_unreferenced_media_binary_deletion_preserves_metadata():
+def test_unreferenced_media_binary_deletion_queues_a_durable_outbox_entry():
     owner = User.objects.create_user(
         "owner@duducar.co",
         "A-very-long-password-123",
@@ -345,8 +345,39 @@ def test_unreferenced_media_binary_deletion_preserves_metadata():
     media.refresh_from_db()
     assert media.status == MediaAsset.Status.ARCHIVED
     assert media.business_name == "Example"
-    assert not media.source_file
-    assert not media.normalized_file
+    assert media.source_file
+    assert media.normalized_file
+    deletion = MediaDeletion.objects.get(asset=media)
+    assert deletion.source_name == media.source_file.name
+    assert deletion.normalized_name == media.normalized_file.name
+    assert deletion.completed_at is None
+
+
+@pytest.mark.django_db
+def test_media_deletion_outbox_rolls_back_with_the_archive_transaction():
+    owner = User.objects.create_user(
+        "rollback-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Rollback poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("rollback.png", b"source"),
+        duration_ms=10_000,
+        uploaded_by=owner,
+    )
+
+    with transaction.atomic():
+        delete_media_binary(media, owner)
+        assert MediaDeletion.objects.filter(asset=media).exists()
+        transaction.set_rollback(True)
+
+    media.refresh_from_db()
+    assert media.status == MediaAsset.Status.READY
+    assert not MediaDeletion.objects.filter(asset=media).exists()
 
 
 @pytest.mark.django_db
@@ -533,5 +564,6 @@ def test_media_dashboard_requires_explicit_binary_deletion_confirmation(
     assert client.post(url, {"confirm": "delete"}).status_code == 302
     media.refresh_from_db()
     assert media.status == MediaAsset.Status.ARCHIVED
-    assert not media.source_file
-    assert not media.normalized_file
+    assert media.source_file
+    assert media.normalized_file
+    assert MediaDeletion.objects.filter(asset=media, completed_at__isnull=True).exists()

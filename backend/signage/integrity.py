@@ -1,11 +1,50 @@
+import base64
+import binascii
 import hmac
 import json
+import string
 from datetime import datetime
 from datetime import timezone as dt_timezone
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from rest_framework import exceptions
+
+
+def configured_certificate_fingerprints():
+    """Return configured APK signing-certificate SHA-256 fingerprints.
+
+    Operators record the hex fingerprint emitted by ``apksigner``. Play
+    Integrity returns the same bytes in URL-safe Base64, so keep configuration
+    readable and normalize the API value separately.
+    """
+
+    fingerprints = set()
+    for raw in settings.PLAY_INTEGRITY_APP_CERTIFICATE_SHA256:
+        fingerprint = raw.replace(":", "").replace(" ", "").lower()
+        if len(fingerprint) != 64 or any(
+            character not in string.hexdigits for character in fingerprint
+        ):
+            raise ImproperlyConfigured(
+                "PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 must contain comma-separated "
+                "SHA-256 certificate fingerprints in 64-character hex."
+            )
+        fingerprints.add(fingerprint)
+    if not fingerprints:
+        raise ImproperlyConfigured(
+            "PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 is required in production."
+        )
+    return fingerprints
+
+
+def certificate_digest_hex(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except (ValueError, UnicodeEncodeError, binascii.Error):
+        return None
+    return decoded.hex() if len(decoded) == 32 else None
 
 
 def _credentials_info():
@@ -68,4 +107,27 @@ def verify_integrity_token(token, expected_request_hash):
     verdicts = payload.get("deviceIntegrity", {}).get("deviceRecognitionVerdict", [])
     if "MEETS_DEVICE_INTEGRITY" not in verdicts:
         raise exceptions.PermissionDenied("Device integrity requirements failed.")
+    app_integrity = payload.get("appIntegrity", {})
+    if not isinstance(app_integrity, dict):
+        raise exceptions.AuthenticationFailed("Device integrity requirements failed.")
+    if app_integrity.get("packageName") != settings.PLAY_INTEGRITY_PACKAGE_NAME:
+        raise exceptions.AuthenticationFailed("Device integrity requirements failed.")
+    # Staff sideload the company APK. Google labels that build
+    # UNRECOGNIZED_VERSION, but still returns its signing certificate digest;
+    # reject it unless that digest is explicitly approved by the operator.
+    if app_integrity.get("appRecognitionVerdict") not in {
+        "PLAY_RECOGNIZED",
+        "UNRECOGNIZED_VERSION",
+    }:
+        raise exceptions.AuthenticationFailed("Device integrity requirements failed.")
+    certificate_digests = app_integrity.get("certificateSha256Digest", [])
+    if not isinstance(certificate_digests, list):
+        raise exceptions.AuthenticationFailed("Device integrity requirements failed.")
+    token_fingerprints = {
+        fingerprint
+        for value in certificate_digests
+        if (fingerprint := certificate_digest_hex(value))
+    }
+    if not token_fingerprints.intersection(configured_certificate_fingerprints()):
+        raise exceptions.AuthenticationFailed("Device integrity requirements failed.")
     return payload

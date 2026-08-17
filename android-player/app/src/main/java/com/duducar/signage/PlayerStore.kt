@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.time.Instant
 
 class PlayerStore(private val context: Context) :
-    SQLiteOpenHelper(context, "player.db", null, 2) {
+    SQLiteOpenHelper(context, "player.db", null, 4) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -25,12 +25,14 @@ class PlayerStore(private val context: Context) :
             CREATE TABLE pending_batches (
                 id TEXT PRIMARY KEY,
                 payload TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                acknowledged INTEGER NOT NULL DEFAULT 0
+                payload_bytes INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
             )
             """.trimIndent(),
         )
         createOperationalTable(db)
+        createRejectedUploadTable(db)
+        createQueueIndexes(db)
     }
 
     private fun createOperationalTable(db: SQLiteDatabase) {
@@ -45,8 +47,46 @@ class PlayerStore(private val context: Context) :
         )
     }
 
+    private fun createRejectedUploadTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS rejected_uploads (
+                category TEXT NOT NULL,
+                id TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                status_code INTEGER NOT NULL,
+                rejected_at INTEGER NOT NULL,
+                PRIMARY KEY (category, id)
+            )
+            """.trimIndent(),
+        )
+    }
+
+    private fun createQueueIndexes(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS pending_batches_created_idx ON pending_batches(created_at)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS pending_operational_events_created_idx " +
+                "ON pending_operational_events(created_at)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS rejected_uploads_rejected_idx ON rejected_uploads(rejected_at)",
+        )
+    }
+
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createOperationalTable(db)
+        if (oldVersion < 3) {
+            db.execSQL(
+                "ALTER TABLE pending_batches ADD COLUMN payload_bytes INTEGER NOT NULL DEFAULT 0",
+            )
+            db.execSQL(
+                "UPDATE pending_batches SET payload_bytes = length(CAST(payload AS BLOB))",
+            )
+        }
+        if (oldVersion < 4) createRejectedUploadTable(db)
+        createQueueIndexes(db)
     }
 
     fun putState(key: String, value: String) {
@@ -349,16 +389,7 @@ class PlayerStore(private val context: Context) :
         minimumFreeBytes: Long = 2L * 1024 * 1024 * 1024,
         recordedAt: String = java.time.Instant.now().toString(),
     ): JSONObject? {
-        writableDatabase.insertWithOnConflict(
-            "pending_batches",
-            null,
-            ContentValues().apply {
-                put("id", batch.getString("id"))
-                put("payload", batch.toString())
-                put("created_at", System.currentTimeMillis())
-            },
-            SQLiteDatabase.CONFLICT_IGNORE,
-        )
+        insertBatch(writableDatabase, batch)
         return enforceStoragePolicy(maxBytes, minimumFreeBytes, recordedAt)
     }
 
@@ -371,16 +402,7 @@ class PlayerStore(private val context: Context) :
         val database = writableDatabase
         database.beginTransaction()
         try {
-            database.insertWithOnConflict(
-                "pending_batches",
-                null,
-                ContentValues().apply {
-                    put("id", batch.getString("id"))
-                    put("payload", batch.toString())
-                    put("created_at", System.currentTimeMillis())
-                },
-                SQLiteDatabase.CONFLICT_IGNORE,
-            )
+            insertBatch(database, batch)
             putState(database, "current_playback", "")
             putState(database, "loop_results", "")
             putState(database, "loop_started_at", "")
@@ -389,6 +411,21 @@ class PlayerStore(private val context: Context) :
             database.endTransaction()
         }
         return enforceStoragePolicy(maxBytes, minimumFreeBytes, recordedAt)
+    }
+
+    private fun insertBatch(database: SQLiteDatabase, batch: JSONObject) {
+        val payload = batch.toString()
+        database.insertWithOnConflict(
+            "pending_batches",
+            null,
+            ContentValues().apply {
+                put("id", batch.getString("id"))
+                put("payload", payload)
+                put("payload_bytes", payload.toByteArray(Charsets.UTF_8).size)
+                put("created_at", System.currentTimeMillis())
+            },
+            SQLiteDatabase.CONFLICT_IGNORE,
+        )
     }
 
     fun clearPlaybackState() {
@@ -418,26 +455,54 @@ class PlayerStore(private val context: Context) :
         }
     }
 
-    fun pendingBatches(): List<Pair<String, JSONObject>> {
-        val values = mutableListOf<Pair<String, JSONObject>>()
-        readableDatabase.query(
-            "pending_batches",
-            arrayOf("id", "payload"),
-            "acknowledged = 0",
-            null,
-            null,
-            null,
-            "created_at",
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                values += cursor.getString(0) to JSONObject(cursor.getString(1))
-            }
-        }
-        return values
-    }
+    fun oldestPendingBatch(recordedAt: String): Pair<String, JSONObject>? =
+        oldestPending(
+            table = "pending_batches",
+            discardInvalid = { id ->
+                discardBatchAsPoison(id, LOCAL_CORRUPTION_STATUS, recordedAt)
+            },
+        )
+
+    fun pendingBatch(id: String): JSONObject? =
+        payloadFor(readableDatabase, "pending_batches", id)
+            ?.let { payload -> runCatching { JSONObject(payload) }.getOrNull() }
 
     fun acknowledgeBatch(id: String) {
         writableDatabase.delete("pending_batches", "id = ?", arrayOf(id))
+    }
+
+    fun discardBatchAsPoison(
+        id: String,
+        statusCode: Int,
+        recordedAt: String,
+    ): Boolean {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val payload = payloadFor(database, "pending_batches", id) ?: return false
+            archiveRejectedUpload(database, "playback_batch", id, payload, statusCode)
+            database.delete("pending_batches", "id = ?", arrayOf(id))
+            enqueueOperationalEvent(
+                database,
+                JSONObject()
+                    .put("kind", "forced_queue_loss")
+                    .put("recorded_at", recordedAt)
+                    .put(
+                        "details",
+                        JSONObject()
+                            .put("removed_batches", 1)
+                            .put(
+                                "estimated_removed_bytes",
+                                payload.toByteArray(Charsets.UTF_8).size,
+                            )
+                            .put("target_removed_bytes", 0),
+                    ),
+            )
+            database.setTransactionSuccessful()
+            return true
+        } finally {
+            database.endTransaction()
+        }
     }
 
     fun enqueueOperationalEvent(event: JSONObject) {
@@ -459,26 +524,114 @@ class PlayerStore(private val context: Context) :
         )
     }
 
-    fun pendingOperationalEvents(): List<Pair<String, JSONObject>> {
-        val values = mutableListOf<Pair<String, JSONObject>>()
-        readableDatabase.query(
-            "pending_operational_events",
-            arrayOf("id", "payload"),
-            null,
-            null,
-            null,
-            null,
-            "created_at",
-        ).use { cursor ->
-            while (cursor.moveToNext()) {
-                values += cursor.getString(0) to JSONObject(cursor.getString(1))
-            }
-        }
-        return values
-    }
+    fun oldestPendingOperationalEvent(): Pair<String, JSONObject>? =
+        oldestPending(
+            table = "pending_operational_events",
+            discardInvalid = { id ->
+                discardAsPoison(
+                    table = "pending_operational_events",
+                    category = "operational_event",
+                    id = id,
+                    statusCode = LOCAL_CORRUPTION_STATUS,
+                )
+            },
+        )
+
+    fun pendingOperationalEvent(id: String): JSONObject? =
+        payloadFor(readableDatabase, "pending_operational_events", id)
+            ?.let { payload -> runCatching { JSONObject(payload) }.getOrNull() }
 
     fun acknowledgeOperationalEvent(id: String) {
         writableDatabase.delete("pending_operational_events", "id = ?", arrayOf(id))
+    }
+
+    fun discardOperationalEventAsPoison(id: String, statusCode: Int): Boolean =
+        discardAsPoison(
+            table = "pending_operational_events",
+            category = "operational_event",
+            id = id,
+            statusCode = statusCode,
+        )
+
+    private fun oldestPending(
+        table: String,
+        discardInvalid: (String) -> Boolean,
+    ): Pair<String, JSONObject>? {
+        while (true) {
+            val row = readableDatabase.query(
+                table,
+                arrayOf("id", "payload"),
+                null,
+                null,
+                null,
+                null,
+                "created_at",
+                "1",
+            ).use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(0) to cursor.getString(1) else null
+            } ?: return null
+            val parsed = runCatching { row.first to JSONObject(row.second) }.getOrNull()
+            if (parsed != null) return parsed
+            // A locally corrupted row must not block later FIFO evidence.
+            if (!discardInvalid(row.first)) return null
+        }
+    }
+
+    private fun discardAsPoison(
+        table: String,
+        category: String,
+        id: String,
+        statusCode: Int,
+    ): Boolean {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val payload = payloadFor(database, table, id) ?: return false
+            archiveRejectedUpload(database, category, id, payload, statusCode)
+            database.delete(table, "id = ?", arrayOf(id))
+            database.setTransactionSuccessful()
+            return true
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    private fun payloadFor(database: SQLiteDatabase, table: String, id: String): String? =
+        database.query(
+            table,
+            arrayOf("payload"),
+            "id = ?",
+            arrayOf(id),
+            null,
+            null,
+            null,
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+
+    private fun archiveRejectedUpload(
+        database: SQLiteDatabase,
+        category: String,
+        id: String,
+        payload: String,
+        statusCode: Int,
+    ) {
+        database.insertWithOnConflict(
+            "rejected_uploads",
+            null,
+            ContentValues().apply {
+                put("category", category)
+                put("id", id)
+                put("payload", payload)
+                put("status_code", statusCode)
+                put("rejected_at", System.currentTimeMillis())
+            },
+            SQLiteDatabase.CONFLICT_REPLACE,
+        )
+        // ponytail: retain a small local diagnostic sample only; a support
+        // export path can replace this cap if long-lived rejected evidence is needed.
+        database.execSQL(
+            "DELETE FROM rejected_uploads WHERE rowid NOT IN " +
+                "(SELECT rowid FROM rejected_uploads ORDER BY rejected_at DESC LIMIT $MAX_REJECTED_UPLOADS)",
+        )
     }
 
     private fun enforceStoragePolicy(
@@ -486,12 +639,11 @@ class PlayerStore(private val context: Context) :
         minimumFreeBytes: Long,
         recordedAt: String,
     ): JSONObject? {
-        writableDatabase.delete("pending_batches", "acknowledged = 1", null)
         val queueBytes = pendingBatchBytes()
         val removalTargetBytes = StoragePolicy.forcedQueueRemovalTargetBytes(
             queueBytes = queueBytes,
             usableBytes = context.filesDir.usableSpace,
-            maxQueueBytes = maxBytes,
+            maxQueueBytes = maxBytes.coerceAtLeast(1),
             minimumFreeBytes = minimumFreeBytes,
         )
         if (removalTargetBytes <= 0) return null
@@ -500,8 +652,8 @@ class PlayerStore(private val context: Context) :
         val batchesToRemove = mutableListOf<Pair<String, Long>>()
         writableDatabase.query(
             "pending_batches",
-            arrayOf("id", "length(payload)"),
-            "acknowledged = 0",
+            arrayOf("id", "payload_bytes"),
+            null,
             null,
             null,
             null,
@@ -548,8 +700,7 @@ class PlayerStore(private val context: Context) :
 
     private fun pendingBatchBytes(): Long =
         readableDatabase.rawQuery(
-            "SELECT COALESCE(SUM(length(payload)), 0) FROM pending_batches " +
-                "WHERE acknowledged = 0",
+            "SELECT COALESCE(SUM(payload_bytes), 0) FROM pending_batches",
             null,
         ).use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else 0L }
 
@@ -604,5 +755,7 @@ class PlayerStore(private val context: Context) :
             "unanchored_planned_shutdown_event_ids"
         const val EXIT_HISTORY_CURSOR = "exit_history_cursor"
         const val EXIT_HISTORY_INSTALLATION_ID = "exit_history_installation_id"
+        const val MAX_REJECTED_UPLOADS = 100
+        const val LOCAL_CORRUPTION_STATUS = 0
     }
 }

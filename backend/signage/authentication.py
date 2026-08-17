@@ -1,7 +1,7 @@
 from django.utils import timezone
 from rest_framework import authentication, exceptions
 
-from .models import DeviceAccessToken, token_hash
+from .models import Device, DeviceAccessToken, token_hash
 
 
 class DevicePrincipal:
@@ -17,6 +17,9 @@ class DevicePrincipal:
 class DeviceAccessTokenAuthentication(authentication.BaseAuthentication):
     keyword = "Bearer"
 
+    def authenticate_header(self, request):
+        return self.keyword
+
     def authenticate(self, request):
         authorization = request.headers.get("Authorization", "")
         parts = authorization.split()
@@ -29,7 +32,7 @@ class DeviceAccessTokenAuthentication(authentication.BaseAuthentication):
             .filter(token_hash=token_hash(parts[1]), expires_at__gt=timezone.now())
             .first()
         )
-        if not access or access.credential.revoked_at:
+        if not access:
             from .models import Alert
             from .services import open_alert, throttle_wait
 
@@ -45,5 +48,9 @@ class DeviceAccessTokenAuthentication(authentication.BaseAuthentication):
                     Alert.Severity.WARNING,
                     "Repeated device API requests used invalid credentials.",
                 )
+            raise exceptions.AuthenticationFailed("Invalid or expired device token.")
+        if access.credential.device.status == Device.Status.DISABLED:
+            raise exceptions.AuthenticationFailed("Invalid or expired device token.")
+        if access.credential.revoked_at:
             raise exceptions.AuthenticationFailed("Invalid or expired device token.")
         return DevicePrincipal(access.credential.device), access

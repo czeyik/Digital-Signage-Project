@@ -1,6 +1,7 @@
-FROM eclipse-temurin:17-jdk-jammy
+FROM eclipse-temurin:17-jdk-jammy@sha256:29467857e8bde40ab1f7befecbda0ea764b95afec1cc7f89aa90f7a766577e19
 
 ARG ANDROID_COMMANDLINE_TOOLS_ZIP=https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+ARG ANDROID_COMMANDLINE_TOOLS_SHA256=2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258
 
 ENV ANDROID_HOME=/opt/android-sdk \
     ANDROID_SDK_ROOT=/opt/android-sdk \
@@ -10,6 +11,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends unzip wget ca-certificates \
     && mkdir -p "$ANDROID_HOME/cmdline-tools" \
     && wget -q "$ANDROID_COMMANDLINE_TOOLS_ZIP" -O /tmp/cmdline-tools.zip \
+    && echo "$ANDROID_COMMANDLINE_TOOLS_SHA256  /tmp/cmdline-tools.zip" | sha256sum -c - \
     && unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools" \
     && mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest" \
     && yes | sdkmanager --licenses >/dev/null \

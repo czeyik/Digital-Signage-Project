@@ -7,7 +7,7 @@ from django.conf import settings
 from django.contrib.auth.base_user import BaseUserManager
 from django.contrib.auth.models import AbstractUser
 from django.core.exceptions import ValidationError
-from django.db import models, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import Q
 from django.utils import timezone
 
@@ -75,6 +75,7 @@ class HardwareQualification(TimeStampedModel):
     model_name = models.CharField(max_length=160)
     firmware_version = models.CharField(max_length=100)
     android_version = models.CharField(max_length=32)
+    security_patch_level = models.CharField(max_length=32, blank=True)
     tested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     test_date = models.DateField()
     evidence_reference = models.CharField(
@@ -121,6 +122,21 @@ class HardwareQualification(TimeStampedModel):
     approved_at = models.DateTimeField(null=True, blank=True)
 
     REQUIRED_PASS_FIELDS = HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS
+    # Approval attests to the exact physical build that was tested. A later
+    # correction must be a new record, rather than rewriting that evidence.
+    IMMUTABLE_AFTER_APPROVAL_FIELDS = (
+        "model_name",
+        "firmware_version",
+        "android_version",
+        "security_patch_level",
+        "tested_by_id",
+        "test_date",
+        "evidence_reference",
+        "legacy_boot_on_vehicle_power_passed",
+        "screen_state_passed",
+        "legacy_external_power_loss_path_passed",
+        *HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS,
+    )
 
     class Meta:
         ordering = ["-test_date", "model_name"]
@@ -142,6 +158,24 @@ class HardwareQualification(TimeStampedModel):
         ]
 
     def clean(self):
+        if self.pk:
+            original = HardwareQualification.objects.filter(pk=self.pk).first()
+            if original and original.approved_at is not None:
+                changed = [
+                    field_name
+                    for field_name in self.IMMUTABLE_AFTER_APPROVAL_FIELDS
+                    if getattr(original, field_name) != getattr(self, field_name)
+                ]
+                if changed:
+                    raise ValidationError(
+                        "Approved hardware qualification evidence is immutable; "
+                        "revoke it and create a fresh qualification record."
+                    )
+                if not original.approved_for_pilot and self.approved_for_pilot:
+                    raise ValidationError(
+                        "A revoked hardware qualification cannot be re-approved; "
+                        "record fresh qualification evidence."
+                    )
         if not self.approved_for_pilot:
             return
         missing = [
@@ -162,11 +196,19 @@ class HardwareQualification(TimeStampedModel):
             raise ValidationError(
                 {"evidence_reference": "Approval requires an evidence reference."}
             )
+        if not self.security_patch_level:
+            raise ValidationError(
+                {
+                    "security_patch_level": (
+                        "Approval requires the verified Android security patch level."
+                    )
+                }
+            )
 
     def save(self, *args, **kwargs):
         if self.approved_for_pilot and self.approved_at is None:
             self.approved_at = timezone.now()
-        if not self.approved_for_pilot:
+        if not self.approved_for_pilot and self._state.adding:
             self.approved_at = None
         self.full_clean()
         return super().save(*args, **kwargs)
@@ -184,6 +226,11 @@ class LoginThrottle(TimeStampedModel):
     def is_locked(self):
         return self.locked_until is not None and self.locked_until > timezone.now()
 
+    class Meta:
+        indexes = [
+            models.Index(fields=["updated_at"], name="signage_login_updated_idx")
+        ]
+
 
 class ApiThrottle(TimeStampedModel):
     key_hash = models.CharField(max_length=64, primary_key=True)
@@ -194,6 +241,9 @@ class ApiThrottle(TimeStampedModel):
     @property
     def is_blocked(self):
         return self.blocked_until is not None and self.blocked_until > timezone.now()
+
+    class Meta:
+        indexes = [models.Index(fields=["updated_at"], name="signage_api_updated_idx")]
 
 
 class UserManager(BaseUserManager):
@@ -551,9 +601,13 @@ class Device(TimeStampedModel):
     android_id_hash = models.CharField(
         max_length=64, blank=True, unique=True, null=True
     )
+    hardware_model = models.CharField(max_length=160, blank=True)
+    hardware_firmware_version = models.CharField(max_length=100, blank=True)
+    hardware_security_patch = models.CharField(max_length=32, blank=True)
     app_version = models.CharField(max_length=32, blank=True)
     android_version = models.CharField(max_length=32, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
+    last_heartbeat_recorded_at = models.DateTimeField(null=True, blank=True)
     last_sync_at = models.DateTimeField(null=True, blank=True)
     last_playback_at = models.DateTimeField(null=True, blank=True)
     current_playlist = models.ForeignKey(
@@ -615,15 +669,30 @@ class EnrollmentCode(TimeStampedModel):
                 device=locked_device,
                 used_at__isnull=True,
             ).update(expires_at=now)
-            raw = f"{secrets.randbelow(1_000_000):06d}"
-            enrollment = cls.objects.create(
-                device=locked_device,
-                code_hash=token_hash(raw),
-                expires_at=now
-                + timedelta(seconds=settings.ENROLLMENT_CODE_TTL_SECONDS),
-                created_by=created_by,
-            )
+            for _ in range(10):
+                raw = f"{secrets.randbelow(1_000_000):06d}"
+                try:
+                    # The unique hash is global. Keep the retry in a savepoint so
+                    # a rare six-digit collision does not poison this transaction.
+                    with transaction.atomic():
+                        enrollment = cls.objects.create(
+                            device=locked_device,
+                            code_hash=token_hash(raw),
+                            expires_at=now
+                            + timedelta(seconds=settings.ENROLLMENT_CODE_TTL_SECONDS),
+                            created_by=created_by,
+                        )
+                except IntegrityError:
+                    continue
+                break
+            else:
+                raise ValidationError("Could not issue a unique enrollment code.")
         return enrollment, raw
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["expires_at"], name="signage_enrollcode_exp_idx")
+        ]
 
     @property
     def is_usable(self):
@@ -645,12 +714,20 @@ class EnrollmentChallenge(TimeStampedModel):
     android_id_hash = models.CharField(max_length=64)
     android_version = models.CharField(max_length=32)
     app_version = models.CharField(max_length=32)
+    hardware_model = models.CharField(max_length=160, blank=True)
+    firmware_version = models.CharField(max_length=100, blank=True)
+    security_patch_level = models.CharField(max_length=32, blank=True)
     expires_at = models.DateTimeField()
     used_at = models.DateTimeField(null=True, blank=True)
 
     @property
     def is_usable(self):
         return self.used_at is None and self.expires_at > timezone.now()
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["expires_at"], name="signage_enrollchall_exp_idx")
+        ]
 
 
 class DeviceCredential(TimeStampedModel):
@@ -685,6 +762,27 @@ class DeviceAccessToken(models.Model):
             + timedelta(seconds=settings.DEVICE_ACCESS_TOKEN_TTL_SECONDS),
         )
         return access, raw
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["expires_at"], name="signage_access_token_exp_idx")
+        ]
+
+
+class MediaDeletion(TimeStampedModel):
+    """Durable outbox entry for irreversible object-store removal."""
+
+    asset = models.OneToOneField(
+        MediaAsset,
+        on_delete=models.PROTECT,
+        related_name="binary_deletion",
+    )
+    source_name = models.CharField(max_length=255, blank=True)
+    normalized_name = models.CharField(max_length=255, blank=True)
+    attempts = models.PositiveIntegerField(default=0)
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    last_error = models.CharField(max_length=255, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
 
 
 class DeviceHeartbeat(models.Model):
@@ -829,6 +927,24 @@ class Alert(TimeStampedModel):
 
     class Meta:
         indexes = [models.Index(fields=["acknowledged_at", "-created_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["device", "code"],
+                condition=Q(
+                    acknowledged_at__isnull=True,
+                    device__isnull=False,
+                ),
+                name="signage_open_device_alert_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["code"],
+                condition=Q(
+                    acknowledged_at__isnull=True,
+                    device__isnull=True,
+                ),
+                name="signage_open_global_alert_unique",
+            ),
+        ]
 
 
 class AuditEvent(models.Model):

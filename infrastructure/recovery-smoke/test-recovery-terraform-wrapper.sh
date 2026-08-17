@@ -114,6 +114,25 @@ if [ "$after_apply_calls" -ne $((before_apply_calls + 1)) ]; then
   exit 1
 fi
 
+# Apply must never accept Terraform's destroy mode under an APPLY confirmation.
+# The wrapper owns that semantic boundary and provides a separate DESTROY flow.
+before_destroy_flag_calls=$(wc -l < "$fake_log")
+if output=$(run_wrapper apply --operation-id "$operation_id" -destroy 2>&1); then
+  echo "Wrapper accepted -destroy through the apply path." >&2
+  exit 1
+else
+  status=$?
+fi
+if [ "$status" -ne 2 ] || [[ "$output" != *'caller-supplied -destroy'* ]]; then
+  echo "Wrapper did not reject apply -destroy as expected." >&2
+  exit 1
+fi
+after_destroy_flag_calls=$(wc -l < "$fake_log")
+if [ "$after_destroy_flag_calls" -ne $((before_destroy_flag_calls + 1)) ]; then
+  echo "Wrapper delegated apply -destroy instead of rejecting it." >&2
+  exit 1
+fi
+
 # Destroy uses the same verified-backend fresh-plan discipline, and its
 # confirmation is bound to the exact operation instead of Terraform's generic
 # `yes`. A wrong confirmation may produce the workspace/plan/show calls only.

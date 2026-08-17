@@ -12,7 +12,10 @@ page is the required control sequence.
 
 - Daily backup is `sudo /usr/local/sbin/duducar-command backup`. Record exact
   archive/sidecar keys, versions, timestamps, KMS key, checksum and catalogue.
-  S3 versioning is a recovery layer, not permission to omit the selected version.
+  Success requires S3 SHA-256 checksums, metadata, KMS encryption, sizes, and
+  concrete version IDs for both objects plus an exact-version sidecar download;
+  a root-only receipt is published only after all checks pass. S3 versioning
+  must remain enabled and is not permission to omit the selected version.
 - Before restore, identify a disposable destination, account/Region/host,
   literal `signage` database, archive and sidecar versions; prove production DNS
   and EIP never target it. Stop its stack/timers/media dispatch; never restore
@@ -36,6 +39,13 @@ page is the required control sequence.
   encryption and retention; a scheduled policy or event is not proof. Rebuild
   the root from reviewed source and use the clone only on an isolated recovery
   host—never attach it to production, EIP, DNS, inbound rules or public app port.
+- Host health checks that the newest completed source-volume snapshot is under
+  36 hours old and fails its timer otherwise. Independently, CloudWatch alarms
+  on the policy's `SnapshotsCreateFailed` and `SnapshotsCreateCompleted`
+  `AWS/EBS` metrics notify operations after exhausted retries or 36 hourly
+  periods without a completion. The metric alarm proves policy completion; the
+  host check and release gate still prove the exact source volume, tags, and
+  age. Require both rather than treating an alarm's `OK` state as restore proof.
 - Root contains runtime/bootstrap; cloned data contains PostgreSQL, local
   credential files and Docker state. Secrets Manager remains authoritative for
   application secrets. Do not regenerate clone database credentials.

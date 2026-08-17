@@ -24,11 +24,12 @@
           {% if user.is_owner %}
           <a class="button" href="{% url 'device-reassign' device.id %}">Reassign</a>
           <form method="post" action="{% url 'device-pin-reset' device.id %}">{% csrf_token %}<button>Reset kiosk PIN</button></form>
-          {% endif %}
           <form method="post" action="{% url 'issue-enrollment' device.id %}">{% csrf_token %}<button>Generate one-time code</button></form>
-          {% if device.status == "disabled" %}
+          <form method="post" action="{% url 'device-credentials-revoke' device.id %}">{% csrf_token %}<button>Revoke credentials</button></form>
+          {% endif %}
+          {% if user.is_owner and device.status == "disabled" %}
           <form method="post" action="{% url 'device-reactivate' device.id %}">{% csrf_token %}<button>Reactivate</button></form>
-          {% else %}
+          {% elif user.is_owner %}
           <form method="post" action="{% url 'device-disable' device.id %}">{% csrf_token %}<button class="danger-button">Disable playback</button></form>
           {% endif %}
         </td>

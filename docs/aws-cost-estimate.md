@@ -12,7 +12,7 @@ The 10-device production pilot in `ap-southeast-5` uses:
 | Backups | Daily versioned S3 archive and 30 incremental DLM recovery points |
 | Processing | One 1-vCPU/2-GiB ARM Fargate task only when an upload needs it |
 | Media | Private S3, CloudFront OAC/signed URLs, request and egress charges |
-| Operations | One KMS key, one application secret, ECR, 30-day logs, SNS, and standard alarms |
+| Operations | One KMS key, one application secret, ECR, 30-day logs, SNS, and standard alarms including two DLM metric alarms |
 
 The working steady-state estimate is **USD 25–28 per month including Malaysian
 service tax**, assuming pilot traffic, modest media storage/egress, and short

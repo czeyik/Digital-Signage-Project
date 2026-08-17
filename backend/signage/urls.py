@@ -51,6 +51,11 @@ urlpatterns = [
         views.device_reactivate,
         name="device-reactivate",
     ),
+    path(
+        "devices/<uuid:device_id>/credentials/revoke/",
+        views.device_credentials_revoke,
+        name="device-credentials-revoke",
+    ),
     path("devices/enrollment-code/", views.enrollment_code, name="enrollment-code"),
     path("devices/kiosk-pin/", views.kiosk_pin, name="kiosk-pin"),
     path("alerts/", views.alert_list, name="alert-list"),

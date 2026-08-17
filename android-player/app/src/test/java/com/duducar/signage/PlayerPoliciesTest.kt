@@ -20,10 +20,11 @@ class PlayerPoliciesTest {
     }
 
     @Test
-    fun queueLossRequiresQueuedEvidenceAndCriticalFreeSpace() {
-        assertFalse(StoragePolicy.shouldForceQueueLoss(0, 100, 200))
-        assertFalse(StoragePolicy.shouldForceQueueLoss(600, 300, 200))
-        assertTrue(StoragePolicy.shouldForceQueueLoss(400, 100, 200))
+    fun queueLossEnforcesTheCapEvenWhenFreeSpaceIsHealthy() {
+        assertFalse(StoragePolicy.shouldForceQueueLoss(0, 100, 500, 200))
+        assertFalse(StoragePolicy.shouldForceQueueLoss(400, 300, 500, 200))
+        assertTrue(StoragePolicy.shouldForceQueueLoss(400, 100, 500, 200))
+        assertTrue(StoragePolicy.shouldForceQueueLoss(501, 10_000, 500, 200))
     }
 
     @Test
@@ -39,6 +40,33 @@ class PlayerPoliciesTest {
         assertEquals(
             50L,
             StoragePolicy.forcedQueueRemovalTargetBytes(50, 0, 500, 200),
+        )
+        assertEquals(
+            126L,
+            StoragePolicy.forcedQueueRemovalTargetBytes(501, 10_000, 500, 200),
+        )
+    }
+
+    @Test
+    fun imageDecodeBoundsRejectOversizedBitmapsBeforeAllocation() {
+        assertTrue(ImageDecodePolicy.hasSafeBounds(1920, 1080))
+        assertFalse(ImageDecodePolicy.hasSafeBounds(1921, 1080))
+        assertFalse(ImageDecodePolicy.hasSafeBounds(1920, 1081))
+        assertFalse(ImageDecodePolicy.hasSafeBounds(0, 1080))
+    }
+
+    @Test
+    fun apiResponseReaderCapsUnknownLengthBodies() {
+        assertEquals(
+            "ok",
+            ApiResponsePolicy.readBounded(ByteArrayInputStream("ok".toByteArray())),
+        )
+        assertTrue(
+            runCatching {
+                ApiResponsePolicy.readBounded(
+                    ByteArrayInputStream(ByteArray(ApiResponsePolicy.MAX_BYTES + 1)),
+                )
+            }.isFailure,
         )
     }
 
@@ -263,7 +291,7 @@ class PlayerPoliciesTest {
             PlaybackRecoveryPolicy.resumeIndex(entries, listOf("first"), checkpointIndex = 1),
         )
         assertEquals(
-            2,
+            1,
             PlaybackRecoveryPolicy.resumeIndex(
                 entries,
                 listOf("first", "second"),

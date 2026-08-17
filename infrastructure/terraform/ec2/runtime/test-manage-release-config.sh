@@ -18,6 +18,8 @@ repository=173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-bac
 old_image="$repository@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 new_image="$repository@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 other_image="$repository@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+postgres_image=postgres@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+caddy_image=caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 test_root=$(mktemp -d /tmp/duducar-release-config-test.XXXXXX)
 
 cleanup() {
@@ -55,8 +57,8 @@ install -d -o root -g root -m 0755 "$test_root/var/lib"
 cat > "$test_root/etc/duducar/release.env" <<EOF
 # Test-only non-secret production release configuration.
 BACKEND_IMAGE=$old_image
-POSTGRES_IMAGE=postgres@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
-CADDY_IMAGE=caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+POSTGRES_IMAGE=$postgres_image
+CADDY_IMAGE=$caddy_image
 CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover
 EOF
 chown root:root "$test_root/etc/duducar/release.env"
@@ -67,7 +69,8 @@ run_manager() {
   requested_image=$4
   requested_version=$5
   DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
-    "$manager" "$@" "$requested_image" "$requested_version"
+    "$manager" "$@" "$postgres_image" "$caddy_image" \
+      "$requested_image" "$requested_version" "$postgres_image" "$caddy_image"
 }
 
 # Validation is read-only and does not create a backup directory.
@@ -77,13 +80,15 @@ test ! -e "$test_root/var/lib/duducar/release-config-backups/$commit-$operation_
 test ! -e "$test_root/var/lib/duducar/release-config-backups"
 if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
-  "$repository" "$other_image" 1.0.0; then
+  "$repository" "$postgres_image" "$caddy_image" \
+  "$other_image" 1.0.0 "$postgres_image" "$caddy_image"; then
   echo "Manager accepted a value different from the Terraform-reviewed image." >&2
   exit 1
 fi
 if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
-  "$repository" "$new_image" 1.0.1; then
+  "$repository" "$postgres_image" "$caddy_image" \
+  "$new_image" 1.0.1 "$postgres_image" "$caddy_image"; then
   echo "Manager accepted a version different from the Terraform-reviewed value." >&2
   exit 1
 fi

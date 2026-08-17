@@ -80,8 +80,22 @@ SECRET_KEY = secret_env_or_file(
     default="development-only-unsafe-secret",
 )
 DEBUG = env_bool("DJANGO_DEBUG", True)
-DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "development")
-DEPLOYMENT_COMPONENT = os.getenv("DEPLOYMENT_COMPONENT", "all")
+DEPLOYMENT_ENV = os.getenv("DEPLOYMENT_ENV", "development").strip().lower()
+DEPLOYMENT_COMPONENT = os.getenv("DEPLOYMENT_COMPONENT", "all").strip().lower()
+if DEPLOYMENT_ENV not in {"development", "production"}:
+    raise ImproperlyConfigured("DEPLOYMENT_ENV must be development or production.")
+if DEPLOYMENT_COMPONENT not in {"all", "web", "media-worker", "scheduled"}:
+    raise ImproperlyConfigured(
+        "DEPLOYMENT_COMPONENT must be all, web, media-worker, or scheduled."
+    )
+if not DEBUG and DEPLOYMENT_ENV != "production":
+    raise ImproperlyConfigured(
+        "DJANGO_DEBUG=false requires DEPLOYMENT_ENV=production."
+    )
+if DEPLOYMENT_ENV == "production" and DEBUG:
+    raise ImproperlyConfigured(
+        "DEPLOYMENT_ENV=production requires DJANGO_DEBUG=false."
+    )
 ALLOWED_HOSTS = [
     host.strip()
     for host in os.getenv("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
@@ -272,6 +286,12 @@ PLAY_INTEGRITY_PROJECT_NUMBER = os.getenv("PLAY_INTEGRITY_PROJECT_NUMBER", "")
 PLAY_INTEGRITY_PACKAGE_NAME = os.getenv(
     "PLAY_INTEGRITY_PACKAGE_NAME", "com.duducar.signage"
 )
+# SHA-256 fingerprints as printed by ``apksigner --print-certs`` (hex, not a
+# secret). The Play Integrity API returns the same certificate digest as URL-safe
+# Base64, which signage.integrity normalizes before comparing this allowlist.
+PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 = env_csv(
+    "PLAY_INTEGRITY_APP_CERTIFICATE_SHA256"
+)
 PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON = secret_env_or_file(
     "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON"
 )
@@ -353,6 +373,10 @@ PILOT_BACKUP_MAX_LOCAL_ARCHIVES = int(
     os.getenv("PILOT_BACKUP_MAX_LOCAL_ARCHIVES", "3")
 )
 PILOT_BACKUP_S3_BUCKET = os.getenv("PILOT_BACKUP_S3_BUCKET", "")
+CSV_EXPORT_MAX_ROWS = int(os.getenv("CSV_EXPORT_MAX_ROWS", "10000"))
+AUTH_ARTIFACT_RETENTION_DAYS = int(
+    os.getenv("AUTH_ARTIFACT_RETENTION_DAYS", "30")
+)
 
 EMAIL_BACKEND = os.getenv("EMAIL_BACKEND")
 if not EMAIL_BACKEND:

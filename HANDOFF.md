@@ -1,6 +1,6 @@
 # DUDU Car — Continuation Handoff
 
-**Updated:** 2026-08-11, Asia/Kuala_Lumpur
+**Updated:** 2026-08-18, Asia/Kuala_Lumpur
 
 ## Goal
 
@@ -51,16 +51,31 @@ Malaysia pilot on the existing low-cost AWS design. Keep the current Android
 
 ## Production preparation status (last verified 2026-08-10)
 
+> **Source-only hardening update (2026-08-18):** the current uncommitted
+> workspace replaces the prior two-file runtime document and manual deployment
+> sequence with a complete runtime-bundle document, complete release-config
+> document, and a separate operation-confirmed activation document. None of
+> these changes has been planned, applied, or run in AWS. The previously recorded
+> `08cc...` install operation targets an obsolete document/config shape and must
+> not be resumed. Start a new clean reviewed commit, plan, document versions/
+> hashes, and operation ID. Before activation, add exact digest-pinned
+> `postgres_image` and `caddy_image` Terraform values and add
+> `WORKER_DB_PASSWORD` plus canonical
+> `PLAY_INTEGRITY_APP_CERTIFICATE_SHA256` to the application secret. The sole
+> supported activation path is `production_release_activation_document`; it
+> owns deploy, migration `0012`, runtime grants, readiness, digest/version/unit
+> assertions, and the post-release verified backup. Do not run those commands
+> manually.
+
 - Terraform applied only the reviewed release-support scope: SSM release
   documents, runtime assets, IAM/worker revision, and approved backup
   noncurrent-retention change. A fresh post-apply plan was empty.
-- Runtime assets were validated and installed successfully. No host stack,
-  application image, migration, or canary has been deployed.
-- Release-config validation succeeded for operation
-  `08ccbebf3c7672087b96875e76884479`. Installation still requires the exact
-  user confirmation `INSTALL CONFIG 08ccbebf3c7672087b96875e76884479` and
-  must remain paused until all runbook gates are ready.
-- Migrations `0009`–`0011`, notification end-to-end test, production rehearsal,
+- The superseded two-file runtime assets were validated and installed at that
+  date. No host stack, application image, migration, or canary was deployed.
+- Release-config validation operation `08ccbebf3c7672087b96875e76884479`
+  belongs to the superseded document and must never be installed or resumed;
+  follow the source-only hardening note above with a fresh operation.
+- Migrations `0009`–`0012`, notification end-to-end test, production rehearsal,
   and vehicle enrollment remain pending. Re-run read-only AWS/owner preflight
   before any production action; do not treat this dated status as live proof.
 

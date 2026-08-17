@@ -46,33 +46,42 @@ broad authorization never permits an unexpected plan.
 ## Configure and deploy through SSM
 
 1. Use SSM only; never SSH or hand-edit `/etc/duducar/release.env`, cloud-init,
-   or runtime files. From applied Terraform outputs obtain instance, release
-   document/version/hash, pinned image digest and app version; verify the
-   selected app version matches the signed APK.
-2. Generate a fresh 32-hex operation ID. Send the exact release-config document
-   with `Mode=validate`, `ExpectedCommit`, `OperationId`, `BackendImage`, and
-   `RequiredAppVersion`; wait for `Success`, record, and review the non-secret
-   result. If runtime assets changed, validate their pinned SSM document as well
-   (use a digest-pinned Caddy image when relevant).
-3. Only after successful validation and a fresh explicit confirmation may run:
-
-   ```text
-   INSTALL CONFIG <operation-id>
-   ```
-
-   Install with the same document version/hash, commit, operation ID, image and
-   app version. Require `Success`; record command IDs. The same-input config
-   rollback is allowed only before migrations and requires
-   `ROLLBACK CONFIG <operation-id>`. Then render without printing secrets and
-   verify effective `REQUIRED_APP_VERSION`.
-4. Before migration, prove an active owner can log in; notify users that 0009
-   signs them out. Before 0010 record active devices/legacy qualifications and
-   triage retired-power alerts. Run `duducar-command migrate`, `grant-runtime`,
-   and `migration-check` once; 0009 flushes sessions, 0010 invalidates legacy
-   qualifications, and 0011 fails closed on unexpected schema.
-5. After 0010, do not select a pre-policy image or reverse the migration in
-   production: use the selected image or a reviewed forward fix. Deploy the
-   pinned stack, require status/readiness, and verify any worker uses its digest.
+   or runtime files. From applied Terraform outputs obtain the instance and the
+   exact runtime-bundle, release-config, and release-activation document names,
+   versions, hashes, three image digests, and required app version. The app
+   version must match the signed APK. The application secret must already have
+   `WORKER_DB_PASSWORD` and comma-separated canonical lowercase 64-hex
+   `PLAY_INTEGRITY_APP_CERTIFICATE_SHA256`; never record their values.
+2. Generate one fresh 32-hex operation ID. Send the pinned runtime document with
+   `Mode=validate`, the clean 40-hex commit, operation ID, and exact Caddy digest.
+   Review its complete staged manifest, then send `Mode=install` with identical
+   inputs. It installs/backs up every runtime script, unit, timer, PostgreSQL
+   rule/grant, broker, verifier, and Caddyfile, runs `daemon-reload`, and does not
+   activate anything. Record both command IDs and require `Success`.
+3. Validate then install the pinned release-config document with the same commit
+   and operation ID and exact `BackendImage`, `PostgresImage`, `CaddyImage`, and
+   `RequiredAppVersion`. It atomically owns all release selections. A same-input
+   config rollback is allowed only before activation/migrations; runtime-bundle
+   rollback likewise uses its original document/operation and is forbidden once
+   activation starts.
+4. Before activation, prove an active owner can log in, record worker/schema
+   compatibility, and complete the policy-specific user/device notices. Send
+   the pinned activation document first with `Mode=validate`, empty
+   `Confirmation`, `ActivationKind=existing`, and the exact commit, operation,
+   images, and app version. Require `Success` and review its installed-manifest,
+   release-file, and secret-schema checks. `initial-empty` is allowed only for a
+   genuinely empty PostgreSQL directory.
+5. Only after a fresh approval type exactly `ACTIVATE <operation-id>` and send a
+   separate activation command with `Mode=activate` and that exact
+   `Confirmation`; every other input and the document version/hash must be
+   unchanged. This is the sole deploy path: it verifies remote backup, completed
+   DLM snapshot and host health, stops timers/systemd, starts the scoped broker,
+   deploys with public Caddy absent, runs migrate → grant-runtime → migration-
+   check, then starts systemd/timers and asserts readiness, running image
+   digests, effective app version, active units, and a new verified remote
+   backup. Record output and command ID. A failure after shutdown keeps traffic
+   stopped; do not improvise a manual deploy or reverse a migration. Use a
+   reviewed forward fix after a migration has begun.
 
 ## Hardware, rehearsal, and canary
 

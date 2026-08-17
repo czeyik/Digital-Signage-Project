@@ -2,7 +2,16 @@
 set -euo pipefail
 
 runtime_dir=/run/duducar
+host_config=/etc/duducar/host.env
 release_config=/etc/duducar/release.env
+
+if [ ! -r "$host_config" ]; then
+  echo "Missing production host configuration: $host_config" >&2
+  exit 1
+fi
+set -a
+source "$host_config"
+set +a
 
 run_owner_command() {
   database_name=$1
@@ -48,7 +57,9 @@ case "$command_name" in
     args=(evaluate_playlists)
     ;;
   media-reconcile)
-    args=(reconcile_media_processing)
+    docker exec duducar-web python manage.py reconcile_media_processing
+    docker exec duducar-web python manage.py reconcile_media_deletions --limit 25
+    exit
     ;;
   retention)
     args=(apply_retention)
@@ -65,6 +76,8 @@ case "$command_name" in
     exit
     ;;
   grant-runtime)
+    docker exec duducar-postgres \
+      /docker-entrypoint-initdb.d/010-roles.sh
     docker exec duducar-postgres \
       psql \
       --set ON_ERROR_STOP=1 \
@@ -92,6 +105,7 @@ fi
 docker exec duducar-web python manage.py "${args[@]}"
 
 if [ "$command_name" = "backup" ]; then
+  /usr/local/sbin/duducar-backup-verify record
   find /srv/duducar/backups \
     -maxdepth 1 \
     -type f \

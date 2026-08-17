@@ -15,8 +15,6 @@ if [ ! -r "$host_config" ]; then
   exit 1
 fi
 
-# Values are rendered by the recovery-only Terraform root and contain no
-# credentials. They are root-owned and never sourced from the cloned volume.
 set -a
 source "$host_config"
 set +a
@@ -78,7 +76,6 @@ write_receipt() {
   local stage=$2
   shift 2
 
-  # Root-volume receipt binds this clone to its reviewed recovery point.
   install -d -o root -g root -m 0700 "$receipt_dir"
   local device_uuid
   local receipt_tmp
@@ -157,8 +154,6 @@ run_xfs_check() {
 }
 
 is_dirty_log_no_modify_result() {
-  # Status one is valid only for this exact no-modify warning; post-replay
-  # success remains the authorization gate.
   [ "${xfs_check_status:-missing}" = 1 ] && \
     grep -Fq 'ALERT: The filesystem has valuable metadata changes in a log which is being' "$pre_replay_xfs_log" && \
     grep -Fq 'ignored because the -n option was used.  Expect spurious inconsistencies' "$pre_replay_xfs_log" && \
@@ -175,7 +170,6 @@ inspect_read_only() {
     exit 1
   fi
 
-  # Any old evidence is invalid until this exact clone is inspected again.
   clear_inspection_evidence
   local inspection_dir
   inspection_dir=$(mktemp -d /mnt/duducar-recovery-inspection.XXXXXX)
@@ -191,7 +185,6 @@ inspect_read_only() {
   findmnt --target "$inspection_dir" --output SOURCE,FSTYPE,OPTIONS,TARGET
   umount "$inspection_dir"
 
-  # A crash-consistent snapshot needs an explicit dirty-log path, never -L.
   if run_xfs_check "$pre_replay_xfs_log"; then
     write_receipt "$inspection_receipt" clean_pre_mount_check \
       "xfs_repair_log_sha256=$(sha256sum "$pre_replay_xfs_log" | awk '{print $1}')"
@@ -284,7 +277,6 @@ replay_journal() {
   assert_docker_quarantined
   assert_clone_unmounted_everywhere
 
-  # An interrupted replay must require a fresh read-only inspection.
   clear_authorization_receipts
 
   local replay_dir
@@ -299,14 +291,12 @@ replay_journal() {
     umount "$replay_dir" 2>/dev/null || true
     rmdir "$replay_dir" 2>/dev/null || true
     if [ "$replay_succeeded" != true ]; then
-      # Preserve diagnostics but never leave a mount authorization behind.
       clear_authorization_receipts
     fi
     return "$status"
   }
   trap replay_cleanup EXIT
 
-  # Only the clone's journal is replayed; /srv and Docker are untouched.
   mount -o rw,nouuid,nodev,nosuid,noexec,noatime "$device" "$replay_dir"
   expected_source=$(readlink -f "$device")
   mounted_source=$(findmnt --noheadings --output SOURCE --target "$replay_dir" | xargs)
@@ -347,7 +337,6 @@ mount_writable() {
   fi
 
   install -d -o root -g root -m 0755 "$recovery_mountpoint"
-  # nouuid is allowed only after a final clean XFS receipt.
   mount -o nouuid,nodev,nosuid "$device" "$recovery_mountpoint"
   cleanup_failed_mount() {
     status=$?
@@ -397,9 +386,6 @@ unmount_recovery() {
     sync
     umount "$recovery_mountpoint"
   fi
-  # A subsequent smoke requires a new read-only inspection receipt. Masking
-  # Docker again makes an accidental helper invocation unable to start any
-  # container until the clone has been inspected and remounted.
   systemctl stop docker.service docker.socket >/dev/null 2>&1 || true
   systemctl disable docker.service docker.socket >/dev/null 2>&1 || true
   systemctl mask docker.service docker.socket >/dev/null 2>&1 || true

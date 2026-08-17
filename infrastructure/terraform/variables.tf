@@ -1,7 +1,12 @@
 variable "aws_region" {
   type        = string
-  description = "Production AWS region. The pilot defaults to Malaysia."
+  description = "Fixed production AWS region for the Malaysia pilot."
   default     = "ap-southeast-5"
+
+  validation {
+    condition     = var.aws_region == "ap-southeast-5"
+    error_message = "Production infrastructure is fixed to ap-southeast-5."
+  }
 }
 
 variable "project_name" {
@@ -41,6 +46,32 @@ variable "container_image" {
   }
 }
 
+variable "postgres_image" {
+  type        = string
+  description = "Exact digest-pinned PostgreSQL image used by the EC2 production stack."
+
+  validation {
+    condition = can(regex(
+      "^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$",
+      var.postgres_image,
+    ))
+    error_message = "postgres_image must be a SHA-256 digest-pinned image reference."
+  }
+}
+
+variable "caddy_image" {
+  type        = string
+  description = "Exact digest-pinned Caddy image used by the EC2 production stack and runtime validation."
+
+  validation {
+    condition = can(regex(
+      "^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$",
+      var.caddy_image,
+    ))
+    error_message = "caddy_image must be a SHA-256 digest-pinned image reference."
+  }
+}
+
 variable "enable_services" {
   type        = bool
   description = "Deprecated outer compatibility gate for the retired ECS service runtime. It has no effect unless enable_legacy_ecs_runtime is also true; reviewed current-production examples keep both false."
@@ -49,32 +80,46 @@ variable "enable_services" {
 
 variable "enable_legacy_ecs_runtime" {
   type        = bool
-  description = "Historical state guard for retired ECS services and EventBridge schedules. Default true protects pre-migration state; current production explicitly sets false."
-  default     = true
+  description = "Retired ECS services and EventBridge schedules. Current production must keep this false."
+  default     = false
+
+  validation {
+    condition     = !var.enable_legacy_ecs_runtime
+    error_message = "The retired ECS runtime cannot be re-enabled in current production."
+  }
 }
 
 variable "enable_legacy_alb" {
   type        = bool
-  description = "Historical state guard for the retired ALB, listeners, target group, and alarms. Default true protects pre-migration state; current production explicitly sets false."
-  default     = true
+  description = "Retired ALB, listeners, target group, and alarms. Current production must keep this false."
+  default     = false
+
+  validation {
+    condition     = !var.enable_legacy_alb
+    error_message = "The retired ALB cannot be re-enabled in current production."
+  }
 }
 
 variable "enable_legacy_rds" {
   type        = bool
-  description = "Historical state guard for retired RDS and RDS-backed task definitions. Default true protects pre-migration state; current production explicitly sets false."
-  default     = true
+  description = "Retired RDS and RDS-backed task definitions. Current production must keep this false."
+  default     = false
+
+  validation {
+    condition     = !var.enable_legacy_rds
+    error_message = "The retired RDS database cannot be re-enabled in current production."
+  }
 }
 
 variable "legacy_rds_deletion_protection" {
   type        = bool
-  description = "Historical RDS deletion gate. Default true is fail-safe for pre-migration state; false in current production records the completed decommission."
-  default     = true
+  description = "Historical RDS deletion state. Current production records the completed decommission as false."
+  default     = false
 }
 
 variable "legacy_rds_final_snapshot_identifier" {
   type        = string
   description = "Recorded final legacy RDS snapshot identifier. Never reuse it as authorization to delete or recreate a database."
-  default     = ""
 
   validation {
     condition = (
@@ -93,34 +138,38 @@ variable "legacy_rds_final_snapshot_identifier" {
 variable "confirm_legacy_rds_final_snapshot" {
   type        = bool
   description = "Historical destructive confirmation required by the legacy RDS removal gate. In current production it records an already completed action."
-  default     = false
 }
 
 variable "ecs_web_desired_count" {
   type        = number
   description = "Historical desired count for the retired ECS web service. Current EC2 production keeps this at zero."
-  default     = 1
+  default     = 0
 
   validation {
-    condition     = contains([0, 1], var.ecs_web_desired_count)
-    error_message = "ecs_web_desired_count must be zero or one for the pilot."
+    condition     = var.ecs_web_desired_count == 0
+    error_message = "The retired ECS web service must remain at zero."
   }
 }
 
 variable "enable_ecs_schedules" {
   type        = bool
   description = "Historical switch for retired EventBridge application schedules. Current schedules are local systemd timers, so production keeps this false."
-  default     = true
+  default     = false
+
+  validation {
+    condition     = !var.enable_ecs_schedules
+    error_message = "Retired EventBridge application schedules cannot be re-enabled."
+  }
 }
 
 variable "application_origin" {
   type        = string
   description = "Route 53 application origin. Current production is ec2; the alb option remains only for historical state compatibility."
-  default     = "alb"
+  default     = "ec2"
 
   validation {
-    condition     = contains(["alb", "ec2"], var.application_origin)
-    error_message = "application_origin must be alb or ec2."
+    condition     = var.application_origin == "ec2"
+    error_message = "Current production DNS must remain on the EC2 origin."
   }
 }
 
@@ -229,8 +278,8 @@ variable "media_reconcile_max_assets" {
 
 variable "enable_ec2_target" {
   type        = bool
-  description = "Manage the live EC2 Caddy/Django/local-PostgreSQL production host. The false default prevents accidental creation in an uninitialized workspace."
-  default     = false
+  description = "Manage the live EC2 Caddy/Django/local-PostgreSQL production host."
+  default     = true
 }
 
 variable "ec2_target_instance_type" {
@@ -253,13 +302,18 @@ variable "ec2_target_termination_protection" {
 variable "enable_media_cloudfront" {
   type        = bool
   description = "Manage the live private signed-URL CloudFront delivery path for validated S3 media."
-  default     = false
+  default     = true
 }
 
 variable "enable_ec2_acme_bridge" {
   type        = bool
   description = "Retired migration-only ALB HTTP-01 bridge. Current production must keep this false."
-  default     = true
+  default     = false
+
+  validation {
+    condition     = !var.enable_ec2_acme_bridge
+    error_message = "The retired ALB ACME bridge cannot be re-enabled."
+  }
 }
 
 variable "cloudfront_public_key_pem" {

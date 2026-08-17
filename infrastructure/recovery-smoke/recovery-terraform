@@ -81,8 +81,8 @@ validate_confirmed_plan_arguments() {
     fi
 
     case "$argument" in
-      -auto-approve|-auto-approve=*|-input=false|-input=false|-out|-out=*)
-        echo "A confirmed recovery operation must generate and display its own plan, then receive an interactive typed confirmation; -auto-approve, -input=false, and -out are forbidden." >&2
+      -auto-approve|-auto-approve=*|-input=false|-input=false|-out|-out=*|-destroy|-destroy=*)
+        echo "A confirmed recovery operation must generate and display its own mode-specific plan, then receive an interactive typed confirmation; -auto-approve, -input=false, -out, and caller-supplied -destroy are forbidden." >&2
         exit 2
         ;;
       -var|-var-file|-lock-timeout|-parallelism|-replace)

@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 RUN apk upgrade --no-cache \
-    && apk add --no-cache ffmpeg clamav freshclam postgresql16-client \
+    && apk add --no-cache ffmpeg clamav freshclam postgresql16-client su-exec \
     && sed -i 's|^NotifyClamd |# NotifyClamd |' /etc/clamav/freshclam.conf
 
 WORKDIR /app
@@ -12,6 +12,7 @@ COPY . .
 RUN pip install --no-cache-dir --upgrade pip==26.2 setuptools==83.0.0 \
     && pip install --no-cache-dir . \
     && DJANGO_DEBUG=false \
+       DEPLOYMENT_ENV=production \
        DJANGO_SECRET_KEY=container-build-only-secret-that-is-never-used-at-runtime \
        python manage.py collectstatic --noinput \
     && python -m pip uninstall -y setuptools pip \

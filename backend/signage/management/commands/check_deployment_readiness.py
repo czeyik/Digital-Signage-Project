@@ -2,7 +2,10 @@ import json
 import shutil
 
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import BaseCommand, CommandError
+
+from signage.integrity import configured_certificate_fingerprints
 
 
 class Command(BaseCommand):
@@ -29,6 +32,11 @@ class Command(BaseCommand):
         component = options["component"]
         errors = []
         warnings = []
+        if environment != settings.DEPLOYMENT_ENV:
+            errors.append(
+                "--environment must match runtime DEPLOYMENT_ENV "
+                f"({settings.DEPLOYMENT_ENV})."
+            )
         if environment == "production":
             if component in {"all", "media-worker"}:
                 self._check_media_dependencies(errors)
@@ -59,6 +67,8 @@ class Command(BaseCommand):
                 errors.append(f"{executable} is required for backup and restore.")
 
     def _check_production_settings(self, errors, warnings, component):
+        if settings.DEPLOYMENT_ENV != "production":
+            errors.append("DEPLOYMENT_ENV must be production for a production check.")
         if settings.DEBUG:
             errors.append("DJANGO_DEBUG must be false in production.")
         if (
@@ -187,6 +197,10 @@ class Command(BaseCommand):
                     )
         if settings.PLAY_INTEGRITY_PACKAGE_NAME != "com.duducar.signage":
             errors.append("PLAY_INTEGRITY_PACKAGE_NAME must match the Android package.")
+        try:
+            configured_certificate_fingerprints()
+        except ImproperlyConfigured as exc:
+            errors.append(str(exc))
         if (
             "signage.middleware.ProductionSecurityHeadersMiddleware"
             not in settings.MIDDLEWARE
@@ -194,6 +208,10 @@ class Command(BaseCommand):
             errors.append("Production security headers middleware is required.")
         self._check_cloudfront_signing(errors)
         self._check_media_dispatch(errors)
+        if not 1 <= settings.CSV_EXPORT_MAX_ROWS <= 10_000:
+            errors.append("CSV_EXPORT_MAX_ROWS must be between 1 and 10000.")
+        if not 1 <= settings.AUTH_ARTIFACT_RETENTION_DAYS <= 90:
+            errors.append("AUTH_ARTIFACT_RETENTION_DAYS must be between 1 and 90.")
 
     def _check_playback_batch_limits(self, errors):
         compressed = settings.PLAYBACK_BATCH_MAX_COMPRESSED_BYTES

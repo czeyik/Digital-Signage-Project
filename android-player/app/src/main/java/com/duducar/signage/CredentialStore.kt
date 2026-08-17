@@ -15,21 +15,39 @@ class CredentialStore(context: Context) {
         context.getSharedPreferences("device_credentials", Context.MODE_PRIVATE)
     private val alias = "duducar-device-refresh"
 
-    fun hasRefreshToken(): Boolean = preferences.contains("refresh_ciphertext")
+    fun hasRefreshToken(): Boolean = refreshToken() != null
 
-    fun saveRefreshToken(token: String) {
+    fun saveEnrollmentCredentials(refreshToken: String, kioskPinVerifier: String): Boolean {
+        if (refreshToken.isBlank() || kioskPinVerifier.isBlank()) return false
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
-        preferences.edit()
-            .putString("refresh_ciphertext", Base64.encodeToString(cipher.doFinal(token.toByteArray()), Base64.NO_WRAP))
+        val committed = preferences.edit()
+            .putString(
+                "refresh_ciphertext",
+                Base64.encodeToString(
+                    cipher.doFinal(refreshToken.toByteArray(Charsets.UTF_8)),
+                    Base64.NO_WRAP,
+                ),
+            )
             .putString("refresh_iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
-            .apply()
+            .putString("kiosk_pin_verifier", kioskPinVerifier)
+            .commit()
+        if (!committed) clearEnrollment()
+        return committed
     }
 
     fun saveKioskPinVerifier(verifier: String) {
         if (verifier.isNotBlank()) {
-            preferences.edit().putString("kiosk_pin_verifier", verifier).apply()
+            preferences.edit().putString("kiosk_pin_verifier", verifier).commit()
         }
+    }
+
+    fun clearEnrollment() {
+        preferences.edit()
+            .remove("refresh_ciphertext")
+            .remove("refresh_iv")
+            .remove("kiosk_pin_verifier")
+            .commit()
     }
 
     fun verifyKioskPin(pin: String): Boolean {
@@ -87,7 +105,7 @@ class CredentialStore(context: Context) {
             .commit()
     }
 
-    fun refreshToken(): String? {
+    fun refreshToken(): String? = runCatching {
         val ciphertext = preferences.getString("refresh_ciphertext", null) ?: return null
         val iv = preferences.getString("refresh_iv", null) ?: return null
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
@@ -96,7 +114,12 @@ class CredentialStore(context: Context) {
             getOrCreateKey(),
             GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)),
         )
-        return String(cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP)))
+        String(cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP)), Charsets.UTF_8)
+    }.getOrElse {
+        // A factory reset, keystore invalidation, or corrupt preference is not
+        // a retryable authentication error. Return to deliberate enrollment.
+        clearEnrollment()
+        null
     }
 
     private fun getOrCreateKey(): SecretKey {

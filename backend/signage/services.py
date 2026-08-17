@@ -13,7 +13,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files import File
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from .models import (
@@ -21,7 +21,11 @@ from .models import (
     ApiThrottle,
     AuditEvent,
     Device,
+    DeviceAccessToken,
+    DeviceCredential,
+    EnrollmentCode,
     MediaAsset,
+    MediaDeletion,
     PlatformSettings,
     Playlist,
 )
@@ -86,12 +90,7 @@ def enforce_api_throttle(request, action, limit=10, window_seconds=900):
 
 
 def open_alert(device, code, severity, message):
-    return Alert.objects.get_or_create(
-        device=device,
-        code=code,
-        acknowledged_at__isnull=True,
-        defaults={"severity": severity, "message": message},
-    )
+    return open_or_escalate_alert(device, code, severity, message)
 
 
 @transaction.atomic
@@ -112,12 +111,27 @@ def open_or_escalate_alert(device, code, severity, message):
         .first()
     )
     if alert is None:
-        return Alert.objects.create(
-            device=device,
-            code=code,
-            severity=severity,
-            message=message,
-        ), True
+        try:
+            # Keep the insert in a savepoint: the partial unique constraints
+            # also serialize global (device=NULL) alerts, where no device row
+            # exists to lock.
+            with transaction.atomic():
+                return Alert.objects.create(
+                    device=device,
+                    code=code,
+                    severity=severity,
+                    message=message,
+                ), True
+        except IntegrityError:
+            pass
+        alert = (
+            Alert.objects.select_for_update()
+            .filter(device=device, code=code, acknowledged_at__isnull=True)
+            .order_by("created_at")
+            .first()
+        )
+        if alert is None:
+            raise IntegrityError("Could not create or load the unresolved alert.")
     if (
         severity == Alert.Severity.CRITICAL
         and alert.severity != Alert.Severity.CRITICAL
@@ -157,11 +171,13 @@ def delete_media_binary(asset, actor):
         raise ValidationError(
             "Media is referenced by a draft, current, or future playlist."
         )
-    for field_name in ("source_file", "normalized_file"):
-        file_field = getattr(locked, field_name)
-        if file_field:
-            file_field.delete(save=False)
-            setattr(locked, field_name, "")
+    MediaDeletion.objects.get_or_create(
+        asset=locked,
+        defaults={
+            "source_name": locked.source_file.name,
+            "normalized_name": locked.normalized_file.name,
+        },
+    )
     locked.status = MediaAsset.Status.ARCHIVED
     locked.archived_at = timezone.now()
     locked.processing_token = None
@@ -170,8 +186,6 @@ def delete_media_binary(asset, actor):
         locked.processing_finished_at = timezone.now()
     locked.save(
         update_fields=[
-            "source_file",
-            "normalized_file",
             "status",
             "archived_at",
             "processing_token",
@@ -182,6 +196,66 @@ def delete_media_binary(asset, actor):
     )
     audit(actor, "media.delete_binary", locked)
     return locked
+
+
+def process_media_deletion(deletion_id):
+    """Delete a queued binary after its archival transaction has committed."""
+
+    with transaction.atomic():
+        deletion = (
+            MediaDeletion.objects.select_for_update()
+            .select_related("asset")
+            .filter(pk=deletion_id, completed_at__isnull=True)
+            .first()
+        )
+        if not deletion:
+            return False
+        asset = deletion.asset
+        source_name = deletion.source_name
+        normalized_name = deletion.normalized_name
+        source_storage = asset.source_file.storage
+        normalized_storage = asset.normalized_file.storage
+        deletion.attempts += 1
+        deletion.last_attempt_at = timezone.now()
+        deletion.save(update_fields=["attempts", "last_attempt_at", "updated_at"])
+
+    try:
+        if source_name:
+            source_storage.delete(source_name)
+        if normalized_name:
+            normalized_storage.delete(normalized_name)
+    except Exception as exc:  # Storage backends surface provider-specific errors.
+        with transaction.atomic():
+            MediaDeletion.objects.select_for_update().filter(
+                pk=deletion_id,
+                completed_at__isnull=True,
+            ).update(last_error=str(exc)[:255])
+        return False
+
+    with transaction.atomic():
+        deletion = (
+            MediaDeletion.objects.select_for_update()
+            .select_related("asset")
+            .filter(pk=deletion_id, completed_at__isnull=True)
+            .first()
+        )
+        if not deletion:
+            return False
+        asset = deletion.asset
+        # Do not clear a field if a later operation replaced its object name.
+        update_fields = []
+        if asset.source_file.name == deletion.source_name:
+            asset.source_file = ""
+            update_fields.append("source_file")
+        if asset.normalized_file.name == deletion.normalized_name:
+            asset.normalized_file = ""
+            update_fields.append("normalized_file")
+        if update_fields:
+            asset.save(update_fields=[*update_fields, "updated_at"])
+        deletion.completed_at = timezone.now()
+        deletion.last_error = ""
+        deletion.save(update_fields=["completed_at", "last_error", "updated_at"])
+    return True
 
 
 def extension_mime(path):
@@ -695,13 +769,104 @@ def publish_playlist(playlist, actor, urgent=False):
     return locked
 
 
+def active_playlist():
+    """Select the same effective playlist for the player and dashboard."""
+
+    now = timezone.now()
+    urgent = (
+        Playlist.objects.filter(
+            status=Playlist.Status.PUBLISHED,
+            is_urgent=True,
+            published_at__lte=now,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        )
+        .order_by("-published_at")
+        .first()
+    )
+    if urgent:
+        return urgent
+    scheduled = (
+        Playlist.objects.filter(
+            status=Playlist.Status.PUBLISHED,
+            starts_at__lte=now,
+            ends_at__gt=now,
+        )
+        .order_by("-starts_at", "-version")
+        .first()
+    )
+    if scheduled:
+        return scheduled
+    return (
+        Playlist.objects.filter(
+            status=Playlist.Status.PUBLISHED,
+            published_at__lte=now,
+            starts_at__lte=now,
+        )
+        .order_by("-published_at")
+        .first()
+    )
+
+
+def _revoke_active_device_credentials(device):
+    now = timezone.now()
+    credentials = DeviceCredential.objects.select_for_update().filter(
+        device=device,
+        revoked_at__isnull=True,
+    )
+    credential_ids = list(credentials.values_list("pk", flat=True))
+    if not credential_ids:
+        return 0
+    DeviceCredential.objects.filter(pk__in=credential_ids).update(revoked_at=now)
+    DeviceAccessToken.objects.filter(credential_id__in=credential_ids).delete()
+    return len(credential_ids)
+
+
+def _expire_unused_enrollment_codes(device):
+    now = timezone.now()
+    return EnrollmentCode.objects.filter(
+        device=device,
+        used_at__isnull=True,
+        expires_at__gt=now,
+    ).update(expires_at=now)
+
+
+@transaction.atomic
+def revoke_device_credentials(device, actor):
+    """Invalidate all active refresh and access tokens for a lost device."""
+
+    locked = Device.objects.select_for_update().get(pk=device.pk)
+    credential_count = _revoke_active_device_credentials(locked)
+    enrollment_count = _expire_unused_enrollment_codes(locked)
+    audit(
+        actor,
+        "device.credentials.revoke",
+        locked,
+        {
+            "credentials_revoked": credential_count,
+            "enrollment_codes_expired": enrollment_count,
+        },
+    )
+    return locked, credential_count
+
+
 @transaction.atomic
 def disable_device(device, actor):
     locked = Device.objects.select_for_update().get(pk=device.pk)
     locked.status = Device.Status.DISABLED
     locked.disabled_at = timezone.now()
     locked.save(update_fields=["status", "disabled_at", "updated_at"])
-    audit(actor, "device.disable", locked)
+    credential_count = _revoke_active_device_credentials(locked)
+    enrollment_count = _expire_unused_enrollment_codes(locked)
+    audit(
+        actor,
+        "device.disable",
+        locked,
+        {
+            "credentials_revoked": credential_count,
+            "enrollment_codes_expired": enrollment_count,
+        },
+    )
     return locked
 
 

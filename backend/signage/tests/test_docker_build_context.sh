@@ -16,6 +16,7 @@ readonly required_files=(
   signage/nested/manifest.json
   templates/base.html
   worker-entrypoint.sh
+  worker-entrypoint-root-init.sh
 )
 
 readonly excluded_files=(
@@ -86,6 +87,8 @@ cleanup() {
   rm -rf -- "$scratch_dir"
 }
 trap cleanup EXIT
+
+bash "$repo_root/backend/signage/tests/test_worker_root_init.sh"
 
 mkdir -p \
   "$context_dir/config" \

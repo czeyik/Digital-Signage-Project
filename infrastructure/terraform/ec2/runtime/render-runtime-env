@@ -33,6 +33,7 @@ set +a
 required_host_values=(
   AWS_REGION
   APPLICATION_SECRET_ARN
+  APPLICATION_ROLE_ARN
   AWS_STORAGE_BUCKET_NAME
   PILOT_BACKUP_S3_BUCKET
   DJANGO_ALLOWED_HOSTS
@@ -106,8 +107,35 @@ case "$database_password" in
     exit 1
     ;;
 esac
+extract_secret_string WORKER_DB_PASSWORD "$staging_dir/worker-database-password"
+worker_database_password=$(<"$staging_dir/worker-database-password")
+case "$worker_database_password" in
+  *$'\n'*|*$'\r'*)
+    echo "WORKER_DB_PASSWORD must not contain a line break." >&2
+    exit 1
+    ;;
+esac
 extract_secret_string EMAIL_HOST_USER "$staging_dir/email-host-user"
 extract_secret_string EMAIL_HOST_PASSWORD "$staging_dir/email-host-password"
+extract_secret_string PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 "$staging_dir/play-integrity-app-certificates"
+play_integrity_app_certificates=$(<"$staging_dir/play-integrity-app-certificates")
+if ! [[ "$play_integrity_app_certificates" =~ ^[0-9a-f]{64}(,[0-9a-f]{64})*$ ]]; then
+  echo "PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 must contain canonical comma-separated SHA-256 fingerprints." >&2
+  exit 1
+fi
+existing_credential_token="$backend_secrets_dir/aws-credentials-token"
+if test -e "$existing_credential_token" || test -L "$existing_credential_token"; then
+  if ! test -f "$existing_credential_token" || test -L "$existing_credential_token" || \
+    [ "$(stat -c '%u:%a' "$existing_credential_token")" != 10001:400 ] || \
+    ! grep -Eq '^[0-9a-f]{64}$' "$existing_credential_token"; then
+    echo "Existing AWS credential bearer token is unsafe; refusing silent replacement." >&2
+    exit 1
+  fi
+  install -o 10001 -g 10001 -m 0400 \
+    "$existing_credential_token" "$staging_dir/aws-credentials-token"
+else
+  openssl rand -hex 32 > "$staging_dir/aws-credentials-token"
+fi
 
 jq -cer '
   .PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON
@@ -138,6 +166,9 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit AWS_S3_CUSTOM_DOMAIN "$AWS_S3_CUSTOM_DOMAIN"
   emit AWS_CLOUDFRONT_KEY_ID "$AWS_CLOUDFRONT_KEY_ID"
   emit AWS_CLOUDFRONT_PRIVATE_KEY_FILE /run/duducar/backend-secrets/cloudfront-private.pem
+  emit AWS_CONTAINER_CREDENTIALS_FULL_URI http://169.254.170.2:51679/v2/credentials
+  emit AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE /run/duducar/backend-secrets/aws-credentials-token
+  emit AWS_EC2_METADATA_DISABLED true
   emit PILOT_BACKUP_ROOT /backups
   emit PILOT_BACKUP_S3_BUCKET "$PILOT_BACKUP_S3_BUCKET"
   emit PILOT_BACKUP_RETENTION_DAYS 3
@@ -145,6 +176,7 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit REQUIRED_APP_VERSION "$REQUIRED_APP_VERSION"
   emit PLAY_INTEGRITY_PROJECT_NUMBER "$PLAY_INTEGRITY_PROJECT_NUMBER"
   emit PLAY_INTEGRITY_PACKAGE_NAME com.duducar.signage
+  emit PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 "$play_integrity_app_certificates"
   emit PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON_FILE /run/duducar/backend-secrets/play-integrity.json
   emit MEDIA_MAX_REQUEST_BYTES 53477376
   emit MEDIA_MAX_IMAGE_PIXELS 25000000
@@ -193,6 +225,7 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit POSTGRES_PASSWORD_FILE /run/postgres-local-secrets/admin-password
   emit OWNER_DB_PASSWORD_FILE /run/postgres-local-secrets/owner-password
   emit RUNTIME_DB_PASSWORD_FILE /run/postgres-runtime-secrets/runtime-password
+  emit WORKER_DB_PASSWORD_FILE /run/postgres-runtime-secrets/worker-password
   emit PGDATA /var/lib/postgresql/data/pgdata
 } > "$postgres_tmp"
 
@@ -202,6 +235,12 @@ install \
   -m 0400 \
   "$staging_dir/database-password" \
   "$postgres_runtime_secrets_dir/runtime-password"
+install \
+  -o 70 \
+  -g 70 \
+  -m 0400 \
+  "$staging_dir/worker-database-password" \
+  "$postgres_runtime_secrets_dir/worker-password"
 install \
   -o 10001 \
   -g 10001 \
@@ -215,7 +254,8 @@ for secret_name in \
   email-host-user \
   email-host-password \
   play-integrity.json \
-  cloudfront-private.pem; do
+  cloudfront-private.pem \
+  aws-credentials-token; do
   chown 10001:10001 "$staging_dir/$secret_name"
   chmod 0400 "$staging_dir/$secret_name"
   mv -f "$staging_dir/$secret_name" "$backend_secrets_dir/$secret_name"

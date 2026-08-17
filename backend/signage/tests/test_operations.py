@@ -1,10 +1,14 @@
+import base64
 import hashlib
 import importlib
+import json
 import os
 import secrets
 import subprocess
+import sys
 from datetime import date
 from io import StringIO
+from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -25,7 +29,10 @@ from config.settings import (
 from signage.management.commands.check_deployment_readiness import (
     Command as ReadinessCommand,
 )
-from signage.management.commands.create_postgres_backup import BACKUP_PREFIX
+from signage.management.commands.create_postgres_backup import (
+    BACKUP_PREFIX,
+    REMOTE_SUCCESS_RECEIPT,
+)
 from signage.management.commands.create_postgres_backup import (
     Command as PostgresBackupCommand,
 )
@@ -54,6 +61,7 @@ def test_hardware_cannot_be_approved_until_required_tests_pass():
         model_name="Example 10",
         firmware_version="1.0",
         android_version="12",
+        security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/example-10",
@@ -75,6 +83,7 @@ def test_hardware_approval_records_approved_timestamp():
         model_name="Example 10",
         firmware_version="1.0",
         android_version="12",
+        security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/example-10",
@@ -85,6 +94,38 @@ def test_hardware_approval_records_approved_timestamp():
     qualification.save()
 
     assert qualification.approved_at is not None
+
+
+@pytest.mark.django_db
+def test_approved_hardware_evidence_is_immutable_and_cannot_be_reapproved():
+    owner = User.objects.create_user(
+        "immutable-hardware-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    qualification = HardwareQualification(
+        model_name="Immutable Example 10",
+        firmware_version="1.0",
+        android_version="13",
+        security_patch_level="2026-08-05",
+        tested_by=owner,
+        test_date=date.today(),
+        evidence_reference="internal://hardware/immutable-example-10",
+        approved_for_pilot=True,
+        **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
+    )
+    qualification.save()
+    qualification.firmware_version = "changed-build"
+
+    with pytest.raises(ValidationError, match="evidence is immutable"):
+        qualification.save()
+
+    qualification.refresh_from_db()
+    qualification.approved_for_pilot = False
+    qualification.save()
+    qualification.approved_for_pilot = True
+    with pytest.raises(ValidationError, match="cannot be re-approved"):
+        qualification.save()
 
 
 @pytest.mark.django_db
@@ -100,6 +141,7 @@ def test_hardware_legacy_power_results_cannot_satisfy_new_battery_gates():
         model_name="Legacy Example 10",
         firmware_version="1.0",
         android_version="13",
+        security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/legacy-example-10",
@@ -137,6 +179,7 @@ def test_database_blocks_legacy_policy_hardware_reapproval():
         model_name="Legacy Example 10",
         firmware_version="1.0",
         android_version="13",
+        security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/legacy-example-10",
@@ -162,6 +205,7 @@ def test_battery_policy_migration_invalidates_existing_hardware_approval():
         model_name="Previously Approved 10",
         firmware_version="1.0",
         android_version="13",
+        security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/previously-approved-10",
@@ -185,6 +229,31 @@ def test_staticfiles_storage_matches_runtime_mode():
         staticfiles_storage_backend(True)
         == "django.contrib.staticfiles.storage.StaticFilesStorage"
     )
+
+
+@pytest.mark.parametrize(
+    ("deployment_env", "debug"),
+    [("development", "false"), ("production", "true")],
+)
+def test_settings_fail_closed_for_mismatched_runtime_environment(
+    deployment_env, debug
+):
+    environment = os.environ | {
+        "DEPLOYMENT_ENV": deployment_env,
+        "DJANGO_DEBUG": debug,
+        "DEPLOYMENT_COMPONENT": "scheduled",
+    }
+    result = subprocess.run(  # noqa: S603 - runs the current test interpreter.
+        [sys.executable, "-c", "import config.settings"],
+        cwd=Path(__file__).parents[2],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "DEPLOYMENT_ENV" in result.stderr
     assert (
         staticfiles_storage_backend(False)
         == "whitenoise.storage.CompressedManifestStaticFilesStorage"
@@ -285,6 +354,8 @@ def test_postgres_backup_is_custom_format_validated_hashed_and_uploaded(
 ):
     process_calls = []
     uploads = []
+    head_calls = []
+    remote_objects = {}
     old_archive = tmp_path / "duducar-signage-postgres-20000101T000000Z.dump"
     old_digest = tmp_path / "duducar-signage-postgres-20000101T000000Z.dump.sha256"
     old_archive.write_bytes(b"expired backup")
@@ -308,6 +379,20 @@ def test_postgres_backup_is_custom_format_validated_hashed_and_uploaded(
     class S3Client:
         def upload_file(self, source, bucket, key, ExtraArgs=None):
             uploads.append((source, bucket, key, ExtraArgs))
+            remote_objects[key] = {
+                "ContentLength": os.path.getsize(source),
+                "ChecksumSHA256": base64.b64encode(
+                    hashlib.sha256(Path(source).read_bytes()).digest()
+                ).decode("ascii"),
+                "Metadata": ExtraArgs.get("Metadata", {}),
+                "VersionId": f"version-{len(remote_objects) + 1}",
+            }
+
+        def head_object(self, Bucket, Key, ChecksumMode):
+            assert Bucket == "backup-bucket"
+            assert ChecksumMode == "ENABLED"
+            head_calls.append(Key)
+            return remote_objects[Key]
 
     monkeypatch.setattr(
         "signage.management.commands.create_postgres_backup.shutil.which",
@@ -338,6 +423,14 @@ def test_postgres_backup_is_custom_format_validated_hashed_and_uploaded(
     assert len(uploads) == 2
     assert all(upload[2].startswith("database-backups/") for upload in uploads)
     assert uploads[0][3]["Metadata"]["sha256"] == expected
+    assert all(upload[3]["ChecksumAlgorithm"] == "SHA256" for upload in uploads)
+    assert head_calls == [uploads[0][2], uploads[1][2]]
+    receipt = json.loads((tmp_path / REMOTE_SUCCESS_RECEIPT).read_text())
+    assert receipt["bucket"] == "backup-bucket"
+    assert {entry["version_id"] for entry in receipt["objects"]} == {
+        "version-1",
+        "version-2",
+    }
     assert "database-secret" not in out.getvalue()
     assert not old_archive.exists()
     assert not old_digest.exists()
@@ -493,6 +586,7 @@ def test_readiness_rejects_limits_outside_pilot_safety_ranges():
 
 
 @override_settings(
+    DEPLOYMENT_ENV="production",
     DEBUG=False,
     SECRET_KEY=TEST_SECRET_KEY,
     DATABASES={
@@ -520,6 +614,7 @@ def test_readiness_rejects_limits_outside_pilot_safety_ranges():
     DEFAULT_FROM_EMAIL="no-reply@duducar.co",
     PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
     PLAY_INTEGRITY_PACKAGE_NAME="com.duducar.signage",
+    PLAY_INTEGRITY_APP_CERTIFICATE_SHA256=["ab" * 32],
     PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON=(
         '{"type":"service_account","project_id":"duducar-signage-production",'
         '"private_key":"test-only-key","client_email":"integrity@example.test"}'
@@ -545,6 +640,7 @@ def test_production_readiness_passes_for_configured_environment(monkeypatch):
 
 
 @override_settings(
+    DEPLOYMENT_ENV="production",
     DEBUG=False,
     SECRET_KEY=TEST_SECRET_KEY,
     DATABASES={

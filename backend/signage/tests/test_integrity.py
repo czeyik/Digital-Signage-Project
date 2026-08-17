@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timedelta
 from datetime import timezone as dt_timezone
 
@@ -6,6 +7,11 @@ from django.test import override_settings
 from rest_framework import exceptions
 
 from signage.integrity import verify_integrity_token
+
+CERTIFICATE_FINGERPRINT = "ab" * 32
+CERTIFICATE_DIGEST = base64.urlsafe_b64encode(
+    bytes.fromhex(CERTIFICATE_FINGERPRINT)
+).decode().rstrip("=")
 
 
 def integrity_payload(request_hash="expected-hash"):
@@ -20,14 +26,20 @@ def integrity_payload(request_hash="expected-hash"):
         "deviceIntegrity": {
             "deviceRecognitionVerdict": ["MEETS_DEVICE_INTEGRITY"]
         },
+        "appIntegrity": {
+            "appRecognitionVerdict": "UNRECOGNIZED_VERSION",
+            "packageName": "com.duducar.signage",
+            "certificateSha256Digest": [CERTIFICATE_DIGEST],
+        },
     }
 
 
 @override_settings(
     PLAY_INTEGRITY_PACKAGE_NAME="com.duducar.signage",
     PLAY_INTEGRITY_MAX_TOKEN_AGE_SECONDS=120,
+    PLAY_INTEGRITY_APP_CERTIFICATE_SHA256=[CERTIFICATE_FINGERPRINT],
 )
-def test_integrity_accepts_certified_sideload_without_license_verdict(monkeypatch):
+def test_integrity_accepts_configured_certified_sideload(monkeypatch):
     monkeypatch.setattr(
         "signage.integrity.decode_integrity_token",
         lambda token: integrity_payload(),
@@ -35,13 +47,14 @@ def test_integrity_accepts_certified_sideload_without_license_verdict(monkeypatc
 
     payload = verify_integrity_token("decoded-by-google", "expected-hash")
 
-    assert "appIntegrity" not in payload
+    assert payload["appIntegrity"]["appRecognitionVerdict"] == "UNRECOGNIZED_VERSION"
 
 
 @pytest.mark.parametrize("failure", ["wrong_package", "wrong_hash", "expired"])
 @override_settings(
     PLAY_INTEGRITY_PACKAGE_NAME="com.duducar.signage",
     PLAY_INTEGRITY_MAX_TOKEN_AGE_SECONDS=120,
+    PLAY_INTEGRITY_APP_CERTIFICATE_SHA256=[CERTIFICATE_FINGERPRINT],
 )
 def test_integrity_rejects_wrong_binding_or_expired_token(monkeypatch, failure):
     payload = integrity_payload()
@@ -65,6 +78,7 @@ def test_integrity_rejects_wrong_binding_or_expired_token(monkeypatch, failure):
 @override_settings(
     PLAY_INTEGRITY_PACKAGE_NAME="com.duducar.signage",
     PLAY_INTEGRITY_MAX_TOKEN_AGE_SECONDS=120,
+    PLAY_INTEGRITY_APP_CERTIFICATE_SHA256=[CERTIFICATE_FINGERPRINT],
 )
 def test_integrity_rejects_missing_device_verdict(monkeypatch):
     payload = integrity_payload()
@@ -75,3 +89,29 @@ def test_integrity_rejects_missing_device_verdict(monkeypatch):
 
     with pytest.raises(exceptions.PermissionDenied):
         verify_integrity_token("rooted-or-uncertified", "expected-hash")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("appRecognitionVerdict", "UNEVALUATED"),
+        (
+            "certificateSha256Digest",
+            [base64.urlsafe_b64encode(b"different-certificate-digest-32!").decode()],
+        ),
+    ],
+)
+@override_settings(
+    PLAY_INTEGRITY_PACKAGE_NAME="com.duducar.signage",
+    PLAY_INTEGRITY_MAX_TOKEN_AGE_SECONDS=120,
+    PLAY_INTEGRITY_APP_CERTIFICATE_SHA256=[CERTIFICATE_FINGERPRINT],
+)
+def test_integrity_rejects_untrusted_app_build(monkeypatch, field, value):
+    payload = integrity_payload()
+    payload["appIntegrity"][field] = value
+    monkeypatch.setattr(
+        "signage.integrity.decode_integrity_token", lambda token: payload
+    )
+
+    with pytest.raises(exceptions.AuthenticationFailed):
+        verify_integrity_token("forged", "expected-hash")

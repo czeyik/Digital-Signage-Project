@@ -24,11 +24,12 @@ import android.view.WindowManager
 import com.duducar.signage.databinding.ActivityMainBinding
 import org.json.JSONArray
 import org.json.JSONObject
-import java.time.Duration
 import java.time.Instant
-import java.time.ZoneId
 import java.util.UUID
+import java.util.concurrent.Executor
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 class MainActivity : Activity() {
     private lateinit var binding: ActivityMainBinding
@@ -40,11 +41,27 @@ class MainActivity : Activity() {
     private lateinit var credentials: CredentialStore
     private lateinit var kioskPolicies: KioskPolicyManager
     private lateinit var adminRelockScheduler: AdminRelockScheduler
-    private val executor = Executors.newSingleThreadExecutor()
+    private lateinit var operationsScheduler: OperationsScheduler
+    private lateinit var uploadApi: ApiClient
+    private val controlExecutor = Executors.newSingleThreadExecutor()
+    private val downloadExecutor = Executors.newSingleThreadExecutor()
+    private val uploadExecutor = Executors.newSingleThreadExecutor()
+    private val syncInFlight = AtomicBoolean(false)
+    private val syncPending = AtomicBoolean(false)
+    private val heartbeatInFlight = AtomicBoolean(false)
+    private val heartbeatPending = AtomicBoolean(false)
+    private val uploadInFlight = AtomicBoolean(false)
+    private val uploadPending = AtomicBoolean(false)
+    private val manifestGeneration = AtomicLong(0)
+    private val manifestPreparationLock = Any()
+    private var pendingManifestPreparation: ManifestPreparation? = null
+    private var manifestPreparationRunning = false
     private val playbackHandler = Handler(Looper.getMainLooper())
     private val operationsHandler = Handler(Looper.getMainLooper())
     private val adminHandler = Handler(Looper.getMainLooper())
     private var activeManifest: JSONObject? = null
+    private var stagedManifestIdentity: ManifestIdentity? = null
+    private var stagedManifestGeneration: Long? = null
     private var currentIndex = 0
     private var currentStartedAt: Instant? = null
     private var currentStartedElapsedMs: Long? = null
@@ -83,7 +100,9 @@ class MainActivity : Activity() {
         credentials = CredentialStore(this)
         kioskPolicies = KioskPolicyManager(this)
         adminRelockScheduler = AdminRelockScheduler(this)
+        operationsScheduler = OperationsScheduler(this)
         api = ApiClient(credentials)
+        uploadApi = ApiClient(credentials)
         cache = CacheManager(this)
         store = PlayerStore(this)
         serverClock = ServerClock(this)
@@ -240,6 +259,7 @@ class MainActivity : Activity() {
             val created = store.preparePlannedShutdown(marker, event)
             shutdownPrepared = true
             operationsHandler.removeCallbacksAndMessages(null)
+            operationsScheduler.cancel()
             if (created) {
                 interruptCurrent("planned_shutdown")
             } else {
@@ -310,8 +330,31 @@ class MainActivity : Activity() {
         playbackHandler.removeCallbacksAndMessages(null)
         operationsHandler.removeCallbacksAndMessages(null)
         adminHandler.removeCallbacksAndMessages(null)
-        executor.shutdownNow()
+        controlExecutor.shutdownNow()
+        downloadExecutor.shutdownNow()
+        uploadExecutor.shutdownNow()
         super.onDestroy()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (!::credentials.isInitialized) return
+        if (isShutdownPrepared()) {
+            operationsScheduler.cancel()
+            showShutdownReady()
+            return
+        }
+        when (intent.action) {
+            OperationsScheduler.ACTION_HEARTBEAT -> {
+                operationsScheduler.scheduleHeartbeat()
+                sendHeartbeat()
+            }
+            OperationsScheduler.ACTION_SYNC -> {
+                operationsScheduler.scheduleSync()
+                synchronizeAndPlay()
+            }
+        }
     }
 
     override fun onResume() {
@@ -481,7 +524,7 @@ class MainActivity : Activity() {
                 return@setOnClickListener
             }
             binding.enrollButton.isEnabled = false
-            executor.execute {
+            controlExecutor.execute {
                 try {
                     @Suppress("HardwareIds")
                     val androidId = Settings.Secure.getString(
@@ -534,100 +577,223 @@ class MainActivity : Activity() {
             showStatus(getString(R.string.device_owner_required))
             return
         }
-        executor.execute {
-            try {
-                val response = api.manifest()
-                serverClock.update(response.getString("server_time"))
-                // A shutdown prepared before this first trusted anchor is
-                // durable locally, but must receive this trusted timestamp
-                // before the FIFO operational queue can be uploaded.
-                store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
-                collectHistoricalExitDiagnostics()
-                flushPendingBatches()
-                when (response.getString("mode")) {
-                    "maintenance" -> runOnUiThread {
+        requestCoalesced(
+            executor = controlExecutor,
+            inFlight = syncInFlight,
+            pending = syncPending,
+        ) {
+            if (!isShutdownPrepared()) {
+                synchronizeInBackground()
+            }
+        }
+    }
+
+    private fun synchronizeInBackground() {
+        try {
+            val response = api.manifest()
+            serverClock.update(response.getString("server_time"))
+            // A shutdown prepared before this first trusted anchor is durable
+            // locally, but must receive this trusted timestamp before upload.
+            store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
+            collectHistoricalExitDiagnostics()
+            requestUploadFlush()
+            when (response.getString("mode")) {
+                "maintenance", "fallback" -> {
+                    invalidateManifestPreparation()
+                    runOnUiThread {
                         if (hasActiveAdminSession() || isShutdownPrepared()) return@runOnUiThread
+                        stagedManifestIdentity = null
+                        stagedManifestGeneration = null
                         markSuccessfulSync()
-                        store.putState("device_mode", "maintenance")
-                        interruptCurrent("device_disabled")
-                        showStatus(getString(R.string.maintenance))
-                    }
-                    "fallback" -> runOnUiThread {
-                        if (hasActiveAdminSession() || isShutdownPrepared()) return@runOnUiThread
-                        markSuccessfulSync()
-                        store.putState("device_mode", "fallback")
-                        interruptCurrent("fallback_mode")
-                        showFallback()
-                    }
-                    "play" -> {
-                        val manifest = response.getJSONObject("playlist")
-                        if (cache.prepare(manifest)) {
-                            runOnUiThread {
-                                if (hasActiveAdminSession() || isShutdownPrepared()) {
-                                    return@runOnUiThread
-                                }
-                                val sameManifest = PlaybackTransitionPolicy.sameManifest(
-                                    activeManifest?.optString("id"),
-                                    activeManifest?.optInt("version"),
-                                    manifest.getString("id"),
-                                    manifest.getInt("version"),
-                                )
-                                // Normal updates switch at the loop boundary. The first
-                                // manifest and urgent updates activate immediately.
-                                val urgent = manifest.optBoolean("urgent")
-                                if (
-                                    PlaybackTransitionPolicy.shouldActivateImmediately(
-                                        hasActiveManifest = activeManifest != null,
-                                        sameManifest = sameManifest,
-                                        urgent = urgent,
-                                    )
-                                ) {
-                                    if (activeManifest != null) {
-                                        interruptCurrent("urgent_playlist_replacement")
-                                    }
-                                    val activated = cache.activateStaged()
-                                    if (activated != null) {
-                                        activeManifest = activated
-                                        currentIndex = 0
-                                        loopStartedAt = null
-                                    } else {
-                                        recordReplacementFailure(manifest, "activation")
-                                        continuePreviousPlaylistAfterReplacementFailure()
-                                        return@runOnUiThread
-                                    }
-                                }
-                                markSuccessfulSync()
-                                store.putState("device_mode", "play")
-                                ensurePlaybackStarted()
-                            }
+                        if (response.getString("mode") == "maintenance") {
+                            store.putState("device_mode", "maintenance")
+                            interruptCurrent("device_disabled")
+                            showStatus(getString(R.string.maintenance))
                         } else {
-                            recordReplacementFailure(manifest, "preparation")
-                            runOnUiThread {
-                                if (!hasActiveAdminSession() && !isShutdownPrepared()) {
-                                    continuePreviousPlaylistAfterReplacementFailure()
-                                }
-                            }
+                            store.putState("device_mode", "fallback")
+                            interruptCurrent("fallback_mode")
+                            showFallback()
                         }
                     }
                 }
-            } catch (_: Exception) {
-                runOnUiThread {
-                    if (hasActiveAdminSession() || isShutdownPrepared()) return@runOnUiThread
-                    when (store.state("device_mode")) {
-                        "maintenance" -> showStatus(getString(R.string.maintenance))
-                        "fallback" -> showFallback()
-                        else -> {
-                            activeManifest = cache.activeManifest()
-                            ensurePlaybackStarted()
-                            if (activeManifest == null) showFallback()
+                "play" -> queueManifestPreparation(response.getJSONObject("playlist"))
+                else -> throw IllegalArgumentException("Unknown device mode")
+            }
+        } catch (_: CredentialRejectedException) {
+            handleCredentialsRejected()
+        } catch (_: ForbiddenException) {
+            handleServerForbidden()
+        } catch (_: Exception) {
+            restoreAfterSyncFailure()
+        }
+    }
+
+    private fun queueManifestPreparation(manifest: JSONObject) {
+        val candidate = runCatching { JSONObject(manifest.toString()) }.getOrNull()
+            ?: return restoreAfterManifestPreparationFailure(manifest)
+        synchronized(manifestPreparationLock) {
+            // A later sync invalidates any older candidate before its downloads can
+            // finish, so a stale staged manifest cannot activate at a loop boundary.
+            val nextGeneration = manifestGeneration.incrementAndGet()
+            cache.discardStaged()
+            pendingManifestPreparation = ManifestPreparation(nextGeneration, candidate)
+            if (manifestPreparationRunning) return
+            manifestPreparationRunning = true
+        }
+        downloadExecutor.execute {
+            while (true) {
+                val next = synchronized(manifestPreparationLock) {
+                    pendingManifestPreparation?.also { pendingManifestPreparation = null }
+                        ?: run {
+                            manifestPreparationRunning = false
+                            return@execute
                         }
+                }
+                val identity = cache.prepare(next.manifest) { identity, preparedManifest ->
+                    synchronized(manifestPreparationLock) {
+                        manifestGeneration.get() == next.generation &&
+                            cache.stageCandidate(identity, preparedManifest)
                     }
+                }
+                val current = synchronized(manifestPreparationLock) {
+                    manifestGeneration.get() == next.generation
+                }
+                if (identity != null && current) {
+                    runOnUiThread { activatePreparedManifest(next.manifest, identity, next.generation) }
+                } else if (current) {
+                    restoreAfterManifestPreparationFailure(next.manifest)
                 }
             }
         }
     }
 
+    private fun invalidateManifestPreparation() {
+        synchronized(manifestPreparationLock) {
+            manifestGeneration.incrementAndGet()
+            cache.discardStaged()
+        }
+    }
+
+    private fun activatePreparedManifest(
+        manifest: JSONObject,
+        identity: ManifestIdentity,
+        generation: Long,
+    ) {
+        if (hasActiveAdminSession() || isShutdownPrepared()) return
+        val sameManifest = PlaybackTransitionPolicy.sameManifest(
+            activeManifest?.optString("id"),
+            activeManifest?.optInt("version"),
+            identity.id,
+            identity.version,
+        )
+        if (
+            PlaybackTransitionPolicy.shouldActivateImmediately(
+                hasActiveManifest = activeManifest != null,
+                sameManifest = sameManifest,
+                urgent = manifest.getBoolean("urgent"),
+            )
+        ) {
+            val (attempted, activated) = synchronized(manifestPreparationLock) {
+                if (generation != manifestGeneration.get()) {
+                    false to null
+                } else {
+                    if (activeManifest != null) interruptCurrent("urgent_playlist_replacement")
+                    true to cache.activateStaged(identity)
+                }
+            }
+            if (!attempted) return
+            if (activated == null) {
+                stagedManifestIdentity = null
+                stagedManifestGeneration = null
+                recordReplacementFailure(manifest, "activation")
+                continuePreviousPlaylistAfterReplacementFailure()
+                return
+            }
+            activeManifest = activated
+            stagedManifestIdentity = null
+            stagedManifestGeneration = null
+            currentIndex = 0
+            loopStartedAt = null
+        } else {
+            val current = synchronized(manifestPreparationLock) {
+                generation == manifestGeneration.get()
+            }
+            if (!current) return
+            stagedManifestIdentity = identity
+            stagedManifestGeneration = generation
+        }
+        markSuccessfulSync()
+        store.putState("device_mode", "play")
+        ensurePlaybackStarted()
+    }
+
+    private fun restoreAfterManifestPreparationFailure(manifest: JSONObject) {
+        recordReplacementFailure(manifest, "preparation")
+        runOnUiThread {
+            if (!hasActiveAdminSession() && !isShutdownPrepared()) {
+                continuePreviousPlaylistAfterReplacementFailure()
+            }
+        }
+    }
+
+    private fun restoreAfterSyncFailure() {
+        runOnUiThread {
+            if (hasActiveAdminSession() || isShutdownPrepared()) return@runOnUiThread
+            when (store.state("device_mode")) {
+                "maintenance" -> showStatus(getString(R.string.maintenance))
+                "fallback" -> showFallback()
+                else -> {
+                    activeManifest = cache.activeManifest()
+                    ensurePlaybackStarted()
+                    if (activeManifest == null) showFallback()
+                }
+            }
+        }
+    }
+
+    private fun handleCredentialsRejected() {
+        runOnUiThread {
+            if (isShutdownPrepared()) {
+                showShutdownReady()
+                return@runOnUiThread
+            }
+            operationsHandler.removeCallbacksAndMessages(null)
+            operationsScheduler.cancel()
+            api.clearAccessToken()
+            uploadApi.clearAccessToken()
+            adminRelockScheduler.cancel()
+            credentials.endAdminSession()
+            invalidateManifestPreparation()
+            stagedManifestIdentity = null
+            stagedManifestGeneration = null
+            interruptCurrent("credential_rejected")
+            showEnrollment()
+        }
+    }
+
+    private fun handleServerForbidden() {
+        runOnUiThread {
+            if (isShutdownPrepared()) {
+                showShutdownReady()
+                return@runOnUiThread
+            }
+            // A policy/disabled-device denial must fail closed: do not keep
+            // advertising from cache while waiting for the next permitted sync.
+            invalidateManifestPreparation()
+            stagedManifestIdentity = null
+            stagedManifestGeneration = null
+            store.putState("device_mode", "maintenance")
+            interruptCurrent("server_forbidden")
+            showStatus(getString(R.string.maintenance))
+        }
+    }
+
     private fun recordReplacementFailure(manifest: JSONObject, stage: String) {
+        val identity = ManifestPolicy.identity(manifest) ?: return
+        recordReplacementFailure(identity, stage)
+    }
+
+    private fun recordReplacementFailure(identity: ManifestIdentity, stage: String) {
         store.enqueueOperationalEvent(
             JSONObject()
                 .put("kind", "replacement_failed")
@@ -635,7 +801,7 @@ class MainActivity : Activity() {
                 .put(
                     "details",
                     JSONObject()
-                        .put("playlist_id", manifest.getString("id"))
+                        .put("playlist_id", identity.id)
                         .put("stage", stage),
                 ),
         )
@@ -683,19 +849,75 @@ class MainActivity : Activity() {
         var items = manifest.getJSONArray("items")
         if (items.length() == 0) return showFallback()
         if (currentIndex !in 0 until items.length()) {
+            val priorLoopHadOnlyFailures =
+                loopResults.isNotEmpty() && loopResults.all { it.status == "failed" }
             finishLoop(manifest)
-            activeManifest = cache.activateStaged() ?: activeManifest
+            val pendingIdentity = stagedManifestIdentity
+            val (stagedIsCurrent, activated) = synchronized(manifestPreparationLock) {
+                val current =
+                    pendingIdentity != null && stagedManifestGeneration == manifestGeneration.get()
+                current to if (current) cache.activateStaged(pendingIdentity) else null
+            }
+            if (pendingIdentity != null) {
+                if (stagedIsCurrent && activated == null) {
+                    recordReplacementFailure(pendingIdentity, "activation")
+                }
+                stagedManifestIdentity = null
+                stagedManifestGeneration = null
+            }
+            activeManifest = activated ?: activeManifest
             currentIndex = 0
             manifest = activeManifest ?: return showFallback()
             items = manifest.getJSONArray("items")
             if (items.length() == 0) return showFallback()
+            if (priorLoopHadOnlyFailures && activated == null) {
+                showFallback()
+                playbackHandler.postDelayed({ ensurePlaybackStarted() }, INVALID_PLAYLIST_RETRY_MS)
+                return
+            }
         }
         if (loopStartedAt == null) {
             loopStartedAt = serverClock.now()
             store.putState("loop_started_at", loopStartedAt?.toString() ?: "")
         }
-        val item = items.getJSONObject(currentIndex)
-        val file = cache.validatedMediaFile(item)
+        while (currentIndex in 0 until items.length()) {
+            val item = items.getJSONObject(currentIndex)
+            val playbackId = beginCurrentPlayback(manifest, item)
+            val file = cache.validatedMediaFile(item)
+            if (file == null) {
+                if (!recordFailureAndContinue(playbackId, "missing_file", 0)) return
+                continue
+            }
+            if (item.getString("kind") == "image") {
+                val bitmap = BitmapFactory.decodeFile(file.path)
+                if (bitmap == null) {
+                    if (!recordFailureAndContinue(playbackId, "decode_failure", 0)) return
+                    continue
+                }
+                binding.video.visibility = View.GONE
+                binding.image.setImageBitmap(bitmap)
+                binding.image.visibility = View.VISIBLE
+                visiblePlaybackMedia = true
+                updateKeepScreenOn()
+                playbackHandler.postDelayed({
+                    if (
+                        currentResultId == playbackId &&
+                        recordCurrent("completed", "", item.getLong("duration_ms"))
+                    ) {
+                        advance()
+                    }
+                }, item.getLong("duration_ms"))
+                return
+            }
+            startVideoPlayback(file.path, item.getLong("duration_ms"), playbackId)
+            return
+        }
+        // Continue at the loop boundary on the next main-loop turn. A corrupt
+        // playlist therefore records each failed item once without recursion.
+        playbackHandler.post { playCurrent() }
+    }
+
+    private fun beginCurrentPlayback(manifest: JSONObject, item: JSONObject): String {
         stopPlayback()
         currentStartedAt = serverClock.now()
         currentStartedElapsedMs = SystemClock.elapsedRealtime()
@@ -720,57 +942,63 @@ class MainActivity : Activity() {
         binding.status.visibility = View.GONE
         binding.shutdownReady.visibility = View.GONE
         showPrepareShutdownControl()
-        if (file == null) {
-            if (recordCurrent("failed", "missing_file", 0)) advance()
-            return
-        }
-        if (item.getString("kind") == "image") {
-            binding.video.visibility = View.GONE
-            val bitmap = BitmapFactory.decodeFile(file.path)
-            if (bitmap == null) {
-                if (recordCurrent("failed", "decode_failure", 0)) advance()
-                return
-            }
-            binding.image.setImageBitmap(bitmap)
-            binding.image.visibility = View.VISIBLE
-            visiblePlaybackMedia = true
-            updateKeepScreenOn()
-            playbackHandler.postDelayed({
-                if (
-                    currentResultId == playbackId &&
-                    recordCurrent("completed", "", item.getLong("duration_ms"))
-                ) {
-                    advance()
-                }
-            }, item.getLong("duration_ms"))
-        } else {
-            binding.image.visibility = View.GONE
-            binding.video.visibility = View.VISIBLE
-            visiblePlaybackMedia = true
-            updateKeepScreenOn()
-            binding.video.setVideoPath(file.path)
-            binding.video.setOnCompletionListener {
-                if (
-                    currentResultId == playbackId &&
-                    recordCurrent("completed", "", item.getLong("duration_ms"))
-                ) {
-                    advance()
-                }
-            }
-            binding.video.setOnErrorListener { _, _, _ ->
-                if (currentResultId == playbackId) {
-                    val elapsed = elapsedMs()
-                    if (recordCurrent("failed", "decode_failure", elapsed)) advance()
-                }
-                true
-            }
+        return playbackId
+    }
+
+    private fun recordFailureAndContinue(
+        playbackId: String,
+        reason: String,
+        durationMs: Long,
+    ): Boolean {
+        if (currentResultId != playbackId || !recordCurrent("failed", reason, durationMs)) return false
+        currentIndex += 1
+        return true
+    }
+
+    private fun startVideoPlayback(path: String, durationMs: Long, playbackId: String) {
+        binding.image.visibility = View.GONE
+        binding.video.visibility = View.VISIBLE
+        visiblePlaybackMedia = true
+        updateKeepScreenOn()
+        var prepared = false
+        binding.video.setOnPreparedListener {
+            if (currentResultId != playbackId) return@setOnPreparedListener
+            prepared = true
             binding.video.start()
+            playbackHandler.postDelayed({
+                failVideoPlayback(playbackId, "playback_timeout")
+            }, durationMs + VIDEO_COMPLETION_GRACE_MS)
         }
+        binding.video.setOnCompletionListener {
+            if (
+                currentResultId == playbackId &&
+                recordCurrent("completed", "", durationMs)
+            ) {
+                advance()
+            }
+        }
+        binding.video.setOnErrorListener { _, _, _ ->
+            failVideoPlayback(playbackId, "decode_failure")
+            true
+        }
+        binding.video.setVideoPath(path)
+        playbackHandler.postDelayed({
+            if (currentResultId == playbackId && !prepared) {
+                failVideoPlayback(playbackId, "start_timeout")
+            }
+        }, VIDEO_START_TIMEOUT_MS)
+    }
+
+    private fun failVideoPlayback(playbackId: String, reason: String) {
+        if (currentResultId != playbackId) return
+        val elapsed = elapsedMs()
+        stopPlayback()
+        if (recordCurrent("failed", reason, elapsed)) advance()
     }
 
     private fun advance() {
         currentIndex += 1
-        playCurrent()
+        playbackHandler.post { playCurrent() }
     }
 
     private fun recordCurrent(status: String, reason: String, durationMs: Long): Boolean {
@@ -838,7 +1066,7 @@ class MainActivity : Activity() {
         }
         loopResults.clear()
         loopStartedAt = null
-        executor.execute { flushPendingBatches() }
+        requestUploadFlush()
     }
 
     private fun buildLoopBatch(
@@ -925,28 +1153,61 @@ class MainActivity : Activity() {
         // successful clock update and the normal sync-path rebasing call.
         if (!serverClock.hasTrustedAnchor()) return
         store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
-        store.pendingOperationalEvents().forEach { (id, payload) ->
+        while (true) {
+            val (id, payload) = store.oldestPendingOperationalEvent() ?: break
             try {
-                api.uploadOperationalEvent(payload)
+                uploadApi.uploadOperationalEvent(payload)
                 store.acknowledgeOperationalEvent(id)
+            } catch (error: ApiException) {
+                if (!isPermanentUploadRejection(error)) return
+                store.discardOperationalEventAsPoison(id, error.status)
+            } catch (_: CredentialRejectedException) {
+                handleCredentialsRejected()
+                return
+            } catch (_: ForbiddenException) {
+                handleServerForbidden()
+                return
             } catch (_: Exception) {
                 return
             }
         }
-        store.pendingBatches().forEach { (id, payload) ->
+        while (true) {
+            val (id, payload) = store.oldestPendingBatch(serverClock.now().toString()) ?: break
             try {
-                api.uploadBatch(payload)
+                uploadApi.uploadBatch(payload)
                 store.acknowledgeBatch(id)
+            } catch (error: ApiException) {
+                if (!isPermanentUploadRejection(error)) return
+                store.discardBatchAsPoison(id, error.status, serverClock.now().toString())
+            } catch (_: CredentialRejectedException) {
+                handleCredentialsRejected()
+                return
+            } catch (_: ForbiddenException) {
+                handleServerForbidden()
+                return
             } catch (_: Exception) {
                 return
             }
         }
     }
 
+    private fun requestUploadFlush() {
+        requestCoalesced(uploadExecutor, uploadInFlight, uploadPending) { flushPendingBatches() }
+    }
+
+    private fun isPermanentUploadRejection(error: ApiException): Boolean =
+        error.status in 400..499 && error.status !in setOf(401, 403, 408, 429)
+
     private fun sendHeartbeat() {
         if (isShutdownPrepared()) return
-        executor.execute {
-            if (isShutdownPrepared()) return@execute
+        requestCoalesced(controlExecutor, heartbeatInFlight, heartbeatPending) {
+            sendHeartbeatOnce()
+        }
+    }
+
+    private fun sendHeartbeatOnce() {
+        if (isShutdownPrepared()) return
+        try {
             val battery = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             val level = battery?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
             val scale = battery?.getIntExtra(BatteryManager.EXTRA_SCALE, 100)?.takeIf { it > 0 } ?: 100
@@ -966,15 +1227,32 @@ class MainActivity : Activity() {
                 .put("android_version", android.os.Build.VERSION.RELEASE)
                 .put("active_playlist_id", activeManifest?.optString("id"))
                 .put("playback_active", currentStartedAt != null)
-                .put(
-                    "last_successful_sync_at",
-                    store.state("last_successful_sync_at"),
-                )
+                .put("last_successful_sync_at", store.state("last_successful_sync_at"))
                 .put("last_playback_at", store.state("last_playback_at"))
+            api.heartbeat(body)
+        } catch (_: CredentialRejectedException) {
+            handleCredentialsRejected()
+        } catch (_: ForbiddenException) {
+            handleServerForbidden()
+        } catch (_: Exception) {
+            // Health is best effort; playback and proof batches remain local.
+        }
+    }
+
+    private fun requestCoalesced(
+        executor: Executor,
+        inFlight: AtomicBoolean,
+        pending: AtomicBoolean,
+        work: () -> Unit,
+    ) {
+        pending.set(true)
+        if (!inFlight.compareAndSet(false, true)) return
+        executor.execute {
             try {
-                api.heartbeat(body)
-            } catch (_: Exception) {
-                // Health is best effort; playback and proof batches remain local.
+                while (pending.getAndSet(false)) work()
+            } finally {
+                inFlight.set(false)
+                if (pending.get()) requestCoalesced(executor, inFlight, pending, work)
             }
         }
     }
@@ -982,12 +1260,14 @@ class MainActivity : Activity() {
     private fun scheduleOperations() {
         operationsHandler.removeCallbacksAndMessages(null)
         if (isShutdownPrepared()) return
+        operationsScheduler.scheduleHeartbeat()
+        operationsScheduler.scheduleSync()
         val heartbeat = object : Runnable {
             override fun run() {
                 if (isShutdownPrepared()) return
                 sendHeartbeat()
                 if (!isShutdownPrepared()) {
-                    operationsHandler.postDelayed(this, 30 * 60 * 1000L)
+                    operationsHandler.postDelayed(this, OperationsScheduler.HEARTBEAT_INTERVAL_MS)
                 }
             }
         }
@@ -996,27 +1276,12 @@ class MainActivity : Activity() {
                 if (isShutdownPrepared()) return
                 synchronizeAndPlay()
                 if (!isShutdownPrepared()) {
-                    operationsHandler.postDelayed(this, 60 * 60 * 1000L)
-                }
-            }
-        }
-        val midnightSync = object : Runnable {
-            override fun run() {
-                if (isShutdownPrepared()) return
-                synchronizeAndPlay()
-                if (!isShutdownPrepared()) {
-                    operationsHandler.postDelayed(this, 24 * 60 * 60 * 1000L)
+                    operationsHandler.postDelayed(this, OperationsScheduler.SYNC_INTERVAL_MS)
                 }
             }
         }
         operationsHandler.post(heartbeat)
         operationsHandler.post(sync)
-        val now = serverClock.now().atZone(ZoneId.of("Asia/Kuala_Lumpur"))
-        val nextMidnight = now.toLocalDate().plusDays(1).atStartOfDay(now.zone)
-        operationsHandler.postDelayed(
-            midnightSync,
-            Duration.between(now, nextMidnight).toMillis(),
-        )
     }
 
     private fun markSuccessfulSync() {
@@ -1073,6 +1338,9 @@ class MainActivity : Activity() {
     }
 
     private fun showShutdownReady() {
+        // Covers a process death in the tiny interval after the durable marker
+        // was written but before the normal prepare path cancelled its alarms.
+        operationsScheduler.cancel()
         stopPlayback()
         binding.adminUnlock.visibility = View.GONE
         binding.adminControls.visibility = View.GONE
@@ -1288,21 +1556,20 @@ class MainActivity : Activity() {
                 itemIndex = resumeIndex,
                 recordedAt = endedAt,
             )
-        } catch (error: Exception) {
+        } catch (_: Exception) {
             store.recordCheckpointLossAndClear(
                 JSONObject()
                     .put("kind", "forced_queue_loss")
                     .put("recorded_at", serverClock.now().toString())
                     .put(
                         "details",
-                        JSONObject().put(
-                            "source",
-                            "playback_checkpoint_recovery",
-                        ).put(
-                            "reason",
-                            error.message?.takeIf { it in recoveryFailureReasons }
-                                ?: "invalid_checkpoint",
-                        ),
+                        // The API's loss event represents discarded queued
+                        // batches only. Checkpoint recovery loses no batch,
+                        // but remains a durable, schema-valid loss signal.
+                        JSONObject()
+                            .put("removed_batches", 0)
+                            .put("estimated_removed_bytes", 0)
+                            .put("target_removed_bytes", 0),
                     ),
             )
             currentIndex = 0
@@ -1374,19 +1641,9 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        private val recoveryFailureReasons = setOf(
-            "active_manifest_missing",
-            "active_manifest_empty",
-            "active_manifest_changed",
-            "item_index_invalid",
-            "playlist_entry_changed",
-            "checkpoint_result_mismatch",
-            "loop_started_at_missing",
-            "loop_result_incomplete",
-            "playlist_result_unknown",
-            "playlist_result_duplicate",
-            "loop_result_invalid",
-        )
+        private const val VIDEO_START_TIMEOUT_MS = 10_000L
+        private const val VIDEO_COMPLETION_GRACE_MS = 15_000L
+        private const val INVALID_PLAYLIST_RETRY_MS = 60_000L
         private val playbackResultStatuses = setOf("completed", "interrupted", "failed")
     }
 
@@ -1395,5 +1652,10 @@ class MainActivity : Activity() {
         val batch: JSONObject,
         val itemIndex: Int,
         val recordedAt: Instant,
+    )
+
+    private data class ManifestPreparation(
+        val generation: Long,
+        val manifest: JSONObject,
     )
 }

@@ -31,9 +31,12 @@ before changing it:
 
 ## Roles, scope, and privacy
 
-- Owner controls users, recovery, global settings, and driver PII; marketing
-  controls non-PII operations; drivers have no dashboard. No public signup;
-  dashboard accounts require `@duducar.co`; only owners view/enter driver names.
+- Owner controls users, recovery, global settings, driver PII, and device
+  lifecycle (provisioning, PINs, enrollment/credential revocation, and
+  disable/reactivate). Marketing controls non-PII media and playlist operations
+  and may acknowledge operational alerts; drivers have no dashboard. No public
+  signup; dashboard accounts require `@duducar.co`; only owners view/enter
+  driver names.
 - Pilot scope: dashboard, Android 12+ kiosk, media/playlists, device lifecycle,
   offline sync, proof-of-play, alerts/audit, and 30-day backups.
 - Deferred unless explicitly approved: news/weather, GPS/location, passenger

@@ -50,9 +50,17 @@ Verify the APK certificate with Android
 the APK SHA-256 checksum, install it on one factory-reset canary, and retain the
 previous same-key APK and R8 mapping file for manual rollback.
 
-Enrollment is allowed only when Google returns `MEETS_DEVICE_INTEGRITY`. The
-pilot intentionally ignores Play licensing and app-recognition verdicts because
-staff sideload the APK. A tablet that is not Play Protect certified is not
+Before the canary, configure the production runtime
+`PLAY_INTEGRITY_APP_CERTIFICATE_SHA256` with the comma-separated, 64-character
+hex certificate fingerprint(s) from that command. This is an allowlist, not a
+signing secret; do not put a real value in source control. Production readiness
+fails closed when it is absent or malformed.
+
+Enrollment is allowed only when Google returns `MEETS_DEVICE_INTEGRITY`, the
+expected package, and a certificate digest matching that runtime allowlist. The
+server accepts `PLAY_RECOGNIZED` and the staff-sideload
+`UNRECOGNIZED_VERSION` verdict only with that matching certificate; it does not
+ignore app recognition. A tablet that is not Play Protect certified is not
 eligible for production enrollment.
 
 The production application also refuses enrollment and playback unless its

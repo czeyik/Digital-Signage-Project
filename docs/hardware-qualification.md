@@ -6,6 +6,14 @@ tester, APK version, photos/logs/video/notes, and an evidence location. An
 owner creates the `HardwareQualification` record in `/admin/`; it may be
 `approved_for_pilot` only when every current required field is true and evidence
 is complete. Emulators, phones, and a different firmware never qualify it.
+The approval evidence is immutable: revoke it and create a new record rather
+than editing a previously approved physical build.
+
+During production enrollment, the player submits its `hardware_model`,
+`firmware_version`, and `security_patch_level` in the integrity-bound challenge.
+All three must exactly match the selected approved record; the server persists
+that binding on the enrolled device. A changed build or security patch requires
+fresh qualification and owner-issued enrollment.
 
 ## Entry conditions
 

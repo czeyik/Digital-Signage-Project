@@ -6,7 +6,8 @@ host_config=/etc/duducar/host.env
 state_dir=/var/lib/duducar-alerts
 
 if [ ! -r "$host_config" ]; then
-  exit 0
+  echo "Missing alert configuration: $host_config" >&2
+  exit 1
 fi
 
 set -a
@@ -14,7 +15,8 @@ source "$host_config"
 set +a
 
 if [ -z "${OPERATIONS_SNS_TOPIC_ARN:-}" ] || [ -z "${AWS_REGION:-}" ]; then
-  exit 0
+  echo "Alert topic or Region is not configured." >&2
+  exit 1
 fi
 
 install -d -o root -g root -m 0700 "$state_dir"
@@ -48,6 +50,9 @@ if [ "$mode" = "clear" ]; then
   fi
   if publish "DUDU host alert recovered" "$message"; then
     rm -f "$marker"
+  else
+    echo "Failed to publish recovery for alert: $key" >&2
+    exit 1
   fi
   exit 0
 fi
@@ -61,6 +66,9 @@ if publish "DUDU production host alert" "$message"; then
   printf '%s\n' "$key" > "$marker_tmp"
   chmod 0600 "$marker_tmp"
   mv -f "$marker_tmp" "$marker"
+else
+  echo "Failed to publish production alert: $key" >&2
+  exit 1
 fi
 
 exit 0
