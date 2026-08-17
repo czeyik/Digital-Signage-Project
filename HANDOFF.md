@@ -10,7 +10,8 @@ Malaysia pilot on the existing low-cost AWS design. Keep the current Android
 
 ## Read first
 
-1. `AGENTS.md` — product, security, privacy, and operating constraints.
+1. `AGENTS.md` — development style and mode.
+2. `OVERVIEW.md` — product, security, privacy, and operating constraints.
 2. `docs/architecture.md` — approved EC2/SSM/private-media topology.
 3. `docs/production-deployment-runbook.md` — ordered production gates.
 4. `docs/hardware-qualification.md` and `docs/android-release-signing.md`.
