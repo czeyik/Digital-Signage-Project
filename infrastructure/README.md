@@ -126,12 +126,12 @@ artifacts. The checked-in runtime helper refuses to use them.
 
 Never hand-edit or copy `/etc/duducar/release.env`. The dedicated
 `production_release_config_document` is the only reviewed path to change
-`BACKEND_IMAGE` and `REQUIRED_APP_VERSION`: it accepts a digest only from the
-reviewed backend ECR repository and a semantic Android version only when both
-exactly match the Terraform release selection embedded in the document. It
-atomically changes only those two assignments, preserves a root-only operation
-backup, and does not print the configuration or restart a service. The required
-app version must equal the signed APK version name. Use the pinned Terraform/SSM
+the backend, PostgreSQL, Caddy, Caddy-config, and required-app selections.
+Every image and the semantic Android version must exactly match the Terraform
+values embedded in the document. New hosts receive that exact initial file from
+reviewed bootstrap user data; later changes are atomic, root-only, backed up,
+and never print configuration or restart a service. The required app version
+must equal the signed APK version name. Use the pinned Terraform/SSM
 `Mode=validate`, `Mode=install`, confirmation, and rollback sequence in the
 [production deployment runbook](../docs/production-deployment-runbook.md#configure-and-deploy-through-ssm).
 Record the full commit, document version and hash, command IDs, digest, app
@@ -156,19 +156,22 @@ sudo systemctl list-timers 'duducar-*'
 ```
 
 Terraform user data is bootstrap-only and is not replayed on the live host.
-When either `Caddyfile.post-cutover` or `render-runtime-env` changes, the
-reviewed plan updates an SSM command document without executing it. Resolve the
+All runtime scripts, units, timers, PostgreSQL access/grants, the Caddyfile,
+credential broker, and backup verifier are delivered as one complete reviewed
+SSM bundle. A Terraform apply updates that document but never executes it.
+Resolve the
 `production_runtime_asset_document` and `production_host_instance_id` outputs,
 pin its exact version and AWS-generated hash, then send it with the full
 40-character reviewed commit. The worktree must be clean so the commit and
 embedded file hashes describe the same reviewed source. Use `Mode=validate`
 first, wait for `Success`, and inspect the command output; only then repeat with
-`Mode=install`. Record both command IDs. The install mode is retry-safe, backs
-up both prior files before using same-directory atomic replacements, restores
-both on an installation failure, and deliberately does not restart the stack:
+`Mode=install`. Record both command IDs. Validation may cache only the exact
+digest-pinned Caddy image. Installation is retry-safe, backs up every prior file
+(including absence), restores the complete bundle on failure, runs
+`systemctl daemon-reload`, and deliberately does not enable or restart anything:
 
 First, prepare one pinned operation in a Bash shell. This checks the AWS account,
-the clean commit, and all three local asset hashes against the applied Terraform
+the clean commit, and the complete asset manifest against the applied Terraform
 outputs. Keep this shell open and record the operation ID:
 
 ```sh
@@ -195,14 +198,11 @@ production_instance=$(terraform -chdir=infrastructure/terraform output -raw \
   production_host_instance_id)
 reviewed_commit=$(git rev-parse HEAD)
 runtime_operation_id=$(openssl rand -hex 16)
-runtime_caddy_image=current
+runtime_caddy_image=$(terraform -chdir=infrastructure/terraform output -raw \
+  production_caddy_image)
 asset_hashes=$(terraform -chdir=infrastructure/terraform output -json \
   production_runtime_asset_sha256)
 
-test "$(sha256sum infrastructure/terraform/ec2/runtime/Caddyfile.post-cutover |
-  awk '{print $1}')" = "$(printf '%s' "$asset_hashes" | jq -er .caddyfile)"
-test "$(sha256sum infrastructure/terraform/ec2/runtime/render-runtime-env |
-  awk '{print $1}')" = "$(printf '%s' "$asset_hashes" | jq -er .environment_render)"
 test "$(sha256sum infrastructure/terraform/ec2/runtime/manage-runtime-assets |
   awk '{print $1}')" = "$(printf '%s' "$asset_hashes" | jq -er .operation_manager)"
 
@@ -267,10 +267,9 @@ printf 'runtime_caddy_image=%q\n' "$runtime_caddy_image"
 terraform -chdir=infrastructure/terraform output production_runtime_asset_sha256
 ```
 
-Leave `runtime_caddy_image=current` when the release keeps the running Caddy
-image. If the release changes Caddy, pull the reviewed digest on the host first,
-set `runtime_caddy_image` to that full digest, and record it. Validation never
-pulls an image and refuses a tag-only reference. If the shell is lost, restore
+`runtime_caddy_image` must be the exact applied Terraform output; `current` and
+tags are rejected. Validation may cache only that digest for offline Caddyfile
+validation. If the shell is lost, restore
 the recorded values verbatim; never generate a replacement operation ID for an
 installation that may already have run.
 
@@ -293,8 +292,8 @@ printf 'Validation command ID: %s\n' "$validation_command"
 wait_for_runtime_command "$validation_command"
 ```
 
-Stop here. Review the recorded command status, Caddy result, three staged
-SHA-256 values, commit, and operation ID. Only after approving that evidence,
+Stop here. Review the recorded command status, Caddy result, complete manifest,
+commit, and operation ID. Only after approving that evidence,
 run this separate block and type the operation-specific confirmation:
 
 ```sh
@@ -318,9 +317,9 @@ printf 'Install command ID: %s\n' "$install_command"
 wait_for_runtime_command "$install_command"
 ```
 
-If rendering, deployment, or readiness later fails, keep traffic unchanged and
-use the same pinned document, commit, and operation ID to restore both runtime
-files. The rollback refuses to overwrite files from a different operation:
+If activation has not begun and validation/install fails, keep traffic unchanged
+and use the same pinned document, commit, and operation ID to restore the
+complete runtime bundle. The rollback refuses files from another operation:
 
 ```sh
 printf 'Type ROLLBACK %s to continue: ' "$runtime_operation_id"
@@ -343,12 +342,33 @@ printf 'Rollback command ID: %s\n' "$rollback_command"
 wait_for_runtime_command "$rollback_command"
 ```
 
-After the validated installation, render the runtime environment and use the
-normal maintenance-window deployment. Do not rerun cloud-init or replace the
-host merely to update these files. Do not copy a previous `release.env` after a
-runtime-asset rollback: before a schema migration, use only the guarded
-release-config SSM rollback from the deployment runbook, then render with the
-restored script and run compatible readiness checks. After
+After runtime and release-config installation, use only
+`production_release_activation_document`; never run the deploy/migrate sequence
+piecemeal. Pin its output version/hash and first send `Mode=validate` with the
+same commit/operation ID and exact `BackendImage`, `PostgresImage`, `CaddyImage`,
+and `RequiredAppVersion` Terraform outputs. Validation asserts the installed
+runtime manifest and release file and validates the current secret schema
+without changing service/container state. The application secret must already
+contain `WORKER_DB_PASSWORD` and
+`PLAY_INTEGRITY_APP_CERTIFICATE_SHA256` (comma-separated canonical lowercase
+64-hex fingerprints); no real value belongs in this repository.
+
+Only after validation succeeds, type `ACTIVATE <operation-id>` and send a
+separate `Mode=activate` command with that exact `Confirmation`. Use the default
+`ActivationKind=existing`; it requires a current remote logical backup, a
+completed current DLM snapshot, and passing host/public checks before shutdown.
+`initial-empty` is permitted only for a genuinely empty PostgreSQL directory.
+The document then stops timers/systemd, starts the scoped credential broker,
+runs `duducar-stack deploy` with public Caddy absent, runs `migrate`,
+`grant-runtime`, and `migration-check` in that order, starts systemd and timers,
+and asserts readiness, running image digests, effective app version, service
+state, and a new versioned remote backup. A post-shutdown failure leaves public
+traffic stopped and raises the activation alert.
+
+Do not rerun cloud-init or replace the host merely to update runtime files. Do
+not copy a previous `release.env` after a runtime-asset rollback: before a schema
+migration, use only the guarded release-config SSM rollback from the deployment
+runbook. After
 `0010_battery_backed_player_policy`, do not select a pre-policy backend image;
 the safe live recovery path is the released image or a reviewed forward fix.
 
@@ -390,7 +410,33 @@ subprocess ceilings, so a stuck task cannot accrue indefinite Fargate duration.
 Both the shell entrypoint and Django production-readiness check refuse a worker
 ceiling that is not shorter than the database processing lease.
 
+Accepted pilot ceiling: the task role is prefix-scoped but can read every
+object under shared `quarantine/` and can read/write/delete every object under
+`validated/`, and its
+TCP/443 rule still permits arbitrary HTTPS destinations. This is reduced
+privilege, not complete per-asset or egress isolation. PostgreSQL permits only
+`SELECT` plus the processing columns on `signage_mediaasset`; it cannot use the
+web role or deletion outbox. Terraform exclusively owns the four worker egress
+rules so the AWS default or an out-of-band allow-all rule is removed on apply.
+
+Closing this ceiling is a separate architecture and cost decision, not a
+security-group edit. Fargate image pulls, secret injection, and logs need ECR
+API/DKR, Secrets Manager, CloudWatch Logs, and S3 private endpoints before the
+public IP and arbitrary HTTPS rule can be removed. Fresh ClamAV definitions
+then need a monitored allowlisted proxy or a separate trusted publisher, and
+DNS exfiltration needs an approved VPC-wide Resolver DNS Firewall policy or a
+separate worker VPC. Exact object isolation requires the web tier to reserve
+the attempt/output identity before dispatch and issue an opaque one-time
+capability (or equally protected exact object credentials), after which the
+task role's S3/KMS access can be removed; database mediation or row-level
+authorization is also required for complete per-asset isolation. Approve the
+endpoint/proxy or publisher/VPC design, recurring cost, and backend capability
+protocol together before implementing it.
+
 Application schedules run as local systemd timers, not EventBridge rules.
+The 15-minute reconciliation unit runs both processing reconciliation and
+`reconcile_media_deletions --limit 25`, so durable deletion-outbox retries do
+not depend on a dashboard request.
 Inspect failures and recovery notifications with:
 
 ```sh
@@ -413,7 +459,39 @@ command:
 sudo /usr/local/sbin/duducar-command backup
 ```
 
-Verify its versioned archive and checksum. DLM snapshots supplement, but never
-replace, logical backups and restore tests. Current restore and rollback rules
-are in [`docs/backup-restore.md`](../docs/backup-restore.md); completed migration
-evidence is [archived separately](../docs/archive/2026-07-28-usd30-migration.md).
+Success requires both archive and sidecar S3 HEAD responses to contain the
+expected SHA-256 checksum, KMS encryption, size, metadata, and concrete version
+IDs; the verifier then downloads that exact sidecar version and atomically
+writes a root-only receipt. Host health rechecks the receipt, exact object
+versions, root/data disk, inodes, memory, a completed data-volume snapshot
+newer than 36 hours, and both public readiness paths. Any failed check or SNS
+publish now fails the systemd command instead of silently reporting success.
+
+DLM snapshots supplement, but never replace, logical backups and restore tests.
+Two AWS-native `AWS/EBS` alarms monitor the exact Terraform-managed DLM policy
+without depending on the production host. `SnapshotsCreateFailed` alarms after
+DLM exhausts its create retries. `SnapshotsCreateCompleted` is sparse, so the
+freshness alarm converts missing hours to zero and requires one completion in
+the latest 36 hourly periods; a new or genuinely stale policy remains in alarm
+until its first successful run. The host check still independently verifies
+that the newest completed snapshot belongs to the exact source volume and has
+the expected tags. Operators must require both layers before every release.
+Current restore and rollback rules are in
+[`docs/backup-restore.md`](../docs/backup-restore.md).
+
+## Host patching and observability
+
+Bootstrap applies available Amazon Linux security updates once. Ongoing patches
+require a reviewed maintenance window through SSM: preview `dnf upgrade
+--security --assumeno`, record the package/kernel delta, take and verify the
+logical backup plus DLM snapshot, apply `dnf upgrade --security -y`, reboot only
+when required, and then require SSM connectivity, `duducar.service`, every
+timer, `duducar-stack assert-release`, readiness, host health, and a fresh
+remote backup. Do not enable unattended rebooting on the single-host pilot.
+
+Use `journalctl` through Session Manager for host/broker/stack/timer evidence;
+journald is capped, compressed, and sealed. EC2 status, CPU, CPU-credit, worker
+failure, host-health, backup, snapshot, and budget notifications use the
+operations SNS topic. Accepted cost ceiling: host journals are not shipped to a
+second system, so a lost root volume can lose detailed logs. CloudWatch Agent or
+another centralized journal sink is the upgrade path before a larger rollout.

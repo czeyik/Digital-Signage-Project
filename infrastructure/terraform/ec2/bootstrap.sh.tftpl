@@ -4,7 +4,7 @@ set -euo pipefail
 export AWS_DEFAULT_REGION="${aws_region}"
 
 dnf upgrade --security -y
-dnf install -y docker jq openssl xfsprogs
+dnf install -y docker jq openssl python3 xfsprogs
 
 if ! command -v aws >/dev/null 2>&1; then
   dnf install -y awscli2
@@ -46,6 +46,15 @@ install -d -o root -g root -m 0700 \
   /srv/duducar/caddy-data \
   /srv/duducar/docker \
   /srv/duducar/postgres
+
+# Container metadata is disposable; persistent database, Caddy, and backup
+# data lives outside this directory. Quarantine inherited metadata before the
+# first daemon start so an old restart policy cannot bypass recovery gates.
+if find /srv/duducar/docker -mindepth 1 -maxdepth 1 -print -quit | grep -q .; then
+  docker_quarantine="/srv/duducar/docker-quarantine-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv /srv/duducar/docker "$docker_quarantine"
+  install -d -o root -g root -m 0700 /srv/duducar/docker
+fi
 chown 10001:10001 /srv/duducar/backups
 chown 70:70 /srv/duducar/postgres
 install -d -o 70 -g 70 -m 0700 /srv/duducar/postgres-tls
@@ -80,7 +89,7 @@ cat > /etc/docker/daemon.json <<'EOF'
 {
   "data-root": "/srv/duducar/docker",
   "log-driver": "journald",
-  "live-restore": true,
+  "live-restore": false,
   "no-new-privileges": true
 }
 EOF
@@ -99,6 +108,7 @@ install -d -o root -g root -m 0755 /etc/duducar/postgres-init
 cat > /etc/duducar/host.env <<'EOF'
 AWS_REGION=${aws_region}
 APPLICATION_SECRET_ARN=${application_secret_arn}
+APPLICATION_ROLE_ARN=${application_role_arn}
 AWS_STORAGE_BUCKET_NAME=${media_bucket}
 PILOT_BACKUP_S3_BUCKET=${backup_bucket}
 DJANGO_ALLOWED_HOSTS=${dashboard_hostname},${api_hostname}
@@ -109,8 +119,12 @@ EMAIL_HOST=${smtp_host}
 EMAIL_PORT=${smtp_port}
 DEFAULT_FROM_EMAIL=${default_from_email}
 OPERATIONS_SNS_TOPIC_ARN=${operations_sns_topic}
+DATA_VOLUME_ID=${data_volume_api_id}
 HOST_MIN_FREE_BYTES=5368709120
+HOST_ROOT_MIN_FREE_BYTES=1073741824
+HOST_MIN_AVAILABLE_MEMORY_BYTES=134217728
 HOST_BACKUP_MAX_AGE_SECONDS=108000
+HOST_SNAPSHOT_MAX_AGE_SECONDS=129600
 ECS_MEDIA_REGION=${aws_region}
 ECS_MEDIA_CLUSTER=${ecs_cluster}
 ECS_MEDIA_TASK_DEFINITION=${ecs_worker_task_definition}
@@ -127,46 +141,17 @@ AWS_CLOUDFRONT_KEY_ID=${cloudfront_public_key_id}
 EOF
 chmod 0644 /etc/duducar/host.env
 
-cat > /etc/duducar/release.env.example <<'EOF'
-# Copy to /etc/duducar/release.env through an audited SSM session.
-# Pin every image by digest; tags are rejected by the deployment script.
-BACKEND_IMAGE=ACCOUNT.dkr.ecr.REGION.amazonaws.com/duducar-signage-backend@sha256:REPLACE
-POSTGRES_IMAGE=postgres@sha256:REPLACE
-CADDY_IMAGE=caddy@sha256:REPLACE
+cat > /etc/duducar/release.env <<'EOF'
+# Terraform-reviewed non-secret production release configuration.
+BACKEND_IMAGE=${backend_image}
+POSTGRES_IMAGE=${postgres_image}
+CADDY_IMAGE=${caddy_image}
+REQUIRED_APP_VERSION=${required_app_version}
 # Current production uses the direct-to-EC2 configuration. The preflight and
 # production Caddyfiles are retired migration artifacts and are rejected.
 CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover
 EOF
-chmod 0644 /etc/duducar/release.env.example
-
-install_b64() {
-  encoded=$1
-  destination=$2
-  mode=$3
-  printf '%s' "$encoded" | base64 -d > "$destination"
-  chown root:root "$destination"
-  chmod "$mode" "$destination"
-}
-
-install_b64 '${caddyfile_preflight_b64}' /etc/duducar/Caddyfile.preflight 0644
-install_b64 '${caddyfile_production_b64}' /etc/duducar/Caddyfile.production 0644
-install_b64 '${caddyfile_post_cutover_b64}' /etc/duducar/Caddyfile.post-cutover 0644
-install_b64 '${postgres_hba_b64}' /etc/duducar/pg_hba.conf 0644
-install_b64 '${postgres_init_roles_b64}' /etc/duducar/postgres-init/postgres-init-roles.sh 0555
-install_b64 '${postgres_runtime_grants_b64}' /etc/duducar/postgres-init/postgres-runtime-grants.sql 0444
-install_b64 '${render_env_b64}' /usr/local/sbin/render-duducar-runtime-env 0750
-install_b64 '${stack_b64}' /usr/local/sbin/duducar-stack 0750
-install_b64 '${command_b64}' /usr/local/sbin/duducar-command 0750
-install_b64 '${alert_b64}' /usr/local/sbin/duducar-alert 0750
-install_b64 '${host_health_b64}' /usr/local/sbin/duducar-host-health 0750
-install_b64 '${service_b64}' /etc/systemd/system/duducar.service 0644
-install_b64 '${command_service_b64}' /etc/systemd/system/duducar-command@.service 0644
-install_b64 '${alert_service_b64}' /etc/systemd/system/duducar-alert@.service 0644
-install_b64 '${health_timer_b64}' /etc/systemd/system/duducar-health.timer 0644
-install_b64 '${playlist_timer_b64}' /etc/systemd/system/duducar-playlists.timer 0644
-install_b64 '${reconcile_timer_b64}' /etc/systemd/system/duducar-media-reconcile.timer 0644
-install_b64 '${retention_timer_b64}' /etc/systemd/system/duducar-retention.timer 0644
-install_b64 '${backup_timer_b64}' /etc/systemd/system/duducar-backup.timer 0644
+chmod 0640 /etc/duducar/release.env
 
 install -d -o root -g root -m 0755 /etc/tmpfiles.d
 cat > /etc/tmpfiles.d/duducar.conf <<'EOF'
@@ -175,11 +160,9 @@ EOF
 systemd-tmpfiles --create /etc/tmpfiles.d/duducar.conf
 install -d -o root -g root -m 0700 /var/lib/duducar-alerts
 
-systemctl daemon-reload
 systemctl restart systemd-journald
 systemctl enable --now docker
 
-# Safe recovery default: the application and timers remain disabled until the
-# release file, database restore, readiness checks, and explicit activation are
-# reviewed. There is no ALB/ECS/RDS cutover in the current topology.
+# Safe recovery default: the audited runtime SSM document has not installed or
+# activated application files yet. There is no ALB/ECS/RDS cutover here.
 touch /var/lib/cloud/instance/duducar-bootstrap-complete

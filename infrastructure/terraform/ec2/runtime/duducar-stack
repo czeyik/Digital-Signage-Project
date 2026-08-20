@@ -5,10 +5,24 @@ umask 0077
 host_config=/etc/duducar/host.env
 release_config=/etc/duducar/release.env
 runtime_dir=/run/duducar
+if [ -n "${DUDUCAR_STACK_TEST_ROOT:-}" ]; then
+  [[ "$DUDUCAR_STACK_TEST_ROOT" =~ ^/tmp/duducar-stack-test\.[A-Za-z0-9]{6,}$ ]] || {
+    echo "Stack test root is outside the permitted temporary path." >&2
+    exit 2
+  }
+  host_config=$DUDUCAR_STACK_TEST_ROOT/etc/duducar/host.env
+  release_config=$DUDUCAR_STACK_TEST_ROOT/etc/duducar/release.env
+  runtime_dir=$DUDUCAR_STACK_TEST_ROOT/run/duducar
+fi
 network=duducar
+network_subnet=172.30.0.0/24
+network_gateway=172.30.0.1
+database_ip=172.30.0.11
+web_ip=172.30.0.10
+caddy_ip=172.30.0.12
 
 if [ ! -f "$release_config" ]; then
-  echo "Missing $release_config; copy and review release.env.example first." >&2
+  echo "Missing $release_config; install it through the reviewed release configuration document." >&2
   exit 1
 fi
 
@@ -43,25 +57,40 @@ case "$CADDY_CONFIG" in
     ;;
 esac
 
-docker_auth="$runtime_dir/docker-auth"
-install -d -o root -g root -m 0700 "$docker_auth"
-export DOCKER_CONFIG="$docker_auth"
 cleanup_docker_auth() {
-  rm -f "$docker_auth/config.json"
+  [ -z "${docker_auth:-}" ] || rm -f "$docker_auth/config.json"
 }
 trap cleanup_docker_auth EXIT
 
-ecr_registry=${BACKEND_IMAGE%%/*}
-aws ecr get-login-password --region "${AWS_REGION:-ap-southeast-5}" |
-  docker login --username AWS --password-stdin "$ecr_registry" >/dev/null
-
 ensure_network() {
-  if ! docker network inspect "$network" >/dev/null 2>&1; then
-    docker network create "$network" >/dev/null
+  if docker network inspect "$network" >/dev/null 2>&1; then
+    actual_subnet=$(docker network inspect --format '{{(index .IPAM.Config 0).Subnet}}' "$network")
+    actual_bridge=$(docker network inspect --format '{{index .Options "com.docker.network.bridge.name"}}' "$network")
+    if [ "$actual_subnet" != "$network_subnet" ] || [ "$actual_bridge" != duducar0 ]; then
+      echo "Existing Docker network does not match the reviewed DUDU subnet and bridge." >&2
+      exit 1
+    fi
+    return
   fi
+  docker network create \
+    --driver bridge \
+    --subnet "$network_subnet" \
+    --gateway "$network_gateway" \
+    --opt com.docker.network.bridge.name=duducar0 \
+    "$network" >/dev/null
+}
+
+login_ecr() {
+  docker_auth="$runtime_dir/docker-auth"
+  install -d -o root -g root -m 0700 "$docker_auth"
+  export DOCKER_CONFIG="$docker_auth"
+  ecr_registry=${BACKEND_IMAGE%%/*}
+  aws ecr get-login-password --region "${AWS_REGION:-ap-southeast-5}" |
+    docker login --username AWS --password-stdin "$ecr_registry" >/dev/null
 }
 
 pull_images() {
+  login_ecr
   docker pull "$BACKEND_IMAGE"
   docker pull "$POSTGRES_IMAGE"
   docker pull "$CADDY_IMAGE"
@@ -70,8 +99,8 @@ pull_images() {
 create_database() {
   docker run -d \
     --name duducar-postgres \
-    --restart unless-stopped \
     --network "$network" \
+    --ip "$database_ip" \
     --log-driver journald \
     --security-opt no-new-privileges:true \
     --pids-limit 256 \
@@ -122,8 +151,8 @@ wait_for_database() {
 create_web() {
   docker run -d \
     --name duducar-web \
-    --restart unless-stopped \
     --network "$network" \
+    --ip "$web_ip" \
     --log-driver journald \
     --read-only \
     --cap-drop ALL \
@@ -161,8 +190,8 @@ wait_for_web() {
 create_caddy() {
   docker run -d \
     --name duducar-caddy \
-    --restart unless-stopped \
     --network "$network" \
+    --ip "$caddy_ip" \
     --log-driver journald \
     --cap-drop ALL \
     --cap-add NET_BIND_SERVICE \
@@ -195,25 +224,61 @@ remove_database_container() {
   fi
 }
 
+assert_container_config() {
+  name=$1
+  expected_image=$2
+  expected_ip=$3
+  if ! container_config_matches "$name" "$expected_image" "$expected_ip"; then
+    echo "Container $name does not match the reviewed image, systemd-only lifecycle, or network identity; run an audited deploy." >&2
+    exit 1
+  fi
+}
+
+container_config_matches() {
+  name=$1
+  expected_image=$2
+  expected_ip=$3
+  current_image=$(docker inspect --format '{{.Config.Image}}' "$name")
+  restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name")
+  current_ip=$(docker inspect --format '{{(index .NetworkSettings.Networks "duducar").IPAddress}}' "$name")
+  [ "$current_image" = "$expected_image" ] && \
+    { [ -z "$restart_policy" ] || [ "$restart_policy" = no ]; } && \
+    [ "$current_ip" = "$expected_ip" ]
+}
+
+prepare_stack() {
+  ensure_network
+}
+
+start_container_if_stopped() {
+  name=$1
+  if [ "$(docker inspect --format '{{.State.Running}}' "$name")" != true ]; then
+    docker start "$name" >/dev/null
+  fi
+}
+
 start_stack() {
   ensure_network
 
   if docker container inspect duducar-postgres >/dev/null 2>&1; then
-    docker start duducar-postgres >/dev/null
+    assert_container_config duducar-postgres "$POSTGRES_IMAGE" "$database_ip"
+    start_container_if_stopped duducar-postgres
   else
     create_database
   fi
   wait_for_database
 
   if docker container inspect duducar-web >/dev/null 2>&1; then
-    docker start duducar-web >/dev/null
+    assert_container_config duducar-web "$BACKEND_IMAGE" "$web_ip"
+    start_container_if_stopped duducar-web
   else
     create_web
   fi
   wait_for_web
 
   if docker container inspect duducar-caddy >/dev/null 2>&1; then
-    docker start duducar-caddy >/dev/null
+    assert_container_config duducar-caddy "$CADDY_IMAGE" "$caddy_ip"
+    start_container_if_stopped duducar-caddy
   else
     create_caddy
   fi
@@ -227,8 +292,7 @@ deploy_stack() {
   remove_container duducar-web
 
   if docker container inspect duducar-postgres >/dev/null 2>&1; then
-    current_database_image=$(docker inspect --format '{{.Config.Image}}' duducar-postgres)
-    if [ "$current_database_image" != "$POSTGRES_IMAGE" ]; then
+    if ! container_config_matches duducar-postgres "$POSTGRES_IMAGE" "$database_ip"; then
       remove_database_container
     fi
   fi
@@ -241,7 +305,50 @@ deploy_stack() {
   wait_for_database
   create_web
   wait_for_web
-  create_caddy
+  # Keep public traffic absent until migrations, grants, and readiness checks
+  # complete and systemd starts the reviewed stack.
+}
+
+monitor_stack() {
+  while true; do
+    for specification in \
+      "duducar-postgres|$POSTGRES_IMAGE|$database_ip|healthy" \
+      "duducar-web|$BACKEND_IMAGE|$web_ip|healthy" \
+      "duducar-caddy|$CADDY_IMAGE|$caddy_ip|none"; do
+      IFS='|' read -r name image ip expected_health <<< "$specification"
+      if ! docker container inspect "$name" >/dev/null 2>&1; then
+        echo "Managed container disappeared: $name" >&2
+        return 1
+      fi
+      assert_container_config "$name" "$image" "$ip"
+      if [ "$(docker inspect --format '{{.State.Running}}' "$name")" != true ]; then
+        echo "Managed container stopped: $name" >&2
+        return 1
+      fi
+      if [ "$expected_health" != none ] && \
+        [ "$(docker inspect --format '{{.State.Health.Status}}' "$name")" != "$expected_health" ]; then
+        echo "Managed container is not healthy: $name" >&2
+        return 1
+      fi
+    done
+    sleep 10
+  done
+}
+
+assert_release() {
+  assert_container_config duducar-postgres "$POSTGRES_IMAGE" "$database_ip"
+  assert_container_config duducar-web "$BACKEND_IMAGE" "$web_ip"
+  assert_container_config duducar-caddy "$CADDY_IMAGE" "$caddy_ip"
+  for name in duducar-postgres duducar-web duducar-caddy; do
+    [ "$(docker inspect --format '{{.State.Running}}' "$name")" = true ] || {
+      echo "Released container is not running: $name" >&2
+      return 1
+    }
+  done
+  [ "$(docker inspect --format '{{.State.Health.Status}}' duducar-postgres)" = healthy ]
+  [ "$(docker inspect --format '{{.State.Health.Status}}' duducar-web)" = healthy ]
+  docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' duducar-web |
+    grep -Fxq "REQUIRED_APP_VERSION=$REQUIRED_APP_VERSION"
 }
 
 stop_stack() {
@@ -253,11 +360,20 @@ stop_stack() {
 }
 
 case "${1:-start}" in
+  prepare)
+    prepare_stack
+    ;;
   start)
     start_stack
     ;;
   deploy)
     deploy_stack
+    ;;
+  monitor)
+    monitor_stack
+    ;;
+  assert-release)
+    assert_release
     ;;
   stop)
     stop_stack
@@ -266,7 +382,7 @@ case "${1:-start}" in
     docker ps --filter name=duducar- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
     ;;
   *)
-    echo "Usage: duducar-stack {start|deploy|stop|status}" >&2
+    echo "Usage: duducar-stack {prepare|start|deploy|monitor|assert-release|stop|status}" >&2
     exit 2
     ;;
 esac

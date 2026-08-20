@@ -3,6 +3,7 @@ from datetime import timedelta
 
 import pytest
 from django.core.management import call_command
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from signage.management.commands import evaluate_device_health as health_command
@@ -67,6 +68,37 @@ def test_device_unavailable_alert_uses_24_and_48_hour_boundaries(monkeypatch):
         code="device_unavailable",
         acknowledged_at__isnull=True,
     ).count() == 1
+
+
+@pytest.mark.django_db
+def test_database_allows_only_one_unresolved_alert_per_device_or_global_code():
+    device = Device.objects.create(label="ALERT-UNIQUE")
+    Alert.objects.create(
+        device=device,
+        code="duplicate-device-alert",
+        severity=Alert.Severity.WARNING,
+        message="first",
+    )
+    with transaction.atomic():
+        with pytest.raises(IntegrityError):
+            Alert.objects.create(
+                device=device,
+                code="duplicate-device-alert",
+                severity=Alert.Severity.WARNING,
+                message="second",
+            )
+    Alert.objects.create(
+        code="duplicate-global-alert",
+        severity=Alert.Severity.WARNING,
+        message="first",
+    )
+    with transaction.atomic():
+        with pytest.raises(IntegrityError):
+            Alert.objects.create(
+                code="duplicate-global-alert",
+                severity=Alert.Severity.WARNING,
+                message="second",
+            )
 
 
 @pytest.mark.django_db

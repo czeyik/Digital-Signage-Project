@@ -13,15 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
       - name: Install backend and audit tools
         working-directory: backend
         run: |
-          python -m pip install --upgrade pip setuptools==83.0.0
+          python -m pip install --upgrade pip==26.2 setuptools==83.0.0
           python -m pip install --editable '.[dev]' pip-audit==2.10.1
       - name: Lint
         working-directory: backend
@@ -37,6 +37,8 @@ jobs:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: "1"
           DJANGO_SETTINGS_MODULE: config.settings
         run: python -m pytest -p pytest_django.plugin
+      - name: Test bounded worker root initialization
+        run: bash backend/signage/tests/test_worker_root_init.sh
       - name: Dependency vulnerability audit
         working-directory: backend
         run: python -m pip_audit --skip-editable
@@ -46,7 +48,7 @@ jobs:
     timeout-minutes: 25
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
         env:
           POSTGRES_DB: signage
           POSTGRES_USER: signage
@@ -59,15 +61,15 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: "3.12"
           cache: pip
       - name: Install backend test dependencies
         working-directory: backend
         run: |
-          python -m pip install --upgrade pip setuptools==83.0.0
+          python -m pip install --upgrade pip==26.2 setuptools==83.0.0
           python -m pip install --editable '.[dev]'
       - name: PostgreSQL migrations and tests
         working-directory: backend
@@ -84,7 +86,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Build verification image
         run: docker build -f android-player/Dockerfile.build -t duducar-android-build android-player
       - name: Android tests, lint, compile, APK, and fail-closed variants
@@ -135,8 +137,8 @@ jobs:
   terraform:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: hashicorp/setup-terraform@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4
         with:
           terraform_version: "1.13.3"
       - run: terraform fmt -check -recursive infrastructure
@@ -145,7 +147,11 @@ jobs:
         run: terraform init -backend=false && terraform validate
       - name: Validate production stack
         working-directory: infrastructure/terraform
-        run: terraform init -backend=false && terraform validate
+        run: |
+          terraform init -backend=false
+          terraform validate
+          terraform test
+          bash ./test-user-data-size.sh
       - name: Validate isolated recovery smoke and helper guardrails
         working-directory: infrastructure/recovery-smoke
         run: |
@@ -153,18 +159,31 @@ jobs:
           terraform validate
           bash ./test-static-guardrails.sh
           bash ./test-recovery-terraform-wrapper.sh
+          bash ./test-recovery-logical-restore.sh
+          bash ./test-recovery-loopback-proxy.sh
+          bash ./test-recovery-media-query.sh
+          bash ./test-recovery-mount-journal-replay.sh
           bash ./test-user-data-size.sh
       - name: Test atomic production release configuration manager
         run: sudo bash infrastructure/terraform/ec2/runtime/test-manage-release-config.sh
+      - name: Test complete production runtime bundle manager
+        run: sudo bash infrastructure/terraform/ec2/runtime/test-manage-runtime-assets.sh
+      - name: Test production runtime credential and lifecycle guardrails
+        working-directory: infrastructure/terraform/ec2/runtime
+        run: |
+          bash ./test-runtime-guardrails.sh
+          python3 ./test-credential-broker.py
+          python3 ./test-backup-verifier.py
+          bash ./test-duducar-stack.sh
 
   container:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
         with:
           platforms: arm64
-      - uses: docker/setup-buildx-action@v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Verify backend Docker build-context exclusions
         run: bash backend/signage/tests/test_docker_build_context.sh
       - name: Build production-architecture backend image
@@ -189,7 +208,7 @@ jobs:
             duducar-signage-backend:ci \
             python -c "import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ('pip', 'setuptools', 'ensurepip'))"
       - name: Scan container
-        uses: aquasecurity/trivy-action@v0.36.0
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: duducar-signage-backend:ci
           format: table

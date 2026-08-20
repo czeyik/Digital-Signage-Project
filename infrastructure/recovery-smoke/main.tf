@@ -2,6 +2,41 @@ data "aws_caller_identity" "current" {}
 
 data "aws_partition" "current" {}
 
+data "aws_ami" "recovery" {
+  most_recent = false
+  owners      = ["amazon"]
+
+  filter {
+    name   = "image-id"
+    values = [var.recovery_ami_id]
+  }
+
+  filter {
+    name   = "name"
+    values = ["al2023-ami-2023.*-arm64"]
+  }
+
+  filter {
+    name   = "architecture"
+    values = ["arm64"]
+  }
+
+  filter {
+    name   = "root-device-type"
+    values = ["ebs"]
+  }
+
+  filter {
+    name   = "state"
+    values = ["available"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 data "aws_subnet" "recovery" {
   id = var.recovery_subnet_id
 }
@@ -404,7 +439,7 @@ resource "aws_ebs_volume" "recovery_data" {
 }
 
 resource "aws_instance" "recovery" {
-  ami                                  = var.recovery_ami_id
+  ami                                  = data.aws_ami.recovery.id
   instance_type                        = var.recovery_instance_type
   subnet_id                            = var.recovery_subnet_id
   vpc_security_group_ids               = [aws_security_group.recovery.id]

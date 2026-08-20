@@ -26,7 +26,9 @@ locals {
   ec2_alarm_arns = [
     "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-ec2-target-status",
     "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-ec2-target-high-cpu",
-    "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-ec2-target-low-cpu-credits"
+    "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-ec2-target-low-cpu-credits",
+    "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-dlm-snapshot-create-failed",
+    "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-dlm-snapshot-stale"
   ]
   shared_environment = [
     { name = "DJANGO_DEBUG", value = "false" },
@@ -497,19 +499,21 @@ resource "aws_acm_certificate" "production" {
 }
 
 resource "aws_route53_record" "certificate" {
-  for_each = {
+  for_each = toset([var.dashboard_hostname, var.api_hostname])
+  zone_id  = data.aws_route53_zone.primary.zone_id
+  name = one([
     for option in aws_acm_certificate.production.domain_validation_options :
-    option.domain_name => {
-      name   = option.resource_record_name
-      record = option.resource_record_value
-      type   = option.resource_record_type
-    }
-  }
-  zone_id = data.aws_route53_zone.primary.zone_id
-  name    = each.value.name
-  type    = each.value.type
-  records = [each.value.record]
-  ttl     = 300
+    option.resource_record_name if option.domain_name == each.value
+  ])
+  type = one([
+    for option in aws_acm_certificate.production.domain_validation_options :
+    option.resource_record_type if option.domain_name == each.value
+  ])
+  records = [one([
+    for option in aws_acm_certificate.production.domain_validation_options :
+    option.resource_record_value if option.domain_name == each.value
+  ])]
+  ttl = 300
 }
 
 resource "aws_acm_certificate_validation" "production" {

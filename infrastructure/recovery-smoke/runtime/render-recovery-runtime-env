@@ -73,9 +73,6 @@ secret_tmp="$staging_dir/application-secret.json"
 application_tmp="$staging_dir/application.env"
 postgres_tmp="$staging_dir/postgres.env"
 
-# Do not put the secret in a command argument, environment variable, journal,
-# Terraform value, or shell history. The temporary file is root-only because of
-# umask 0077 and is removed by the trap.
 aws secretsmanager get-secret-value \
   --region "$AWS_REGION" \
   --secret-id "$APPLICATION_SECRET_ARN" \
@@ -110,6 +107,20 @@ if [ "$(wc -c < "$staging_dir/django-secret-key")" -lt 50 ]; then
   exit 1
 fi
 extract_secret_string DB_PASSWORD "$staging_dir/database-password"
+extract_secret_string WORKER_DB_PASSWORD "$staging_dir/worker-database-password"
+worker_database_password=$(<"$staging_dir/worker-database-password")
+case "$worker_database_password" in
+  *$'\n'*|*$'\r'*)
+    echo "WORKER_DB_PASSWORD must not contain a line break." >&2
+    exit 1
+    ;;
+esac
+extract_secret_string PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 "$staging_dir/play-integrity-app-certificates"
+play_integrity_app_certificates=$(<"$staging_dir/play-integrity-app-certificates")
+if ! [[ "$play_integrity_app_certificates" =~ ^[0-9a-f]{64}(,[0-9a-f]{64})*$ ]]; then
+  echo "PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 must contain canonical comma-separated SHA-256 fingerprints." >&2
+  exit 1
+fi
 jq -cer '
   .PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON
   | if type == "string" then fromjson else . end
@@ -133,8 +144,6 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit DB_USER signage_app
   emit DB_PASSWORD_FILE /run/duducar-recovery/backend-secrets/database-password
   emit DB_SSLMODE require
-  # Defense in depth: application containers cannot obtain the host's temporary
-  # instance role even if the metadata hop limit changes later.
   emit AWS_EC2_METADATA_DISABLED true
   emit AWS_STORAGE_BUCKET_NAME "$AWS_STORAGE_BUCKET_NAME"
   emit AWS_S3_REGION_NAME "$AWS_REGION"
@@ -142,14 +151,13 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit AWS_CLOUDFRONT_KEY_ID "$AWS_CLOUDFRONT_KEY_ID"
   emit AWS_CLOUDFRONT_PRIVATE_KEY_FILE /run/duducar-recovery/backend-secrets/cloudfront-private.pem
   emit PILOT_BACKUP_ROOT /backups
-  # This deliberately remains blank. The recovery role cannot write to any S3
-  # bucket, so a smoke cannot create a production backup by mistake.
   emit PILOT_BACKUP_S3_BUCKET ''
   emit PILOT_BACKUP_RETENTION_DAYS 3
   emit PILOT_BACKUP_MAX_LOCAL_ARCHIVES 3
   emit REQUIRED_APP_VERSION "$REQUIRED_APP_VERSION"
   emit PLAY_INTEGRITY_PROJECT_NUMBER "$PLAY_INTEGRITY_PROJECT_NUMBER"
   emit PLAY_INTEGRITY_PACKAGE_NAME com.duducar.signage
+  emit PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 "$play_integrity_app_certificates"
   emit PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON_FILE /run/duducar-recovery/backend-secrets/play-integrity.json
   emit MEDIA_MAX_REQUEST_BYTES 53477376
   emit MEDIA_MAX_IMAGE_PIXELS 25000000
@@ -169,8 +177,6 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit MEDIA_DISPATCH_AMBIGUITY_REUSE_SECONDS 900
   emit MEDIA_DISPATCH_AWS_CONNECT_TIMEOUT_SECONDS 5
   emit MEDIA_DISPATCH_AWS_READ_TIMEOUT_SECONDS 10
-  # Keep settings structurally production-like for readiness validation, but
-  # use intentionally nonexistent targets and an IAM role with no ECS access.
   emit MEDIA_PROCESSING_DISPATCH_BACKEND ecs
   emit ECS_MEDIA_REGION "$AWS_REGION"
   emit ECS_MEDIA_CLUSTER recovery-smoke-disabled
@@ -179,8 +185,6 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit ECS_MEDIA_SUBNET_IDS recovery-smoke-disabled
   emit ECS_MEDIA_SECURITY_GROUP_IDS recovery-smoke-disabled
   emit ECS_MEDIA_ASSIGN_PUBLIC_IP false
-  # Password reset is intentionally out of scope. Locmem prevents SMTP sends
-  # if an operator accidentally reaches that route during a smoke.
   emit EMAIL_BACKEND django.core.mail.backends.locmem.EmailBackend
   emit DEFAULT_FROM_EMAIL recovery-smoke@invalid.example
   emit SERVER_EMAIL recovery-smoke@invalid.example
@@ -194,12 +198,16 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit POSTGRES_PASSWORD_FILE /run/postgres-local-secrets/admin-password
   emit OWNER_DB_PASSWORD_FILE /run/postgres-local-secrets/owner-password
   emit RUNTIME_DB_PASSWORD_FILE /run/postgres-runtime-secrets/runtime-password
+  emit WORKER_DB_PASSWORD_FILE /run/postgres-runtime-secrets/worker-password
   emit PGDATA /var/lib/postgresql/data/pgdata
 } > "$postgres_tmp"
 
 install -o 70 -g 70 -m 0400 \
   "$staging_dir/database-password" \
   "$postgres_runtime_secrets_dir/runtime-password"
+install -o 70 -g 70 -m 0400 \
+  "$staging_dir/worker-database-password" \
+  "$postgres_runtime_secrets_dir/worker-password"
 install -o 10001 -g 10001 -m 0400 \
   "$local_postgres_secrets/owner-password" \
   "$owner_secrets_dir/database-owner-password"

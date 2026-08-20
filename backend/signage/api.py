@@ -1,9 +1,11 @@
 import io
+import ipaddress
 import secrets
 import uuid
 import zlib
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.db import IntegrityError, models, transaction
@@ -21,6 +23,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import exception_handler as drf_exception_handler
 
+from .authentication import DeviceAccessTokenAuthentication
 from .integrity import verify_integrity_token
 from .models import (
     Alert,
@@ -37,6 +40,7 @@ from .models import (
     token_hash,
 )
 from .services import (
+    active_playlist,
     enforce_api_throttle,
     open_alert,
     open_or_escalate_alert,
@@ -47,12 +51,15 @@ MAX_DEVICE_TIMESTAMP_FUTURE_SKEW = timedelta(minutes=5)
 MAX_PLAYBACK_EVENT_DURATION_MS = 2_147_483_647
 PLAYBACK_TIMESTAMP_TOLERANCE = timedelta(seconds=5)
 PLAYBACK_FAILURE_REASONS_BY_STATUS = {
-    PlaybackEvent.Status.FAILED: frozenset({"decode_failure", "missing_file"}),
+    PlaybackEvent.Status.FAILED: frozenset(
+        {"decode_failure", "missing_file", "playback_timeout", "start_timeout"}
+    ),
     PlaybackEvent.Status.INTERRUPTED: frozenset(
         {
             "administrator_session",
             "app_restart_or_power_loss",
             "app_restart_or_unexpected_exit",
+            "credential_rejected",
             "device_disabled",
             "device_owner_removed",
             "external_power_lost",
@@ -60,6 +67,7 @@ PLAYBACK_FAILURE_REASONS_BY_STATUS = {
             "fallback_mode",
             "loop_interrupted_before_entry",
             "planned_shutdown",
+            "server_forbidden",
             "urgent_playlist_replacement",
         }
     ),
@@ -75,6 +83,7 @@ ABNORMAL_APP_EXIT_REASONS = frozenset(
         "freezer_termination",
     }
 )
+REPLACEMENT_FAILURE_STAGES = frozenset({"preparation", "activation"})
 
 
 class PlaybackBatchPayloadTooLarge(exceptions.APIException):
@@ -206,16 +215,84 @@ def optional_json_boolean(data, field):
     return value
 
 
+def required_json_boolean(data, field):
+    if field not in data or type(data[field]) is not bool:
+        raise serializers.ValidationError({field: "Use a JSON boolean."})
+    return data[field]
+
+
+def required_short_string(data, field, maximum_length):
+    value = data.get(field)
+    if not isinstance(value, str):
+        raise serializers.ValidationError({field: "Use a non-empty string."})
+    value = value.strip()
+    if not value or len(value) > maximum_length:
+        raise serializers.ValidationError(
+            {field: f"Use a non-empty string of at most {maximum_length} characters."}
+        )
+    return value
+
+
 def device_for(request):
     return request.user.device
 
 
-def enrollment_device_details(data):
-    android_id = str(data.get("android_id", "")).strip()
-    android_version = str(data.get("android_version", "")).strip()
-    app_version = str(data.get("app_version", "")).strip()
-    if not android_id:
-        raise serializers.ValidationError("Android ID is required.")
+def configured_media_origin():
+    domain = str(getattr(settings, "AWS_S3_CUSTOM_DOMAIN", "")).strip().lower()
+    parsed = None
+    origin = None
+    port = None
+    try:
+        parsed = urlsplit(f"https://{domain}")
+        origin = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        pass
+    has_ip_origin = False
+    if origin:
+        try:
+            ipaddress.ip_address(origin)
+        except ValueError:
+            pass
+        else:
+            has_ip_origin = True
+    if (
+        parsed is None
+        or not origin
+        or parsed.netloc != domain
+        or origin != domain
+        or port is not None
+        or origin == "localhost"
+        or origin.endswith(".")
+        or "." not in origin
+        or has_ip_origin
+    ):
+        raise exceptions.APIException("Media delivery is unavailable.")
+    return origin
+
+
+def media_url_uses_origin(download_url, origin):
+    if not isinstance(download_url, str):
+        return False
+    try:
+        parsed = urlsplit(download_url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == origin
+            and parsed.port is None
+            and parsed.username is None
+            and parsed.password is None
+            and not parsed.fragment
+            and parsed.path.startswith("/")
+        )
+    except ValueError:
+        return False
+
+
+def enrollment_device_details(data, *, require_hardware=False):
+    android_id = required_short_string(data, "android_id", 255)
+    android_version = required_short_string(data, "android_version", 32)
+    app_version = required_short_string(data, "app_version", 32)
     try:
         major_android = int(android_version.split(".")[0])
     except (TypeError, ValueError) as exc:
@@ -224,7 +301,36 @@ def enrollment_device_details(data):
         ) from exc
     if major_android < 12:
         raise exceptions.PermissionDenied("Device integrity requirements were not met.")
-    return android_id, android_version[:32], app_version[:32]
+    hardware_model = firmware_version = security_patch_level = ""
+    if require_hardware:
+        hardware_model = required_short_string(data, "hardware_model", 160)
+        firmware_version = required_short_string(data, "firmware_version", 100)
+        security_patch_level = required_short_string(data, "security_patch_level", 32)
+    return (
+        android_id,
+        android_version,
+        app_version,
+        hardware_model,
+        firmware_version,
+        security_patch_level,
+    )
+
+
+def device_matches_qualification(
+    device,
+    *,
+    hardware_model,
+    firmware_version,
+    security_patch_level,
+):
+    qualification = device.hardware_qualification
+    return bool(
+        qualification
+        and qualification.approved_for_pilot
+        and qualification.model_name == hardware_model
+        and qualification.firmware_version == firmware_version
+        and qualification.security_patch_level == security_patch_level
+    )
 
 
 @api_view(["POST"])
@@ -235,20 +341,32 @@ def enrollment_challenge(request):
     code = str(request.data.get("code", "")).strip()
     if not code:
         raise serializers.ValidationError("Enrollment code is required.")
-    android_id, android_version, app_version = enrollment_device_details(request.data)
+    (
+        android_id,
+        android_version,
+        app_version,
+        hardware_model,
+        firmware_version,
+        security_patch_level,
+    ) = enrollment_device_details(
+        request.data,
+        require_hardware=settings.DEPLOYMENT_ENV == "production",
+    )
     enrollment = (
-        EnrollmentCode.objects.select_related("device")
+        EnrollmentCode.objects.select_related("device__hardware_qualification")
         .filter(code_hash=token_hash(code))
         .first()
     )
     if not enrollment or not enrollment.is_usable:
         raise exceptions.AuthenticationFailed("Invalid or expired enrollment code.")
-    if settings.DEPLOYMENT_ENV == "production" and not (
-        enrollment.device.hardware_qualification_id
-        and enrollment.device.hardware_qualification.approved_for_pilot
+    if settings.DEPLOYMENT_ENV == "production" and not device_matches_qualification(
+        enrollment.device,
+        hardware_model=hardware_model,
+        firmware_version=firmware_version,
+        security_patch_level=security_patch_level,
     ):
         raise exceptions.PermissionDenied(
-            "This device does not have an approved hardware qualification."
+            "This device does not match its approved hardware qualification."
         )
     if not enrollment.device.assignments.filter(unassigned_at__isnull=True).exists():
         raise serializers.ValidationError("Device must have an active assignment.")
@@ -256,7 +374,8 @@ def enrollment_challenge(request):
     challenge_id = uuid.uuid4()
     request_hash = token_hash(
         f"{challenge_id}:{secrets.token_urlsafe(32)}:{android_hash}:"
-        f"{app_version}:{enrollment.code_hash}"
+        f"{app_version}:{hardware_model}:{firmware_version}:{security_patch_level}:"
+        f"{enrollment.code_hash}"
     )
     EnrollmentChallenge.objects.create(
         id=challenge_id,
@@ -265,6 +384,9 @@ def enrollment_challenge(request):
         android_id_hash=android_hash,
         android_version=android_version,
         app_version=app_version,
+        hardware_model=hardware_model,
+        firmware_version=firmware_version,
+        security_patch_level=security_patch_level,
         expires_at=timezone.now()
         + timedelta(seconds=settings.ENROLLMENT_CHALLENGE_TTL_SECONDS),
     )
@@ -280,16 +402,26 @@ def enrollment_challenge(request):
     )
 
 
-def _issue_device_credentials(enrollment, android_hash, android_version, app_version):
+def _issue_device_credentials(
+    enrollment,
+    android_hash,
+    android_version,
+    app_version,
+    hardware_model="",
+    firmware_version="",
+    security_patch_level="",
+):
     device = enrollment.device
     if device.status == Device.Status.DISABLED or not device.kiosk_pin_hash:
         raise exceptions.AuthenticationFailed("Invalid or expired enrollment code.")
-    if settings.DEPLOYMENT_ENV == "production" and not (
-        device.hardware_qualification_id
-        and device.hardware_qualification.approved_for_pilot
+    if settings.DEPLOYMENT_ENV == "production" and not device_matches_qualification(
+        device,
+        hardware_model=hardware_model,
+        firmware_version=firmware_version,
+        security_patch_level=security_patch_level,
     ):
         raise exceptions.PermissionDenied(
-            "This device does not have an approved hardware qualification."
+            "This device does not match its approved hardware qualification."
         )
     if not device.assignments.filter(unassigned_at__isnull=True).exists():
         raise serializers.ValidationError("Device must have an active assignment.")
@@ -302,12 +434,18 @@ def _issue_device_credentials(enrollment, android_hash, android_version, app_ver
     device.android_id_hash = android_hash
     device.android_version = android_version
     device.app_version = app_version
+    device.hardware_model = hardware_model
+    device.hardware_firmware_version = firmware_version
+    device.hardware_security_patch = security_patch_level
     device.status = Device.Status.ACTIVE
     device.save(
         update_fields=[
             "android_id_hash",
             "android_version",
             "app_version",
+            "hardware_model",
+            "hardware_firmware_version",
+            "hardware_security_patch",
             "status",
             "updated_at",
         ]
@@ -367,12 +505,20 @@ def enroll(request):
                 challenge.android_id_hash,
                 challenge.android_version,
                 challenge.app_version,
+                challenge.hardware_model,
+                challenge.firmware_version,
+                challenge.security_patch_level,
             )
     elif settings.DEPLOYMENT_ENV != "production":
         code = str(request.data.get("code", "")).strip()
-        android_id, android_version, app_version = enrollment_device_details(
-            request.data
-        )
+        (
+            android_id,
+            android_version,
+            app_version,
+            hardware_model,
+            firmware_version,
+            security_patch_level,
+        ) = enrollment_device_details(request.data)
         if bool(request.data.get("integrity_compromised", False)):
             raise exceptions.PermissionDenied(
                 "Device integrity requirements were not met."
@@ -397,7 +543,13 @@ def enroll(request):
                     "Invalid or expired enrollment code."
                 )
             device, refresh_token, access, access_token = _issue_device_credentials(
-                enrollment, token_hash(android_id), android_version, app_version
+                enrollment,
+                token_hash(android_id),
+                android_version,
+                app_version,
+                hardware_model,
+                firmware_version,
+                security_patch_level,
             )
     else:
         raise serializers.ValidationError(
@@ -418,17 +570,25 @@ def enroll(request):
 
 
 @api_view(["POST"])
-@authentication_classes([])
+@authentication_classes([DeviceAccessTokenAuthentication])
 @permission_classes([AllowAny])
 def token_refresh(request):
     enforce_api_throttle(request, "token_refresh", limit=20)
     refresh_token = str(request.data.get("refresh_token", ""))
     credential = (
         DeviceCredential.objects.select_related("device")
-        .filter(refresh_hash=token_hash(refresh_token), revoked_at__isnull=True)
+        .filter(refresh_hash=token_hash(refresh_token))
         .first()
     )
-    if not credential:
+    # Refresh credentials are no longer usable after either explicit revocation
+    # or device disable.  Return the same 401 outcome for legacy disabled rows
+    # as for revoked rows: the player must clear local credentials and wait for
+    # owner-issued re-enrollment, rather than treating refresh as maintenance.
+    if (
+        not credential
+        or credential.revoked_at
+        or credential.device.status == Device.Status.DISABLED
+    ):
         if throttle_wait(
             request, "invalid_device_refresh", limit=5, window_seconds=900
         ):
@@ -449,43 +609,6 @@ def token_refresh(request):
     )
 
 
-def active_playlist():
-    now = timezone.now()
-    urgent = (
-        Playlist.objects.filter(
-            status=Playlist.Status.PUBLISHED,
-            is_urgent=True,
-            published_at__lte=now,
-            starts_at__lte=now,
-            ends_at__gt=now,
-        )
-        .order_by("-published_at")
-        .first()
-    )
-    if urgent:
-        return urgent
-    scheduled = (
-        Playlist.objects.filter(
-            status=Playlist.Status.PUBLISHED,
-            starts_at__lte=now,
-            ends_at__gt=now,
-        )
-        .order_by("-starts_at", "-version")
-        .first()
-    )
-    if scheduled:
-        return scheduled
-    return (
-        Playlist.objects.filter(
-            status=Playlist.Status.PUBLISHED,
-            published_at__lte=now,
-            starts_at__lte=now,
-        )
-        .order_by("-published_at")
-        .first()
-    )
-
-
 @api_view(["GET"])
 def sync_manifest(request):
     device = device_for(request)
@@ -497,16 +620,21 @@ def sync_manifest(request):
     missing_approved_hardware = (
         settings.DEPLOYMENT_ENV == "production"
         and device.status == Device.Status.ACTIVE
-        and not (
-            device.hardware_qualification_id
-            and device.hardware_qualification.approved_for_pilot
+        and not device_matches_qualification(
+            device,
+            hardware_model=device.hardware_model,
+            firmware_version=device.hardware_firmware_version,
+            security_patch_level=device.hardware_security_patch,
         )
     )
-    if device.status == Device.Status.DISABLED or missing_approved_hardware:
-        # Keep credentials and telemetry intact. A qualification can be
-        # re-approved after fresh physical evidence is recorded, while this
-        # server-side decision immediately prevents cached advertising from
-        # continuing after the next sync.
+    if device.status == Device.Status.DISABLED:
+        # Authentication normally rejects this before the view; keep the
+        # defense-in-depth path aligned with credential revocation.
+        raise exceptions.AuthenticationFailed("Invalid or expired device token.")
+    if missing_approved_hardware:
+        # A qualification can be revoked after fresh physical evidence shows
+        # a problem. Keep the active device in maintenance until an owner
+        # issues a fresh, qualified enrollment.
         mark_successful_sync()
         return Response(
             {
@@ -528,6 +656,7 @@ def sync_manifest(request):
             }
         )
     items = playlist.items.select_related("media").all()
+    media_origin = configured_media_origin()
     manifest = []
     for item in items:
         media = item.media
@@ -535,6 +664,9 @@ def sync_manifest(request):
             raise exceptions.APIException(
                 "Published playlist contains unavailable media."
             )
+        download_url = media.normalized_file.url
+        if not media_url_uses_origin(download_url, media_origin):
+            raise exceptions.APIException("Media delivery is unavailable.")
         manifest.append(
             {
                 "entry_id": str(item.id),
@@ -544,7 +676,7 @@ def sync_manifest(request):
                 "sha256": media.sha256,
                 "size_bytes": media.file_size,
                 "duration_ms": media.duration_ms,
-                "download_url": media.normalized_file.url,
+                "download_url": download_url,
             }
         )
     mark_successful_sync()
@@ -564,6 +696,7 @@ def sync_manifest(request):
                 "media_cache_bytes": settings.DEVICE_MEDIA_CACHE_BYTES,
                 "event_queue_bytes": settings.DEVICE_EVENT_QUEUE_BYTES,
                 "minimum_free_bytes": settings.DEVICE_MIN_FREE_BYTES,
+                "media_origin": media_origin,
                 "sync_timezone": settings.TIME_ZONE,
                 "daily_sync_local_time": "00:00:00",
                 "items": manifest,
@@ -574,7 +707,7 @@ def sync_manifest(request):
 
 @api_view(["POST"])
 def heartbeat(request):
-    device = device_for(request)
+    authenticated_device = device_for(request)
     recorded_at = parse_required_datetime(
         request.data.get("recorded_at"), "recorded_at"
     )
@@ -584,7 +717,10 @@ def heartbeat(request):
         raise serializers.ValidationError("Invalid free storage value.") from exc
     if free_storage < 0:
         raise serializers.ValidationError("Free storage cannot be negative.")
-    app_version = str(request.data.get("app_version", ""))[:32]
+    app_version = required_short_string(request.data, "app_version", 32)
+    android_version = required_short_string(request.data, "android_version", 32)
+    screen_on = required_json_boolean(request.data, "screen_on")
+    playback_active = required_json_boolean(request.data, "playback_active")
     battery_percent = request.data.get("battery_percent")
     if battery_percent is not None:
         try:
@@ -603,14 +739,16 @@ def heartbeat(request):
             raise serializers.ValidationError("Invalid temperature value.") from exc
         if not temperature.is_finite() or not Decimal("-50") <= temperature <= 150:
             raise serializers.ValidationError("Temperature is outside safe bounds.")
-    active_playlist = None
+    reported_playlist = None
     active_playlist_id = request.data.get("active_playlist_id")
     if active_playlist_id:
         try:
             active_playlist_id = uuid.UUID(str(active_playlist_id))
         except (TypeError, ValueError) as exc:
             raise serializers.ValidationError("Invalid active playlist ID.") from exc
-        active_playlist = Playlist.objects.filter(pk=active_playlist_id).first()
+        reported_playlist = Playlist.objects.filter(pk=active_playlist_id).first()
+        if reported_playlist is None:
+            raise serializers.ValidationError("Unknown active playlist ID.")
     last_sync = (
         parse_required_datetime(
             request.data.get("last_successful_sync_at"), "last_successful_sync_at"
@@ -625,91 +763,96 @@ def heartbeat(request):
         if request.data.get("last_playback_at")
         else None
     )
-    hb = DeviceHeartbeat.objects.create(
-        device=device,
-        recorded_at=recorded_at,
-        screen_on=bool(request.data.get("screen_on")),
-        external_power=optional_json_boolean(request.data, "external_power"),
-        charging=optional_json_boolean(request.data, "charging"),
-        battery_percent=battery_percent,
-        free_storage_bytes=free_storage,
-        temperature_celsius=temperature,
-        app_version=app_version,
-        android_version=str(request.data.get("android_version", ""))[:32],
-        active_playlist=active_playlist,
-        playback_active=bool(request.data.get("playback_active")),
-        last_successful_sync_at=last_sync,
-        last_playback_at=last_playback,
-    )
-    # This is deliberately the server receipt timestamp, not the device's
-    # corrected wall-clock timestamp supplied in ``recorded_at``.
-    device.last_seen_at = hb.received_at
-    device.app_version = hb.app_version
-    device.android_version = hb.android_version
-    device.current_playlist = active_playlist
-    if last_sync:
-        device.last_sync_at = last_sync
-    if last_playback:
-        device.last_playback_at = last_playback
-    device.save(
-        update_fields=[
-            "last_seen_at",
-            "app_version",
-            "android_version",
-            "current_playlist",
-            "last_sync_at",
-            "last_playback_at",
-            "updated_at",
-        ]
-    )
-    if free_storage < 2 * 1024 * 1024 * 1024:
-        Alert.objects.get_or_create(
+    with transaction.atomic():
+        device = (
+            Device.objects.select_for_update(of=("self",))
+            .select_related("hardware_qualification")
+            .get(pk=authenticated_device.pk)
+        )
+        hb = DeviceHeartbeat.objects.create(
             device=device,
-            code="low_storage",
-            acknowledged_at__isnull=True,
-            defaults={
-                "severity": Alert.Severity.WARNING,
-                "message": "Device has less than 2 GB of free storage.",
-            },
+            recorded_at=recorded_at,
+            screen_on=screen_on,
+            external_power=optional_json_boolean(request.data, "external_power"),
+            charging=optional_json_boolean(request.data, "charging"),
+            battery_percent=battery_percent,
+            free_storage_bytes=free_storage,
+            temperature_celsius=temperature,
+            app_version=app_version,
+            android_version=android_version,
+            active_playlist=reported_playlist,
+            playback_active=playback_active,
+            last_successful_sync_at=last_sync,
+            last_playback_at=last_playback,
         )
-    if battery_percent is not None and battery_percent <= 20:
-        critical = battery_percent <= 10
-        open_or_escalate_alert(
-            device,
-            "low_battery",
-            Alert.Severity.CRITICAL if critical else Alert.Severity.WARNING,
-            "Device battery is at or below 10%."
-            if critical
-            else "Device battery is at or below 20%.",
-        )
-    if app_version and app_version != settings.REQUIRED_APP_VERSION:
-        Alert.objects.get_or_create(
-            device=device,
-            code="outdated_app",
-            acknowledged_at__isnull=True,
-            defaults={
-                "severity": Alert.Severity.WARNING,
-                "message": (
-                    "Device application version does not match the required version."
-                ),
-            },
-        )
-    if (
-        temperature is not None
-        and device.hardware_qualification_id
-        and device.hardware_qualification.approved_for_pilot
-        and device.hardware_qualification.thermal_passed
-        and float(temperature) >= settings.DEVICE_OVERHEAT_CELSIUS
-    ):
-        Alert.objects.get_or_create(
-            device=device,
-            code="overheating",
-            acknowledged_at__isnull=True,
-            defaults={
-                "severity": Alert.Severity.CRITICAL,
-                "message": "Device reported a temperature above the safe threshold.",
-            },
-        )
+        # Receipt time proves liveness, while device-derived aggregate state may
+        # only move forward with the newest reported heartbeat.
+        device.last_seen_at = hb.received_at
+        update_fields = ["last_seen_at", "updated_at"]
+        if (
+            device.last_heartbeat_recorded_at is None
+            or recorded_at >= device.last_heartbeat_recorded_at
+        ):
+            device.last_heartbeat_recorded_at = recorded_at
+            device.app_version = hb.app_version
+            device.android_version = hb.android_version
+            device.current_playlist = reported_playlist
+            update_fields.extend(
+                [
+                    "last_heartbeat_recorded_at",
+                    "app_version",
+                    "android_version",
+                    "current_playlist",
+                ]
+            )
+        if last_sync and (
+            device.last_sync_at is None or last_sync > device.last_sync_at
+        ):
+            device.last_sync_at = last_sync
+            update_fields.append("last_sync_at")
+        if last_playback and (
+            device.last_playback_at is None or last_playback > device.last_playback_at
+        ):
+            device.last_playback_at = last_playback
+            update_fields.append("last_playback_at")
+        device.save(update_fields=update_fields)
+        if free_storage < 2 * 1024 * 1024 * 1024:
+            open_or_escalate_alert(
+                device,
+                "low_storage",
+                Alert.Severity.WARNING,
+                "Device has less than 2 GB of free storage.",
+            )
+        if battery_percent is not None and battery_percent <= 20:
+            critical = battery_percent <= 10
+            open_or_escalate_alert(
+                device,
+                "low_battery",
+                Alert.Severity.CRITICAL if critical else Alert.Severity.WARNING,
+                "Device battery is at or below 10%."
+                if critical
+                else "Device battery is at or below 20%.",
+            )
+        if app_version != settings.REQUIRED_APP_VERSION:
+            open_or_escalate_alert(
+                device,
+                "outdated_app",
+                Alert.Severity.WARNING,
+                "Device application version does not match the required version.",
+            )
+        if (
+            temperature is not None
+            and device.hardware_qualification_id
+            and device.hardware_qualification.approved_for_pilot
+            and device.hardware_qualification.thermal_passed
+            and float(temperature) >= settings.DEVICE_OVERHEAT_CELSIUS
+        ):
+            open_or_escalate_alert(
+                device,
+                "overheating",
+                Alert.Severity.CRITICAL,
+                "Device reported a temperature above the safe threshold.",
+            )
     return Response({"accepted": True, "server_time": timezone.now()})
 
 
@@ -718,7 +861,49 @@ def validate_operational_event_details(kind, data):
     details = data.get("details", {})
     if not isinstance(details, dict):
         raise serializers.ValidationError({"details": "Details must be a JSON object."})
-    if kind == DeviceOperationalEvent.Kind.PLANNED_SHUTDOWN:
+    if kind == DeviceOperationalEvent.Kind.FORCED_QUEUE_LOSS:
+        expected = {
+            "removed_batches",
+            "estimated_removed_bytes",
+            "target_removed_bytes",
+        }
+        if set(details) != expected or any(
+            type(details[field]) is not int or details[field] < 0
+            for field in expected
+        ):
+            raise serializers.ValidationError(
+                {
+                    "details": (
+                        "Forced queue loss details must contain non-negative integer "
+                        "removed_batches, estimated_removed_bytes, and "
+                        "target_removed_bytes values."
+                    )
+                }
+            )
+    elif kind == DeviceOperationalEvent.Kind.REPLACEMENT_FAILED:
+        if set(details) != {"playlist_id", "stage"}:
+            raise serializers.ValidationError(
+                {
+                    "details": (
+                        "Replacement failure details must contain only playlist_id "
+                        "and stage."
+                    )
+                }
+            )
+        try:
+            uuid.UUID(details["playlist_id"])
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise serializers.ValidationError(
+                {"details.playlist_id": "Use a playlist UUID."}
+            ) from exc
+        if (
+            not isinstance(details["stage"], str)
+            or details["stage"] not in REPLACEMENT_FAILURE_STAGES
+        ):
+            raise serializers.ValidationError(
+                {"details.stage": "Use a recognized replacement stage."}
+            )
+    elif kind == DeviceOperationalEvent.Kind.PLANNED_SHUTDOWN:
         if not details_provided or details != {}:
             raise serializers.ValidationError(
                 {"details": "Planned shutdown details must be exactly an empty object."}
@@ -754,6 +939,11 @@ def operational_event(request):
     if device.status == Device.Status.DISABLED:
         raise exceptions.PermissionDenied("Disabled devices cannot submit events.")
     kind = request.data.get("kind")
+    unexpected_fields = set(request.data).difference(
+        {"id", "kind", "recorded_at", "details"}
+    )
+    if unexpected_fields:
+        raise serializers.ValidationError("Operational event contains unknown fields.")
     if kind not in DeviceOperationalEvent.Kind.values:
         raise serializers.ValidationError("Invalid operational event kind.")
     try:

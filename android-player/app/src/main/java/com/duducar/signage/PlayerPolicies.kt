@@ -27,8 +27,11 @@ object StoragePolicy {
     fun shouldForceQueueLoss(
         queueBytes: Long,
         usableBytes: Long,
+        maxQueueBytes: Long,
         minimumFreeBytes: Long,
-    ): Boolean = queueBytes > 0 && usableBytes < minimumFreeBytes
+    ): Boolean = queueBytes > 0 && (
+        queueBytes > maxQueueBytes || usableBytes < minimumFreeBytes
+    )
 
     fun forcedQueueRemovalTargetBytes(
         queueBytes: Long,
@@ -36,13 +39,27 @@ object StoragePolicy {
         maxQueueBytes: Long,
         minimumFreeBytes: Long,
     ): Long {
-        if (!shouldForceQueueLoss(queueBytes, usableBytes, minimumFreeBytes)) return 0
+        if (!shouldForceQueueLoss(queueBytes, usableBytes, maxQueueBytes, minimumFreeBytes)) {
+            return 0
+        }
         val bytesNeededForMinimumFree = (minimumFreeBytes - usableBytes).coerceAtLeast(0)
         val queueTarget = maxQueueBytes * 3 / 4
         val bytesNeededForQueueMargin = (queueBytes - queueTarget).coerceAtLeast(0)
         return maxOf(bytesNeededForMinimumFree, bytesNeededForQueueMargin)
             .coerceAtMost(queueBytes)
     }
+}
+
+/** Published images are normalized to 1920×1080; never allocate beyond it. */
+object ImageDecodePolicy {
+    const val MAX_WIDTH = 1920
+    const val MAX_HEIGHT = 1080
+    const val MAX_PIXELS = MAX_WIDTH * MAX_HEIGHT
+
+    fun hasSafeBounds(width: Int, height: Int): Boolean =
+        width in 1..MAX_WIDTH &&
+            height in 1..MAX_HEIGHT &&
+            width.toLong() * height <= MAX_PIXELS.toLong()
 }
 
 object PinVerifier {
@@ -293,11 +310,10 @@ object PlaybackRecoveryPolicy {
         require(manifestEntryIds.isNotEmpty())
         if (checkpointIndex != null) {
             require(checkpointIndex in manifestEntryIds.indices)
-            return if (recordedEntryIds.contains(manifestEntryIds[checkpointIndex])) {
-                (checkpointIndex + 1) % manifestEntryIds.size
-            } else {
-                checkpointIndex
-            }
+            // The checkpoint identifies media interrupted by a process exit.
+            // Its interrupted record belongs to the recovered prior loop; the
+            // next loop must restart that same media from its beginning.
+            return checkpointIndex
         }
         require(recordedEntryIds.isNotEmpty())
         val lastIndex = manifestEntryIds.indexOf(recordedEntryIds.last())

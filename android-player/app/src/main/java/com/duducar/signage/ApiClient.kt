@@ -1,14 +1,18 @@
 package com.duducar.signage
 
 import android.os.Build
-import org.json.JSONArray
 import org.json.JSONObject
-import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.net.HttpURLConnection
 import java.net.URL
 
 class ApiClient(private val credentials: CredentialStore) {
     private var accessToken: String? = null
+
+    fun clearAccessToken() {
+        accessToken = null
+    }
 
     fun enrollmentChallenge(code: String, androidId: String): JSONObject {
         val body = JSONObject()
@@ -16,6 +20,9 @@ class ApiClient(private val credentials: CredentialStore) {
             .put("android_id", androidId)
             .put("android_version", Build.VERSION.RELEASE)
             .put("app_version", BuildConfig.VERSION_NAME)
+            .put("hardware_model", Build.MODEL)
+            .put("firmware_version", Build.DISPLAY)
+            .put("security_patch_level", Build.VERSION.SECURITY_PATCH)
         return request("devices/enrollment-challenge/", "POST", body, authenticated = false)
     }
 
@@ -28,8 +35,13 @@ class ApiClient(private val credentials: CredentialStore) {
                 .put("integrity_token", integrityToken),
             authenticated = false,
         )
-        credentials.saveRefreshToken(response.getString("refresh_token"))
-        credentials.saveKioskPinVerifier(response.optString("kiosk_pin_verifier"))
+        if (!credentials.saveEnrollmentCredentials(
+                refreshToken = response.getString("refresh_token"),
+                kioskPinVerifier = response.getString("kiosk_pin_verifier"),
+            )
+        ) {
+            throw CredentialPersistenceException()
+        }
         accessToken = response.getString("access_token")
         return response
     }
@@ -61,20 +73,33 @@ class ApiClient(private val credentials: CredentialStore) {
         if (accessToken == null) refreshAccessToken()
         return try {
             request(path, method, body, authenticated = true, compressBody = compressBody)
-        } catch (error: UnauthorizedException) {
+        } catch (_: UnauthorizedException) {
+            accessToken = null
             refreshAccessToken()
-            request(path, method, body, authenticated = true, compressBody = compressBody)
+            try {
+                request(path, method, body, authenticated = true, compressBody = compressBody)
+            } catch (_: UnauthorizedException) {
+                credentials.clearEnrollment()
+                accessToken = null
+                throw CredentialRejectedException()
+            }
         }
     }
 
     private fun refreshAccessToken() {
-        val refresh = credentials.refreshToken() ?: throw UnauthorizedException()
-        val response = request(
-            "devices/token/",
-            "POST",
-            JSONObject().put("refresh_token", refresh),
-            authenticated = false,
-        )
+        val refresh = credentials.refreshToken() ?: throw CredentialRejectedException()
+        val response = try {
+            request(
+                "devices/token/",
+                "POST",
+                JSONObject().put("refresh_token", refresh),
+                authenticated = false,
+            )
+        } catch (_: UnauthorizedException) {
+            credentials.clearEnrollment()
+            accessToken = null
+            throw CredentialRejectedException()
+        }
         accessToken = response.getString("access_token")
     }
 
@@ -107,13 +132,48 @@ class ApiClient(private val credentials: CredentialStore) {
             connection.outputStream.use { it.write(payload) }
         }
         val status = connection.responseCode
-        if (status == 401 || status == 403) throw UnauthorizedException()
         val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-        val text = stream.bufferedReader().use(BufferedReader::readText)
+        val text = try {
+            if (connection.contentLengthLong > ApiResponsePolicy.MAX_BYTES.toLong()) {
+                throw ResponseTooLargeException()
+            }
+            ApiResponsePolicy.readBounded(stream)
+        } catch (_: ResponseTooLargeException) {
+            if (status == 401) throw UnauthorizedException()
+            if (status == 403) throw ForbiddenException()
+            throw ApiException(status, "Response body exceeds the safe size limit.")
+        }
+        if (status == 401) throw UnauthorizedException()
+        if (status == 403) throw ForbiddenException(text)
         if (status !in 200..299) throw ApiException(status, text)
         return JSONObject(text)
     }
 }
 
+object ApiResponsePolicy {
+    const val MAX_BYTES = 1 * 1024 * 1024
+
+    fun readBounded(stream: InputStream?): String {
+        if (stream == null) return ""
+        stream.use { input ->
+            val output = ByteArrayOutputStream()
+            val buffer = ByteArray(8 * 1024)
+            var total = 0
+            while (true) {
+                val count = input.read(buffer)
+                if (count <= 0) break
+                if (count > MAX_BYTES - total) throw ResponseTooLargeException()
+                output.write(buffer, 0, count)
+                total += count
+            }
+            return output.toString(Charsets.UTF_8.name())
+        }
+    }
+}
+
 class UnauthorizedException : RuntimeException()
+class ForbiddenException(message: String = "") : RuntimeException(message)
+class CredentialRejectedException : RuntimeException()
+class CredentialPersistenceException : RuntimeException()
 class ApiException(val status: Int, message: String) : RuntimeException(message)
+private class ResponseTooLargeException : RuntimeException()

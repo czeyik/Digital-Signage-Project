@@ -1,4 +1,6 @@
+import base64
 import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -13,6 +15,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.utils import timezone
 
 BACKUP_PREFIX = "duducar-signage-postgres"
+REMOTE_SUCCESS_RECEIPT = f"{BACKUP_PREFIX}-last-remote-success.json"
 
 
 class Command(BaseCommand):
@@ -53,9 +56,10 @@ class Command(BaseCommand):
         timestamp = timezone.now().strftime("%Y%m%dT%H%M%SZ")
         archive_path = output_dir / f"{BACKUP_PREFIX}-{timestamp}.dump"
         digest_path = archive_path.with_suffix(".dump.sha256")
-        temporary_path = self._temporary_path(output_dir)
+        temporary_path = None
 
         try:
+            temporary_path = self._temporary_path(output_dir)
             self._dump_database(pg_dump, database, temporary_path)
             self._validate_archive(pg_restore, temporary_path)
             digest = self._sha256(temporary_path)
@@ -66,12 +70,13 @@ class Command(BaseCommand):
                 encoding="ascii",
             )
             os.chmod(digest_path, 0o600)
-            self._upload(
+            remote_receipt = self._upload(
                 options["s3_bucket"],
                 archive_path,
                 digest_path,
                 digest,
             )
+            self._write_remote_success_receipt(output_dir, remote_receipt)
             self._prune_old_backups(
                 output_dir,
                 options["retain_days"],
@@ -82,7 +87,8 @@ class Command(BaseCommand):
                 "PostgreSQL backup or archive validation failed."
             ) from exc
         finally:
-            temporary_path.unlink(missing_ok=True)
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
         self.stdout.write(
             self.style.SUCCESS(
@@ -147,22 +153,124 @@ class Command(BaseCommand):
         return digest.hexdigest()
 
     def _upload(self, bucket, archive_path, digest_path, digest):
+        archive_key = f"database-backups/{archive_path.name}"
+        digest_key = f"database-backups/{digest_path.name}"
         try:
             client = boto3.client("s3")
             client.upload_file(
                 str(archive_path),
                 bucket,
-                f"database-backups/{archive_path.name}",
-                ExtraArgs={"Metadata": {"sha256": digest}},
+                archive_key,
+                ExtraArgs={
+                    "ChecksumAlgorithm": "SHA256",
+                    "Metadata": {"sha256": digest},
+                },
             )
             client.upload_file(
                 str(digest_path),
                 bucket,
-                f"database-backups/{digest_path.name}",
-                ExtraArgs={"ContentType": "text/plain"},
+                digest_key,
+                ExtraArgs={
+                    "ChecksumAlgorithm": "SHA256",
+                    "ContentType": "text/plain",
+                    "Metadata": {"sha256": digest},
+                },
+            )
+            return self._verify_remote_upload(
+                client,
+                bucket,
+                archive_key,
+                archive_path,
+                digest_key,
+                digest_path,
+                digest,
             )
         except (BotoCoreError, ClientError) as exc:
             raise CommandError("PostgreSQL backup upload failed.") from exc
+
+    def _verify_remote_upload(
+        self,
+        client,
+        bucket,
+        archive_key,
+        archive_path,
+        digest_key,
+        digest_path,
+        digest,
+    ):
+        try:
+            archive_head = client.head_object(
+                Bucket=bucket,
+                Key=archive_key,
+                ChecksumMode="ENABLED",
+            )
+            digest_head = client.head_object(
+                Bucket=bucket,
+                Key=digest_key,
+                ChecksumMode="ENABLED",
+            )
+        except (BotoCoreError, ClientError) as exc:
+            raise CommandError("PostgreSQL backup remote verification failed.") from exc
+
+        objects = (
+            (archive_key, archive_path, archive_head),
+            (digest_key, digest_path, digest_head),
+        )
+        receipt_objects = []
+        for key, path, head in objects:
+            metadata = {
+                str(name).lower(): value
+                for name, value in head.get("Metadata", {}).items()
+            }
+            version_id = head.get("VersionId")
+            object_digest = self._sha256(path)
+            object_checksum = base64.b64encode(
+                bytes.fromhex(object_digest)
+            ).decode("ascii")
+            if (
+                head.get("ContentLength") != path.stat().st_size
+                or metadata.get("sha256") != digest
+                or head.get("ChecksumSHA256") != object_checksum
+                or version_id in {None, "null"}
+            ):
+                raise CommandError("PostgreSQL backup remote verification failed.")
+            receipt_objects.append(
+                {
+                    "key": key,
+                    "version_id": version_id,
+                    "content_length": head["ContentLength"],
+                    "sha256": object_digest,
+                }
+            )
+        return {
+            "completed_at": timezone.now().isoformat(),
+            "bucket": bucket,
+            "archive_sha256": digest,
+            "objects": receipt_objects,
+        }
+
+    def _write_remote_success_receipt(self, output_dir, receipt):
+        """Atomically publish success only after both remote objects verify."""
+
+        receipt_path = output_dir / REMOTE_SUCCESS_RECEIPT
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=output_dir,
+                prefix=".remote-backup-receipt-",
+                delete=False,
+            ) as temporary:
+                temporary.write(json.dumps(receipt, sort_keys=True) + "\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            os.chmod(temporary_path, 0o600)
+            os.replace(temporary_path, receipt_path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def _prune_old_backups(self, output_dir, retain_days, max_local_archives):
         cutoff = timezone.now() - timedelta(days=retain_days)

@@ -7,10 +7,20 @@ import pytest
 from django.apps import apps
 from django.contrib.sessions.models import Session
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
 from django.utils import timezone
 
-from signage.models import Alert, AuditEvent, Driver, LoginThrottle, User
+from signage.models import (
+    Alert,
+    AuditEvent,
+    Driver,
+    LoginThrottle,
+    MediaAsset,
+    MediaDeletion,
+    Playlist,
+    User,
+)
 
 
 @pytest.mark.django_db
@@ -85,8 +95,56 @@ def test_marketing_user_cannot_see_driver_name_in_csv(client):
     client.force_login(user)
     response = client.get(reverse("playback-csv"))
     assert response.status_code == 200
-    assert "driver_internal_id" in response.content.decode()
-    assert "driver_name" not in response.content.decode()
+    content = b"".join(response.streaming_content).decode()
+    assert "driver_internal_id" in content
+    assert "driver_name" not in content
+
+
+@pytest.mark.django_db
+def test_marketing_can_mutate_non_pii_content_and_acknowledge_alerts(client):
+    marketing = User.objects.create_user(
+        "marketing-operations@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Marketing poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("marketing.png", b"source"),
+        duration_ms=10_000,
+        uploaded_by=marketing,
+    )
+    playlist = Playlist.objects.create(
+        name="Marketing draft",
+        version=1,
+        starts_at=timezone.now(),
+        ends_at=timezone.now() + timedelta(days=7),
+        created_by=marketing,
+    )
+    alert = Alert.objects.create(
+        code="marketing-acknowledgement",
+        severity=Alert.Severity.WARNING,
+        message="A non-PII operational alert.",
+    )
+    client.force_login(marketing)
+
+    archive = client.post(
+        reverse("media-delete", args=[media.id]), {"confirm": "delete"}
+    )
+    clone = client.post(reverse("playlist-clone", args=[playlist.id]))
+    acknowledge = client.post(reverse("acknowledge-alert", args=[alert.id]))
+
+    assert archive.status_code == 302
+    assert clone.status_code == 302
+    assert acknowledge.status_code == 302
+    media.refresh_from_db()
+    alert.refresh_from_db()
+    assert media.status == MediaAsset.Status.ARCHIVED
+    assert MediaDeletion.objects.filter(asset=media).exists()
+    assert Playlist.objects.filter(name=playlist.name, version=2).exists()
+    assert alert.acknowledged_by == marketing
 
 
 @pytest.mark.django_db
@@ -102,7 +160,8 @@ def test_playback_csv_is_header_only_when_no_events(client):
 
     assert response.status_code == 200
     assert response["Content-Type"] == "text/csv"
-    assert list(csv.reader(StringIO(response.content.decode()))) == [
+    content = b"".join(response.streaming_content).decode()
+    assert list(csv.reader(StringIO(content))) == [
         [
             "event_id",
             "device",
@@ -421,6 +480,32 @@ def test_dashboard_user_blank_password_edit_preserves_existing_password(client):
     assert response.status_code == 302
     marketing.refresh_from_db()
     assert marketing.check_password("A-very-long-password-123")
+
+
+@pytest.mark.django_db
+def test_last_active_owner_cannot_be_demoted_or_deactivated(client):
+    owner = User.objects.create_user(
+        "only-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("user-edit", args=[owner.pk]),
+        {
+            "email": owner.email,
+            "role": User.Role.MARKETING,
+            "is_active": "on",
+            "password": "",
+        },
+    )
+
+    assert response.status_code == 200
+    assert b"At least one active account owner must remain" in response.content
+    owner.refresh_from_db()
+    assert owner.role == User.Role.OWNER
+    assert owner.is_active is True
 
 
 @pytest.mark.django_db

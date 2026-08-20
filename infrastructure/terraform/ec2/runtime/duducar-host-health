@@ -7,38 +7,66 @@ source "$host_config"
 set +a
 
 minimum_free=${HOST_MIN_FREE_BYTES:-5368709120}
+minimum_root_free=${HOST_ROOT_MIN_FREE_BYTES:-1073741824}
+minimum_memory=${HOST_MIN_AVAILABLE_MEMORY_BYTES:-134217728}
 maximum_backup_age=${HOST_BACKUP_MAX_AGE_SECONDS:-108000}
+maximum_snapshot_age=${HOST_SNAPSHOT_MAX_AGE_SECONDS:-129600}
 alert=/usr/local/sbin/duducar-alert
+backup_verify=/usr/local/sbin/duducar-backup-verify
+status=0
+
+root_free_bytes=$(df --output=avail -B1 / | tail -n 1 | tr -d ' ')
+root_free_inodes=$(df --output=iavail / | tail -n 1 | tr -d ' ')
+if [ "$root_free_bytes" -lt "$minimum_root_free" ] || [ "$root_free_inodes" -lt 10000 ]; then
+  "$alert" --problem root-disk-low "The production EC2 root volume has less than 1 GB or 10,000 inodes free."
+  status=1
+else
+  "$alert" --clear root-disk-low "The production EC2 root volume has recovered free space and inodes."
+fi
+
+available_memory_bytes=$(awk '/^MemAvailable:/ { print $2 * 1024 }' /proc/meminfo)
+if [ "$available_memory_bytes" -lt "$minimum_memory" ]; then
+  "$alert" --problem memory-low "The production EC2 host has less than 128 MB available memory."
+  status=1
+else
+  "$alert" --clear memory-low "The production EC2 host memory has recovered."
+fi
 
 free_bytes=$(df --output=avail -B1 /srv/duducar | tail -n 1 | tr -d ' ')
 if [ "$free_bytes" -lt "$minimum_free" ]; then
   "$alert" --problem disk-low "The production EC2 data volume has less than 5 GB free."
+  status=1
 else
   "$alert" --clear disk-low "The production EC2 data volume has recovered above 5 GB free."
 fi
 
-latest_backup=$(
-  find /srv/duducar/backups \
-    -maxdepth 1 \
-    -type f \
-    -name 'duducar-signage-postgres-*.dump' \
-    -printf '%T@ %p\n' |
-    sort -nr |
-    awk 'NR == 1 { sub(/^[^ ]+ /, ""); newest = $0 } END { print newest }'
-)
-
-backup_stale=true
-if [ -n "$latest_backup" ] && [ -f "$latest_backup" ]; then
-  backup_age=$(($(date +%s) - $(stat -c %Y "$latest_backup")))
-  if [ "$backup_age" -le "$maximum_backup_age" ]; then
-    backup_stale=false
-  fi
+if HOST_BACKUP_MAX_AGE_SECONDS="$maximum_backup_age" "$backup_verify" check; then
+  "$alert" --clear backup-stale "A current versioned PostgreSQL archive and sidecar were verified in private S3."
+else
+  "$alert" --problem backup-stale "No verified versioned PostgreSQL archive and sidecar are newer than 30 hours."
+  status=1
 fi
 
-if [ "$backup_stale" = true ]; then
-  "$alert" --problem backup-stale "No successful local PostgreSQL backup is newer than 30 hours."
+latest_snapshot=$(
+  aws ec2 describe-snapshots \
+    --region "$AWS_REGION" \
+    --owner-ids self \
+    --filters "Name=volume-id,Values=$DATA_VOLUME_ID" "Name=status,Values=completed" \
+    --query 'reverse(sort_by(Snapshots,&StartTime))[0].StartTime' \
+    --output text
+)
+snapshot_stale=true
+if [ -n "$latest_snapshot" ] && [ "$latest_snapshot" != None ]; then
+  snapshot_epoch=$(date --date "$latest_snapshot" +%s)
+  if [ "$(($(date +%s) - snapshot_epoch))" -le "$maximum_snapshot_age" ]; then
+    snapshot_stale=false
+  fi
+fi
+if [ "$snapshot_stale" = true ]; then
+  "$alert" --problem snapshot-stale "No completed data-volume snapshot is newer than 36 hours."
+  status=1
 else
-  "$alert" --clear backup-stale "A current PostgreSQL backup is present on the production EC2 host."
+  "$alert" --clear snapshot-stale "A current completed data-volume snapshot is available."
 fi
 
 probe_public_https() {
@@ -54,8 +82,10 @@ probe_public_https() {
     "$alert" --clear "$key" "The public HTTPS readiness path for ${hostname} has recovered."
   else
     "$alert" --problem "$key" "The production host cannot reach the public HTTPS readiness path for ${hostname}."
+    status=1
   fi
 }
 
 probe_public_https dashboard-public-https marketing.duducaradmin.com
 probe_public_https api-public-https api.marketing.duducaradmin.com
+exit "$status"

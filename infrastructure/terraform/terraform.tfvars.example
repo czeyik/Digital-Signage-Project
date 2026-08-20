@@ -21,6 +21,11 @@ budget_project_tag_value = "duducar-signage"
 # and isolated media-worker task must use the same reviewed release.
 container_image = ""
 
+# These are required and intentionally invalid until the operator supplies the
+# currently reviewed immutable digests. A blind copy cannot configure a host.
+postgres_image = ""
+caddy_image    = ""
+
 # Deprecated outer compatibility gate. Current Django runs on EC2, and the
 # decisive enable_legacy_ecs_runtime guard below remains false.
 enable_services = false

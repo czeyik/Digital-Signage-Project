@@ -1,19 +1,23 @@
 #!/bin/bash
+# Install the complete reviewed host runtime as one retry-safe operation. The
+# SSM document stages the files and hashes; this helper never activates or
+# restarts the production stack.
 set -Eeuo pipefail
 umask 0077
 
 mode=${1:-}
 commit=${2:-}
 operation_id=${3:-}
-reviewed_caddy_input=${4:-}
-reviewed_renderer_input=${5:-}
-reviewed_caddy_sha=${6:-}
-reviewed_renderer_sha=${7:-}
-caddy_image=${8:-}
+stage_input=${4:-}
+caddy_image=${5:-}
 
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Runtime asset operations must run as root." >&2
+  exit 2
+fi
 case "$mode" in
-  validate|install|rollback) ;;
-  *) echo "Mode must be validate, install, or rollback." >&2; exit 2 ;;
+  assert|validate|install|rollback) ;;
+  *) echo "Mode must be assert, validate, install, or rollback." >&2; exit 2 ;;
 esac
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || {
   echo "ExpectedCommit must be a full lowercase Git commit." >&2
@@ -23,82 +27,137 @@ esac
   echo "OperationId must contain 32 lowercase hexadecimal characters." >&2
   exit 2
 }
-for value in "$reviewed_caddy_sha" "$reviewed_renderer_sha"; do
-  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || {
-    echo "Reviewed runtime asset hashes must be SHA-256 values." >&2
+[[ "$caddy_image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || {
+  echo "CaddyImage must be pinned by SHA-256 digest." >&2
+  exit 2
+}
+test -d "$stage_input" && test ! -L "$stage_input"
+stage=$(readlink -f -- "$stage_input")
+
+target_root=
+backup_root=/var/lib/duducar/runtime-backups
+if [ -n "${DUDUCAR_RUNTIME_ASSET_TEST_ROOT:-}" ]; then
+  [[ "$DUDUCAR_RUNTIME_ASSET_TEST_ROOT" =~ ^/tmp/duducar-runtime-assets-test\.[A-Za-z0-9]{6,}$ ]] || {
+    echo "Runtime asset test root is outside the permitted temporary path." >&2
     exit 2
   }
-done
-test -f "$reviewed_caddy_input"
-test -f "$reviewed_renderer_input"
-reviewed_caddy=$(readlink -f -- "$reviewed_caddy_input")
-reviewed_renderer=$(readlink -f -- "$reviewed_renderer_input")
-
-caddy_target=/etc/duducar/Caddyfile.post-cutover
-renderer_target=/usr/local/sbin/render-duducar-runtime-env
-backup_dir=/var/lib/duducar/runtime-backups/$commit-$operation_id
-caddy_temp=''
-renderer_temp=''
-pending_backup=''
+  target_root=$DUDUCAR_RUNTIME_ASSET_TEST_ROOT
+  backup_root=$target_root/var/lib/duducar/runtime-backups
+fi
+backup_dir=$backup_root/$commit-$operation_id
+pending_backup=
 rollback_needed=0
 
-cleanup() {
-  status=$?
-  set +e
-  if [ "$rollback_needed" -eq 1 ]; then
-    echo "Runtime asset replacement failed; restoring both operation backups." >&2
-    restore_caddy_temp=$(mktemp /etc/duducar/.Caddyfile.rollback.XXXXXX)
-    restore_renderer_temp=$(mktemp /usr/local/sbin/.render-duducar-rollback.XXXXXX)
-    install -o root -g root -m 0644 \
-      "$backup_dir/Caddyfile.post-cutover" "$restore_caddy_temp"
-    caddy_restore_status=$?
-    install -o root -g root -m 0755 \
-      "$backup_dir/render-duducar-runtime-env" "$restore_renderer_temp"
-    renderer_restore_status=$?
-    if [ "$caddy_restore_status" -eq 0 ]; then
-      mv -f -- "$restore_caddy_temp" "$caddy_target"
-      caddy_restore_status=$?
-    fi
-    if [ "$renderer_restore_status" -eq 0 ]; then
-      mv -f -- "$restore_renderer_temp" "$renderer_target"
-      renderer_restore_status=$?
-    fi
-    rm -f -- "$restore_caddy_temp" "$restore_renderer_temp"
-    if ! (
-      cd "$backup_dir" &&
-        printf '%s  %s\n' \
-          "$(sha256sum Caddyfile.post-cutover | awk '{print $1}')" "$caddy_target" \
-          "$(sha256sum render-duducar-runtime-env | awk '{print $1}')" "$renderer_target" |
-          sha256sum -c -
-    ); then
-      caddy_restore_status=1
-      renderer_restore_status=1
-    fi
-    if [ "$caddy_restore_status" -ne 0 ] || [ "$renderer_restore_status" -ne 0 ]; then
-      echo "CRITICAL: runtime asset rollback did not complete." >&2
-      status=1
-    fi
-  fi
-  [ -z "$caddy_temp" ] || rm -f -- "$caddy_temp"
-  [ -z "$renderer_temp" ] || rm -f -- "$renderer_temp"
-  [ -z "$pending_backup" ] || rm -rf -- "$pending_backup"
-  exit "$status"
+asset_names() {
+  printf '%s\n' \
+    Caddyfile.post-cutover \
+    pg_hba.conf \
+    postgres-init-roles.sh \
+    postgres-runtime-grants.sql \
+    render-runtime-env \
+    duducar-stack \
+    duducar-command \
+    duducar-alert \
+    duducar-host-health \
+    duducar-backup-verify \
+    duducar-credential-broker \
+    duducar.service \
+    duducar-credential-broker.service \
+    duducar-command@.service \
+    duducar-alert@.service \
+    duducar-health.timer \
+    duducar-playlists.timer \
+    duducar-media-reconcile.timer \
+    duducar-retention.timer \
+    duducar-backup.timer
 }
-trap cleanup EXIT
+
+asset_target() {
+  case "$1" in
+    Caddyfile.post-cutover|pg_hba.conf)
+      printf '%s/etc/duducar/%s\n' "$target_root" "$1"
+      ;;
+    postgres-init-roles.sh|postgres-runtime-grants.sql)
+      printf '%s/etc/duducar/postgres-init/%s\n' "$target_root" "$1"
+      ;;
+    render-runtime-env)
+      printf '%s/usr/local/sbin/render-duducar-runtime-env\n' "$target_root"
+      ;;
+    duducar-stack|duducar-command|duducar-alert|duducar-host-health|duducar-backup-verify|duducar-credential-broker)
+      printf '%s/usr/local/sbin/%s\n' "$target_root" "$1"
+      ;;
+    *.service|*.timer)
+      printf '%s/etc/systemd/system/%s\n' "$target_root" "$1"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+asset_mode() {
+  case "$1" in
+    Caddyfile.post-cutover|pg_hba.conf|*.service|*.timer) printf '0644\n' ;;
+    postgres-runtime-grants.sql) printf '0444\n' ;;
+    postgres-init-roles.sh) printf '0555\n' ;;
+    *) printf '0750\n' ;;
+  esac
+}
 
 file_sha256() {
   sha256sum "$1" | awk '{print $1}'
 }
 
-targets_match() {
-  expected_caddy=$1
-  expected_renderer=$2
-  [ "$(file_sha256 "$caddy_target")" = "$expected_caddy" ] &&
-    [ "$(file_sha256 "$renderer_target")" = "$expected_renderer" ]
+request_sha256() {
+  printf '%s\n%s\n%s\n%s\n' \
+    "$commit" "$operation_id" "$(file_sha256 "$stage/MANIFEST")" "$caddy_image" |
+    sha256sum | awk '{print $1}'
 }
 
-validate_caddy() {
-  candidate=$1
+validate_manifest() {
+  [ "$(stat -c '%U:%G' "$stage")" = root:root ] || {
+    echo "Staged runtime directory must be owned by root:root." >&2
+    return 1
+  }
+  manifest=$stage/MANIFEST
+  test -f "$manifest" && test ! -L "$manifest"
+  awk 'NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-f]+$/ || $2 !~ /^[A-Za-z0-9.@_-]+$/ { exit 1 }' "$manifest"
+  expected_names=$(asset_names | LC_ALL=C sort)
+  actual_names=$(awk '{print $2}' "$manifest" | LC_ALL=C sort)
+  [ "$expected_names" = "$actual_names" ] || {
+    echo "Staged runtime manifest does not contain the exact reviewed asset set." >&2
+    return 1
+  }
+}
+
+validate_stage() {
+  validate_manifest
+  manifest=$stage/MANIFEST
+  while read -r asset; do
+    test -f "$stage/$asset" && test ! -L "$stage/$asset" || return 1
+  done < <(asset_names)
+  (cd "$stage" && sha256sum -c --strict MANIFEST)
+
+  bash -n \
+    "$stage/render-runtime-env" \
+    "$stage/duducar-stack" \
+    "$stage/duducar-command" \
+    "$stage/duducar-alert" \
+    "$stage/duducar-host-health" \
+    "$stage/postgres-init-roles.sh"
+  python_cache=$(mktemp -d)
+  PYTHONPYCACHEPREFIX=$python_cache python3 -m py_compile \
+    "$stage/duducar-backup-verify" \
+    "$stage/duducar-credential-broker"
+  rm -rf -- "$python_cache"
+  systemd-analyze verify \
+    "$stage/duducar.service" \
+    "$stage/duducar-credential-broker.service" \
+    "$stage/duducar-command@.service" \
+    "$stage/duducar-alert@.service" \
+    "$stage"/*.timer
+  # The exact digest is an input allowed by Terraform's document. Caching it is
+  # the only validate-mode mutation and makes first-host validation possible.
+  docker pull "$caddy_image" >/dev/null
+  docker image inspect "$caddy_image" >/dev/null
   docker run --rm \
     --network none \
     --read-only \
@@ -107,128 +166,205 @@ validate_caddy() {
     --security-opt no-new-privileges:true \
     --tmpfs /data \
     --tmpfs /config \
-    --volume "$candidate:/etc/caddy/Caddyfile:ro" \
+    --volume "$stage/Caddyfile.post-cutover:/etc/caddy/Caddyfile:ro" \
     "$caddy_image" \
     caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
 }
 
-if [ "$mode" != rollback ]; then
-  [[ "$caddy_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
-    echo "CaddyImage must be pinned by SHA-256 digest." >&2
-    exit 2
-  }
-  printf '%s  %s\n' \
-    "$reviewed_caddy_sha" "$reviewed_caddy" \
-    "$reviewed_renderer_sha" "$reviewed_renderer" |
-    sha256sum -c -
-  bash -n "$reviewed_renderer"
-  docker image inspect "$caddy_image" >/dev/null
-  validate_caddy "$reviewed_caddy"
-  sha256sum "$reviewed_caddy" "$reviewed_renderer"
+manifest_digest() {
+  asset=$1
+  awk -v asset="$asset" '$2 == asset { print $1 }' "$stage/MANIFEST"
+}
 
-  if [ "$mode" = validate ]; then
-    echo "Validation-only mode complete for $commit operation $operation_id; no host files changed."
-    exit 0
+secure_regular_target() {
+  target=$1
+  test -f "$target" && test ! -L "$target" && [ "$(stat -c '%U:%G' "$target")" = root:root ]
+}
+
+targets_match_stage() {
+  while read -r asset; do
+    target=$(asset_target "$asset")
+    secure_regular_target "$target" || return 1
+    [ "$(file_sha256 "$target")" = "$(file_sha256 "$stage/$asset")" ] || return 1
+    expected_mode=$(asset_mode "$asset")
+    [ "$(stat -c '%a' "$target")" = "${expected_mode#0}" ] || return 1
+  done < <(asset_names)
+}
+
+targets_match_manifest() {
+  while read -r asset; do
+    target=$(asset_target "$asset")
+    secure_regular_target "$target" || return 1
+    [ "$(file_sha256 "$target")" = "$(manifest_digest "$asset")" ] || return 1
+    expected_mode=$(asset_mode "$asset")
+    [ "$(stat -c '%a' "$target")" = "${expected_mode#0}" ] || return 1
+  done < <(asset_names)
+}
+
+verify_backup() {
+  test -d "$backup_dir" && test ! -L "$backup_dir" || return 1
+  [ "$(stat -c '%U:%G %a' "$backup_dir")" = 'root:root 700' ] || return 1
+  for file in STATE REQUEST.sha256; do
+    test -f "$backup_dir/$file" && test ! -L "$backup_dir/$file" || return 1
+    [ "$(stat -c '%U:%G %a' "$backup_dir/$file")" = 'root:root 400' ] || return 1
+  done
+  [ "$(tr -d '\n' < "$backup_dir/REQUEST.sha256")" = "$(request_sha256)" ] || return 1
+  while IFS='|' read -r disposition mode asset digest; do
+    asset_target "$asset" >/dev/null || return 1
+    case "$disposition" in
+      absent)
+        [ "$mode" = - ] && [ "$digest" = - ] || return 1
+        ;;
+      present)
+        [[ "$mode" =~ ^[0-7]{3,4}$ ]] || return 1
+        [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+        backup_file=$backup_dir/files/$asset
+        secure_regular_target "$backup_file" || return 1
+        [ "$(stat -c '%a' "$backup_file")" = 600 ] || return 1
+        [ "$(file_sha256 "$backup_file")" = "$digest" ] || return 1
+        ;;
+      *) return 1 ;;
+    esac
+  done < "$backup_dir/STATE"
+  [ "$(wc -l < "$backup_dir/STATE")" -eq "$(asset_names | wc -l)" ]
+}
+
+targets_match_backup() {
+  while IFS='|' read -r disposition mode asset digest; do
+    target=$(asset_target "$asset")
+    if [ "$disposition" = absent ]; then
+      ! test -e "$target" && ! test -L "$target" || return 1
+    else
+      secure_regular_target "$target" || return 1
+      [ "$(stat -c '%a' "$target")" = "$mode" ] || return 1
+      [ "$(file_sha256 "$target")" = "$digest" ] || return 1
+    fi
+  done < "$backup_dir/STATE"
+}
+
+create_backup() {
+  install -d -o root -g root -m 0700 "$backup_root"
+  pending_backup=$(mktemp -d "$backup_root/.$commit-$operation_id.XXXXXX")
+  install -d -o root -g root -m 0700 "$pending_backup/files"
+  : > "$pending_backup/STATE"
+  while read -r asset; do
+    target=$(asset_target "$asset")
+    if test -e "$target" || test -L "$target"; then
+      secure_regular_target "$target" || {
+        echo "Runtime target is not a root-owned regular file: $target" >&2
+        return 1
+      }
+      target_mode=$(stat -c '%a' "$target")
+      digest=$(file_sha256 "$target")
+      install -o root -g root -m 0600 "$target" "$pending_backup/files/$asset"
+      printf 'present|%s|%s|%s\n' "$target_mode" "$asset" "$digest" >> "$pending_backup/STATE"
+    else
+      printf 'absent|-|%s|-\n' "$asset" >> "$pending_backup/STATE"
+    fi
+  done < <(asset_names)
+  printf '%s\n' "$(request_sha256)" > "$pending_backup/REQUEST.sha256"
+  chmod 0400 "$pending_backup/STATE" "$pending_backup/REQUEST.sha256"
+  chmod 0700 "$pending_backup"
+  mv -- "$pending_backup" "$backup_dir"
+  pending_backup=
+  verify_backup
+}
+
+install_file_atomically() {
+  source_file=$1
+  target=$2
+  mode=$3
+  install -d -o root -g root -m 0755 "$(dirname "$target")"
+  temporary=$(mktemp "$(dirname "$target")/.duducar-runtime.XXXXXX")
+  install -o root -g root -m "$mode" "$source_file" "$temporary"
+  mv -f -- "$temporary" "$target"
+}
+
+restore_backup() {
+  verify_backup
+  while IFS='|' read -r disposition mode asset _digest; do
+    target=$(asset_target "$asset")
+    if [ "$disposition" = absent ]; then
+      rm -f -- "$target"
+    else
+      install_file_atomically "$backup_dir/files/$asset" "$target" "$mode"
+    fi
+  done < "$backup_dir/STATE"
+  systemctl daemon-reload
+  targets_match_backup
+}
+
+cleanup() {
+  status=$?
+  set +e
+  if [ "$rollback_needed" -eq 1 ]; then
+    echo "Runtime asset installation failed; restoring the complete operation backup." >&2
+    restore_backup || status=1
   fi
+  [ -z "$pending_backup" ] || rm -rf -- "$pending_backup"
+  exit "$status"
+}
+trap cleanup EXIT
+
+if [ "$mode" = assert ]; then
+  validate_manifest
+  targets_match_manifest || {
+    echo "Installed runtime files do not match the reviewed bundle manifest." >&2
+    exit 1
+  }
+  echo "Installed runtime bundle matches the reviewed manifest."
+  exit 0
 fi
 
-test -f "$caddy_target"
-test -f "$renderer_target"
+validate_stage
+if [ "$mode" = validate ]; then
+  echo "Runtime bundle validation complete for $commit operation $operation_id; no host files changed."
+  exit 0
+fi
+
 command -v flock >/dev/null
-exec 9>/var/lock/duducar-runtime-assets.lock
+install -d -o root -g root -m 0700 "$backup_root"
+exec 9>"$backup_root/.runtime-assets.lock"
+chmod 0600 "$backup_root/.runtime-assets.lock"
 flock -n 9 || {
   echo "Another runtime asset operation is active; no files changed." >&2
   exit 1
 }
 
 if [ "$mode" = rollback ]; then
-  test -d "$backup_dir"
-  (cd "$backup_dir" && sha256sum -c SHA256SUMS)
-  caddy_image=$(<"$backup_dir/CADDY_IMAGE")
-  [[ "$caddy_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
-    echo "Recorded rollback Caddy image is not digest-pinned." >&2
-    exit 1
-  }
-  docker image inspect "$caddy_image" >/dev/null
-  bash -n "$backup_dir/render-duducar-runtime-env"
-  validate_caddy "$backup_dir/Caddyfile.post-cutover"
-  backup_caddy_sha=$(file_sha256 "$backup_dir/Caddyfile.post-cutover")
-  backup_renderer_sha=$(file_sha256 "$backup_dir/render-duducar-runtime-env")
-  if targets_match "$backup_caddy_sha" "$backup_renderer_sha"; then
-    echo "Operation $operation_id is already rolled back; no files changed."
+  verify_backup
+  if targets_match_backup; then
+    echo "Runtime bundle operation $operation_id is already rolled back; no files changed."
     exit 0
   fi
-  targets_match "$reviewed_caddy_sha" "$reviewed_renderer_sha" || {
+  targets_match_stage || {
     echo "Current runtime assets do not match this installation; refusing stale rollback." >&2
     exit 1
   }
-  install_caddy_source=$backup_dir/Caddyfile.post-cutover
-  install_renderer_source=$backup_dir/render-duducar-runtime-env
-  expected_caddy_sha=$backup_caddy_sha
-  expected_renderer_sha=$backup_renderer_sha
-else
-  if [ -d "$backup_dir" ]; then
-    (cd "$backup_dir" && sha256sum -c SHA256SUMS)
-    backup_caddy_sha=$(file_sha256 "$backup_dir/Caddyfile.post-cutover")
-    backup_renderer_sha=$(file_sha256 "$backup_dir/render-duducar-runtime-env")
-    if targets_match "$reviewed_caddy_sha" "$reviewed_renderer_sha"; then
-      echo "Operation $operation_id is already installed; no files changed."
-      exit 0
-    fi
-    targets_match "$backup_caddy_sha" "$backup_renderer_sha" || {
-      echo "Operation backup does not match current files; refusing stale retry." >&2
-      exit 1
-    }
-  elif [ -e "$backup_dir" ]; then
-    echo "Runtime backup path exists but is not a directory." >&2
-    exit 1
-  else
-    running_caddy_image=$(docker inspect duducar-caddy | jq -er '.[0].Config.Image')
-    [[ "$running_caddy_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
-      echo "Running Caddy container is not pinned by SHA-256 digest." >&2
-      exit 1
-    }
-    docker image inspect "$running_caddy_image" >/dev/null
-    backup_root=$(dirname "$backup_dir")
-    install -d -o root -g root -m 0700 "$backup_root"
-    pending_backup=$(mktemp -d "$backup_root/.$commit-$operation_id.XXXXXX")
-    install -o root -g root -m 0644 \
-      "$caddy_target" "$pending_backup/Caddyfile.post-cutover"
-    install -o root -g root -m 0755 \
-      "$renderer_target" "$pending_backup/render-duducar-runtime-env"
-    printf '%s\n' "$running_caddy_image" > "$pending_backup/CADDY_IMAGE"
-    chmod 0400 "$pending_backup/CADDY_IMAGE"
-    (
-      cd "$pending_backup"
-      sha256sum \
-        Caddyfile.post-cutover \
-        render-duducar-runtime-env \
-        CADDY_IMAGE > SHA256SUMS
-      chmod 0400 SHA256SUMS
-    )
-    mv -- "$pending_backup" "$backup_dir"
-    pending_backup=''
-    (cd "$backup_dir" && sha256sum -c SHA256SUMS)
-  fi
-  install_caddy_source=$reviewed_caddy
-  install_renderer_source=$reviewed_renderer
-  expected_caddy_sha=$reviewed_caddy_sha
-  expected_renderer_sha=$reviewed_renderer_sha
+  restore_backup
+  echo "Runtime bundle rollback completed for $commit operation $operation_id; services were not restarted."
+  exit 0
 fi
 
-caddy_temp=$(mktemp /etc/duducar/.Caddyfile.post-cutover.XXXXXX)
-renderer_temp=$(mktemp /usr/local/sbin/.render-duducar-runtime-env.XXXXXX)
-install -o root -g root -m 0644 "$install_caddy_source" "$caddy_temp"
-install -o root -g root -m 0755 "$install_renderer_source" "$renderer_temp"
+if test -e "$backup_dir" || test -L "$backup_dir"; then
+  verify_backup
+  if targets_match_stage; then
+    echo "Runtime bundle operation $operation_id is already installed; no files changed."
+    exit 0
+  fi
+  targets_match_backup || {
+    echo "Operation backup does not match current files; refusing stale retry." >&2
+    exit 1
+  }
+else
+  create_backup
+fi
+
 rollback_needed=1
-mv -f -- "$caddy_temp" "$caddy_target"
-caddy_temp=''
-mv -f -- "$renderer_temp" "$renderer_target"
-renderer_temp=''
-printf '%s  %s\n' \
-  "$expected_caddy_sha" "$caddy_target" \
-  "$expected_renderer_sha" "$renderer_target" |
-  sha256sum -c -
+while read -r asset; do
+  install_file_atomically "$stage/$asset" "$(asset_target "$asset")" "$(asset_mode "$asset")"
+done < <(asset_names)
+systemctl daemon-reload
+targets_match_stage
 rollback_needed=0
-sha256sum "$caddy_target" "$renderer_target"
-echo "Runtime asset mode $mode completed for $commit operation $operation_id; services were not restarted."
+echo "Runtime bundle install completed for $commit operation $operation_id; services were not restarted or enabled."

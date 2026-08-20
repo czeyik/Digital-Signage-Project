@@ -29,7 +29,6 @@ sidecar_path="$archive_dir/$sidecar_name"
 media_path="$archive_dir/selected-normalized-media"
 
 download_and_verify() {
-  # Validate the recovery Docker root before inspecting the archive.
   /usr/local/sbin/duducar-recovery-stack database
   install -d -o root -g root -m 0700 "$archive_dir"
   rm -f "$archive_path" "$sidecar_path"
@@ -157,8 +156,6 @@ restore_logical() {
   /usr/local/sbin/duducar-recovery-stack stop
   /usr/local/sbin/duducar-recovery-stack database
 
-  # This is the literal cloned database only. The source snapshot and live
-  # production database are never attached to this host.
   docker exec --user postgres duducar-recovery-postgres \
     psql -X --set ON_ERROR_STOP=1 --username duducar_admin --dbname postgres \
     --command 'DROP DATABASE signage WITH (FORCE)' \

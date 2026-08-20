@@ -21,8 +21,8 @@ from signage.media_dispatch import (
     dispatch_media_processing,
     queue_media_processing,
 )
-from signage.models import Alert, ApiThrottle, MediaAsset, User
-from signage.services import delete_media_binary, inspect_media
+from signage.models import Alert, ApiThrottle, MediaAsset, MediaDeletion, User
+from signage.services import delete_media_binary, inspect_media, process_media_deletion
 
 ECS_DISPATCH_SETTINGS = {
     "DEPLOYMENT_ENV": "production",
@@ -94,7 +94,7 @@ def test_dispatch_runs_one_task_for_exact_asset_uuid(monkeypatch):
     assert ApiThrottle.objects.get(key_hash=DISPATCH_BUDGET_KEY).attempts == 1
     assert calls[0]["overrides"]["containerOverrides"][0]["command"] == [
         "sh",
-        "worker-entrypoint.sh",
+        "worker-entrypoint-root-init.sh",
         "--asset-id",
         str(asset.id),
     ]
@@ -618,6 +618,8 @@ def test_deletion_invalidates_worker_and_discards_its_staged_output(
     assert asset.status == MediaAsset.Status.ARCHIVED
     assert asset.processing_token is None
     assert asset.processing_lease_expires_at is None
+    assert process_media_deletion(MediaDeletion.objects.get(asset=asset).pk)
+    asset.refresh_from_db()
     assert not asset.source_file
     assert not asset.normalized_file
     stale_name = (
@@ -627,3 +629,42 @@ def test_deletion_invalidates_worker_and_discards_its_staged_output(
         / "media.png"
     )
     assert not (tmp_path / stale_name).exists()
+
+
+@pytest.mark.django_db
+def test_media_deletion_retries_before_clearing_database_file_names(
+    tmp_path,
+    settings,
+    monkeypatch,
+):
+    settings.MEDIA_ROOT = tmp_path
+    asset = create_asset(
+        source_file=SimpleUploadedFile("source.png", png_bytes()),
+        normalized_file=SimpleUploadedFile("normalized.png", png_bytes()),
+    )
+    delete_media_binary(asset, asset.uploaded_by)
+    deletion = MediaDeletion.objects.get(asset=asset)
+    storage = asset.source_file.storage
+    original_delete = storage.delete
+
+    def fail_delete(name):
+        raise OSError("temporary object-store failure")
+
+    monkeypatch.setattr(storage, "delete", fail_delete)
+    assert process_media_deletion(deletion.pk) is False
+    asset.refresh_from_db()
+    deletion.refresh_from_db()
+    assert asset.source_file
+    assert asset.normalized_file
+    assert deletion.attempts == 1
+    assert deletion.completed_at is None
+    assert "temporary object-store failure" in deletion.last_error
+
+    monkeypatch.setattr(storage, "delete", original_delete)
+    assert process_media_deletion(deletion.pk) is True
+    asset.refresh_from_db()
+    deletion.refresh_from_db()
+    assert not asset.source_file
+    assert not asset.normalized_file
+    assert deletion.attempts == 2
+    assert deletion.completed_at is not None

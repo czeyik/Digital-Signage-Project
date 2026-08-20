@@ -14,7 +14,10 @@ python manage.py check_deployment_readiness --environment production
 
 This must confirm production hostnames, PostgreSQL, private object storage,
 secure cookies/HTTPS/proxy handling, SMTP, and media tools, with debug and
-console-only email disabled.
+console-only email disabled. The command refuses a production check unless the
+runtime itself has `DEPLOYMENT_ENV=production`; set
+`PLAY_INTEGRITY_APP_CERTIFICATE_SHA256` to the approved comma-separated APK
+certificate SHA-256 allowlist before running it.
 
 After deploying the pinned image through SSM, run:
 
@@ -49,7 +52,10 @@ sudo /usr/local/sbin/duducar-command backup
 ```
 
 Require a versioned private archive, matching SHA-256 sidecar, and a current
-completed DLM data-volume snapshot. An enabled policy is not restore evidence;
+completed remote-success receipt
+`duducar-signage-postgres-last-remote-success.json` naming both uploaded object
+version IDs and checksums, plus a current completed DLM data-volume snapshot.
+An enabled policy is not restore evidence;
 follow [`backup-restore.md`](backup-restore.md) for the recovery gate.
 
 ## Public routes and media

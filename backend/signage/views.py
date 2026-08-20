@@ -1,6 +1,6 @@
 import csv
 import hashlib
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 
 from django.conf import settings
 from django.contrib import messages
@@ -17,9 +17,9 @@ from django.contrib.auth.views import (
 )
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import connection, transaction
-from django.db.models import Count, F, Q
+from django.db.models import Count, F, OuterRef, Q, Subquery
 from django.db.models.functions import TruncDate
-from django.http import HttpResponse, JsonResponse
+from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.utils.dateparse import parse_date
@@ -43,11 +43,13 @@ from .models import (
     LoginThrottle,
     MediaAsset,
     PlatformSettings,
+    PlaybackCorrection,
     PlaybackEvent,
     Playlist,
     PlaylistItem,
 )
 from .services import (
+    active_playlist,
     audit,
     client_ip,
     delete_media_binary,
@@ -56,6 +58,7 @@ from .services import (
     open_alert,
     publish_playlist,
     reactivate_device,
+    revoke_device_credentials,
     throttle_wait,
 )
 
@@ -245,8 +248,12 @@ def dashboard(request):
     offline_before = now - timedelta(minutes=60)
     devices = Device.objects.all()
     chart_start = today - timedelta(days=6)
+    chart_start_at = timezone.make_aware(datetime.combine(chart_start, time.min))
+    tomorrow_at = timezone.make_aware(
+        datetime.combine(today + timedelta(days=1), time.min)
+    )
     chart_rows = (
-        PlaybackEvent.objects.filter(started_at__date__gte=chart_start)
+        PlaybackEvent.objects.filter(started_at__gte=chart_start_at)
         .annotate(day=TruncDate("started_at"))
         .values("day", "status")
         .annotate(total=Count("id"))
@@ -272,17 +279,11 @@ def dashboard(request):
         ),
         default=1,
     )
-    active_playlist = (
-        Playlist.objects.filter(
-            status=Playlist.Status.PUBLISHED,
-            starts_at__lte=now,
-            ends_at__gt=now,
-        )
-        .prefetch_related("items")
-        .order_by("-starts_at", "-version")
-        .first()
+    current_playlist = active_playlist()
+    today_events = PlaybackEvent.objects.filter(
+        started_at__gte=timezone.make_aware(datetime.combine(today, time.min)),
+        started_at__lt=tomorrow_at,
     )
-    today_events = PlaybackEvent.objects.filter(started_at__date=today)
     context = {
         "device_count": devices.count(),
         "active_count": devices.filter(status=Device.Status.ACTIVE).count(),
@@ -307,7 +308,7 @@ def dashboard(request):
         "today_failed_count": today_events.filter(
             status=PlaybackEvent.Status.FAILED
         ).count(),
-        "active_playlist": active_playlist,
+        "active_playlist": current_playlist,
         "published_playlist": Playlist.objects.filter(status=Playlist.Status.PUBLISHED)
         .order_by("-published_at")
         .first(),
@@ -339,7 +340,10 @@ def media_delete(request, media_id):
     except ValidationError as exc:
         messages.error(request, "; ".join(exc.messages))
     else:
-        messages.success(request, "Media binaries removed and metadata archived.")
+        messages.success(
+            request,
+            "Media archived; binary deletion is queued for durable reconciliation.",
+        )
     return redirect("media-list")
 
 
@@ -579,6 +583,7 @@ def device_reassign(request, device_id):
 @require_POST
 @transaction.atomic
 def issue_enrollment(request, device_id):
+    require_owner(request)
     device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
     if device.status == Device.Status.DISABLED:
         messages.error(request, "Reactivate the device before enrollment.")
@@ -622,14 +627,13 @@ def device_pin_reset(request, device_id):
 @require_POST
 @transaction.atomic
 def device_disable(request, device_id):
+    require_owner(request)
     device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
-    EnrollmentCode.objects.filter(device=device, used_at__isnull=True).update(
-        expires_at=timezone.now()
-    )
     disable_device(device, request.user)
     messages.success(
         request,
-        "Device disabled. It may authenticate only to receive maintenance state.",
+        "Device disabled and all credentials revoked. Reactivate and re-enroll it "
+        "only after owner review.",
     )
     return redirect("device-list")
 
@@ -637,9 +641,26 @@ def device_disable(request, device_id):
 @login_required
 @require_POST
 def device_reactivate(request, device_id):
+    require_owner(request)
     device = get_object_or_404(Device, pk=device_id)
     reactivate_device(device, request.user)
     messages.success(request, "Device explicitly reactivated.")
+    return redirect("device-list")
+
+
+@login_required
+@require_POST
+@transaction.atomic
+def device_credentials_revoke(request, device_id):
+    require_owner(request)
+    device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
+    _, credential_count = revoke_device_credentials(device, request.user)
+    messages.success(
+        request,
+        f"Revoked {credential_count} active device credential(s) and expired any "
+        "unused enrollment code. Re-enrollment is required before this player can "
+        "reconnect.",
+    )
     return redirect("device-list")
 
 
@@ -726,23 +747,51 @@ def user_list(request):
 def user_edit(request, user_id=None):
     require_owner(request)
     model = get_user_model()
+    active_owner_ids = ()
+    if request.method == "POST":
+        # Lock the complete invariant set in one stable order before locking the
+        # target row. Concurrent demotions cannot each observe the other owner
+        # and leave the dashboard without an active owner.
+        active_owner_ids = tuple(
+            model.objects.select_for_update()
+            .filter(role=model.Role.OWNER, is_active=True)
+            .order_by("pk")
+            .values_list("pk", flat=True)
+        )
     users = (
         model.objects.select_for_update()
         if request.method == "POST"
         else model.objects
     )
     user_object = get_object_or_404(users, pk=user_id) if user_id else model()
+    was_active_owner = bool(
+        user_object.pk and user_object.is_owner and user_object.is_active
+    )
     form = DashboardUserForm(request.POST or None, instance=user_object)
     if request.method == "POST" and form.is_valid():
-        saved = form.save()
-        audit(
-            request.user,
-            "user.update" if user_id else "user.create",
-            saved,
-            {"role": saved.role, "active": saved.is_active},
+        removing_active_owner = (
+            was_active_owner
+            and (
+                form.cleaned_data["role"] != model.Role.OWNER
+                or not form.cleaned_data["is_active"]
+            )
         )
-        messages.success(request, "Dashboard user saved.")
-        return redirect("user-list")
+        if removing_active_owner:
+            if not any(owner_id != user_object.pk for owner_id in active_owner_ids):
+                form.add_error(
+                    None,
+                    "At least one active account owner must remain.",
+                )
+        if not form.errors:
+            saved = form.save()
+            audit(
+                request.user,
+                "user.update" if user_id else "user.create",
+                saved,
+                {"role": saved.role, "active": saved.is_active},
+            )
+            messages.success(request, "Dashboard user saved.")
+            return redirect("user-list")
     return render(
         request,
         "signage/form.html",
@@ -752,6 +801,17 @@ def user_edit(request, user_id=None):
 
 @login_required
 def playback_report_csv(request):
+    class Echo:
+        def write(self, value):
+            return value
+
+    def csv_cell(value):
+        if isinstance(value, str) and value.lstrip(" \t\r\n\v\f\x00").startswith(
+            ("=", "+", "-", "@")
+        ):
+            return f"'{value}"
+        return value
+
     events = (
         PlaybackEvent.objects.select_related(
             "batch__device",
@@ -760,7 +820,13 @@ def playback_report_csv(request):
             "batch__playlist",
             "playlist_item__media",
         )
-        .prefetch_related("corrections")
+        .annotate(
+            latest_correction_status=Subquery(
+                PlaybackCorrection.objects.filter(event_id=OuterRef("pk"))
+                .order_by("-created_at")
+                .values("replacement_status")[:1]
+            )
+        )
         .order_by("-started_at")
     )
     filters = {
@@ -775,70 +841,95 @@ def playback_report_csv(request):
         value = request.GET.get(parameter, "").strip()
         if value:
             events = events.filter(**{lookup: value})
-    for parameter, lookup in (
-        ("date_from", "started_at__date__gte"),
-        ("date_to", "started_at__date__lte"),
-    ):
+    for parameter, is_start in (("date_from", True), ("date_to", False)):
         raw_date = request.GET.get(parameter, "").strip()
         if raw_date:
             parsed_date = parse_date(raw_date)
             if not parsed_date:
                 return HttpResponse(f"Invalid {parameter}; use YYYY-MM-DD.", status=400)
-            events = events.filter(**{lookup: parsed_date})
+            boundary = timezone.make_aware(
+                datetime.combine(
+                    parsed_date + (timedelta(days=1) if not is_start else timedelta()),
+                    time.min,
+                )
+            )
+            if is_start:
+                events = events.filter(started_at__gte=boundary)
+            else:
+                events = events.filter(started_at__lt=boundary)
     offline = request.GET.get("offline", "").lower()
     if offline in {"true", "false"}:
         events = events.filter(batch__captured_offline=offline == "true")
+    events = events[: settings.CSV_EXPORT_MAX_ROWS]
     AuditEvent.objects.create(
         actor=request.user,
         action="report.playback.export",
         target_type="playback_event",
         target_id="csv",
-        metadata={"row_count": events.count()},
+        metadata={
+            "filters": {
+                parameter: request.GET.get(parameter, "")
+                for parameter in (*filters, "date_from", "date_to", "offline")
+                if request.GET.get(parameter, "")
+            },
+            "max_rows": settings.CSV_EXPORT_MAX_ROWS,
+        },
     )
-    response = HttpResponse(content_type="text/csv")
+    response = StreamingHttpResponse(content_type="text/csv")
     response["Content-Disposition"] = 'attachment; filename="proof-of-play.csv"'
-    writer = csv.writer(response)
-    writer.writerow(
-        [
-            "event_id",
-            "device",
-            "vehicle",
-            "driver_internal_id",
-            "playlist",
-            "media",
-            "started_at",
-            "status",
-            "duration_ms",
-            "captured_offline",
-            "report_state",
-            "latest_correction_status",
-            "failure_category",
-            "evidence_notice",
-        ]
-    )
     evidence_notice = (
         "Commercially useful evidence; not independently audited or tamper-proof."
     )
-    for event in events.iterator(chunk_size=500):
-        assignment = event.batch.assignment
-        latest_correction = event.corrections.order_by("-created_at").first()
-        final_at = max(event.started_at, event.batch.received_at) + timedelta(days=7)
-        writer.writerow(
+    exported_at = timezone.now()
+
+    def rows():
+        writer = csv.writer(Echo())
+        yield writer.writerow(
             [
-                event.id,
-                event.batch.device.label,
-                assignment.vehicle.registration if assignment else "",
-                assignment.driver.internal_id if assignment else "",
-                str(event.batch.playlist),
-                event.playlist_item.media.title,
-                event.started_at.isoformat(),
-                event.status,
-                event.duration_ms,
-                event.batch.captured_offline,
-                "final" if timezone.now() >= final_at else "provisional",
-                latest_correction.replacement_status if latest_correction else "",
-                event.failure_reason,
-                evidence_notice,
+                "event_id",
+                "device",
+                "vehicle",
+                "driver_internal_id",
+                "playlist",
+                "media",
+                "started_at",
+                "status",
+                "duration_ms",
+                "captured_offline",
+                "report_state",
+                "latest_correction_status",
+                "failure_category",
+                "evidence_notice",
             ]
         )
+        for event in events.iterator(chunk_size=500):
+            assignment = event.batch.assignment
+            final_at = max(event.started_at, event.batch.received_at) + timedelta(
+                days=7
+            )
+            yield writer.writerow(
+                [
+                    *(
+                        csv_cell(value)
+                        for value in (
+                            str(event.id),
+                            event.batch.device.label,
+                            assignment.vehicle.registration if assignment else "",
+                            assignment.driver.internal_id if assignment else "",
+                            str(event.batch.playlist),
+                            event.playlist_item.media.title,
+                            event.started_at.isoformat(),
+                            event.status,
+                            event.duration_ms,
+                            event.batch.captured_offline,
+                            "final" if exported_at >= final_at else "provisional",
+                            event.latest_correction_status or "",
+                            event.failure_reason,
+                            evidence_notice,
+                        )
+                    ),
+                ]
+            )
+
+    response.streaming_content = rows()
     return response

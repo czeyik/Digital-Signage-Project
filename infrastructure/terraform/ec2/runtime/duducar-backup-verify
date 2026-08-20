@@ -1,0 +1,251 @@
+#!/usr/bin/python3
+"""Verify versioned remote backup objects and maintain a root-only receipt."""
+
+import base64
+import hashlib
+import json
+import os
+import re
+import stat
+import subprocess
+import tempfile
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+BACKUP_ROOT = Path("/srv/duducar/backups")
+RECEIPT = Path("/var/lib/duducar-backups/latest-remote.json")
+TOKEN_PATH = Path("/run/duducar/backend-secrets/aws-credentials-token")
+BROKER_URL = "http://169.254.170.2:51679/v2/credentials"
+BROKER_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+ARCHIVE_PATTERN = re.compile(r"^duducar-signage-postgres-[0-9]{8}T[0-9]{6}Z\.dump$")
+DIGEST_PATTERN = re.compile(r"^([0-9a-f]{64})  ([^/\n]+)\n$")
+
+
+def secure_file(path, expected_uid, mode):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise RuntimeError(f"Unsafe non-regular file: {path}")
+    if metadata.st_uid != expected_uid or stat.S_IMODE(metadata.st_mode) != mode:
+        os.close(descriptor)
+        raise RuntimeError(f"Unsafe ownership or mode: {path}")
+    return descriptor
+
+
+def application_credentials():
+    descriptor = secure_file(TOKEN_PATH, 10001, 0o400)
+    with os.fdopen(descriptor, encoding="ascii") as handle:
+        token = handle.read().strip()
+    request = urllib.request.Request(BROKER_URL, headers={"Authorization": token})
+    # Never send the host-only bearer credential through environment-configured
+    # HTTP proxies.
+    with BROKER_OPENER.open(request, timeout=10) as response:
+        document = json.load(response)
+    return {
+        "AWS_ACCESS_KEY_ID": document["AccessKeyId"],
+        "AWS_SECRET_ACCESS_KEY": document["SecretAccessKey"],
+        "AWS_SESSION_TOKEN": document["Token"],
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+
+
+def aws(arguments, credentials, output_file=None):
+    command = ["/usr/bin/aws", *arguments]
+    if output_file is not None:
+        command.append(str(output_file))
+    result = subprocess.run(
+        command,
+        check=True,
+        capture_output=True,
+        env={**os.environ, **credentials},
+        text=True,
+        timeout=60,
+    )
+    return json.loads(result.stdout or "{}")
+
+
+def object_head(bucket, key, credentials, version_id=None):
+    arguments = [
+        "s3api",
+        "head-object",
+        "--bucket",
+        bucket,
+        "--key",
+        key,
+        "--checksum-mode",
+        "ENABLED",
+    ]
+    if version_id:
+        arguments.extend(["--version-id", version_id])
+    return aws(arguments, credentials)
+
+
+def checked_version(document, label, expected_sha256):
+    version_id = document.get("VersionId")
+    if not isinstance(version_id, str) or not version_id or version_id == "null":
+        raise RuntimeError(f"{label} does not have a concrete S3 version ID.")
+    if document.get("ServerSideEncryption") != "aws:kms":
+        raise RuntimeError(f"{label} is not encrypted with AWS KMS.")
+    expected_checksum = base64.b64encode(bytes.fromhex(expected_sha256)).decode("ascii")
+    if document.get("ChecksumSHA256") != expected_checksum:
+        raise RuntimeError(f"{label} does not have the expected S3 SHA-256 checksum.")
+    return version_id
+
+
+def local_backup():
+    archives = []
+    with os.scandir(BACKUP_ROOT) as entries:
+        for entry in entries:
+            if entry.is_file(follow_symlinks=False) and ARCHIVE_PATTERN.fullmatch(entry.name):
+                archives.append((Path(entry.path), entry.stat(follow_symlinks=False)))
+    if not archives:
+        raise RuntimeError("No local PostgreSQL archive is available to verify.")
+    archive, archive_stat = max(archives, key=lambda item: item[1].st_mtime_ns)
+    sidecar = archive.with_suffix(".dump.sha256")
+    sidecar_descriptor = secure_file(sidecar, 10001, 0o600)
+    with os.fdopen(sidecar_descriptor, encoding="ascii") as handle:
+        sidecar_text = handle.read()
+    match = DIGEST_PATTERN.fullmatch(sidecar_text)
+    if not match or match.group(2) != archive.name:
+        raise RuntimeError("Local backup sidecar is malformed or names another archive.")
+    archive_descriptor = secure_file(archive, 10001, 0o600)
+    digest_builder = hashlib.sha256()
+    with os.fdopen(archive_descriptor, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest_builder.update(chunk)
+    digest = digest_builder.hexdigest()
+    if digest != match.group(1):
+        raise RuntimeError("Local backup archive does not match its SHA-256 sidecar.")
+    return archive, sidecar, digest, archive_stat.st_size
+
+
+def verify_remote_sidecar(bucket, key, version_id, expected, credentials):
+    descriptor, temporary_name = tempfile.mkstemp(prefix="duducar-sidecar-remote.")
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        aws(
+            [
+                "s3api",
+                "get-object",
+                "--bucket",
+                bucket,
+                "--key",
+                key,
+                "--version-id",
+                version_id,
+            ],
+            credentials,
+            output_file=temporary,
+        )
+        if temporary.read_bytes() != expected:
+            raise RuntimeError("Remote backup sidecar content differs from the verified digest.")
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_receipt(document):
+    RECEIPT.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    parent_metadata = os.lstat(RECEIPT.parent)
+    if not stat.S_ISDIR(parent_metadata.st_mode) or parent_metadata.st_uid != 0:
+        raise RuntimeError("Remote backup receipt directory is unsafe.")
+    os.chmod(RECEIPT.parent, 0o700)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=".latest-remote.", dir=RECEIPT.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, RECEIPT)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def record(bucket, credentials):
+    archive, sidecar, digest, archive_size = local_backup()
+    archive_key = f"database-backups/{archive.name}"
+    sidecar_key = f"database-backups/{sidecar.name}"
+    archive_head = object_head(bucket, archive_key, credentials)
+    sidecar_head = object_head(bucket, sidecar_key, credentials)
+    expected_sidecar = f"{digest}  {archive.name}\n".encode("ascii")
+    sidecar_digest = hashlib.sha256(expected_sidecar).hexdigest()
+    archive_version = checked_version(archive_head, "Remote archive", digest)
+    sidecar_version = checked_version(sidecar_head, "Remote sidecar", sidecar_digest)
+    if archive_head.get("ContentLength") != archive_size:
+        raise RuntimeError("Remote archive size differs from the local verified archive.")
+    if archive_head.get("Metadata", {}).get("sha256") != digest:
+        raise RuntimeError("Remote archive SHA-256 metadata is absent or mismatched.")
+    verify_remote_sidecar(bucket, sidecar_key, sidecar_version, expected_sidecar, credentials)
+    write_receipt(
+        {
+            "archive_key": archive_key,
+            "archive_size": archive_size,
+            "archive_version_id": archive_version,
+            "bucket": bucket,
+            "sha256": digest,
+            "sidecar_key": sidecar_key,
+            "sidecar_sha256": sidecar_digest,
+            "sidecar_version_id": sidecar_version,
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+
+def check(bucket, credentials):
+    descriptor = secure_file(RECEIPT, 0, 0o600)
+    with os.fdopen(descriptor, encoding="utf-8") as handle:
+        receipt = json.load(handle)
+    if receipt.get("bucket") != bucket:
+        raise RuntimeError("Remote backup receipt names another bucket.")
+    verified_at = datetime.fromisoformat(receipt["verified_at"]).astimezone(timezone.utc)
+    maximum_age = int(os.environ.get("HOST_BACKUP_MAX_AGE_SECONDS", "108000"))
+    if (datetime.now(timezone.utc) - verified_at).total_seconds() > maximum_age:
+        raise RuntimeError("Remote backup receipt is stale.")
+    archive_head = object_head(
+        bucket,
+        receipt["archive_key"],
+        credentials,
+        receipt["archive_version_id"],
+    )
+    sidecar_head = object_head(
+        bucket,
+        receipt["sidecar_key"],
+        credentials,
+        receipt["sidecar_version_id"],
+    )
+    checked_version(archive_head, "Recorded archive", receipt["sha256"])
+    checked_version(sidecar_head, "Recorded sidecar", receipt["sidecar_sha256"])
+    if archive_head.get("ContentLength") != receipt["archive_size"]:
+        raise RuntimeError("Recorded remote archive size changed.")
+    if archive_head.get("Metadata", {}).get("sha256") != receipt["sha256"]:
+        raise RuntimeError("Recorded remote archive digest metadata changed.")
+    expected = f"{receipt['sha256']}  {Path(receipt['archive_key']).name}\n".encode("ascii")
+    verify_remote_sidecar(
+        bucket,
+        receipt["sidecar_key"],
+        receipt["sidecar_version_id"],
+        expected,
+        credentials,
+    )
+
+
+def main():
+    mode = os.sys.argv[1] if len(os.sys.argv) == 2 else ""
+    if mode not in {"record", "check"}:
+        raise SystemExit("Usage: duducar-backup-verify {record|check}")
+    bucket = os.environ.get("PILOT_BACKUP_S3_BUCKET", "").strip()
+    if not bucket:
+        raise RuntimeError("PILOT_BACKUP_S3_BUCKET is required.")
+    credentials = application_credentials()
+    (record if mode == "record" else check)(bucket, credentials)
+    print(f"Remote backup {mode} verification passed.")
+
+
+if __name__ == "__main__":
+    main()

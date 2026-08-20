@@ -9,6 +9,7 @@ from rest_framework import exceptions
 
 from signage.models import (
     Device,
+    DeviceAccessToken,
     DeviceAssignment,
     DeviceCredential,
     Driver,
@@ -21,6 +22,12 @@ from signage.models import (
 )
 from signage.services import issue_kiosk_pin
 
+HARDWARE_DETAILS = {
+    "hardware_model": "Canary Tablet",
+    "firmware_version": "pilot-build-1",
+    "security_patch_level": "2026-08-05",
+}
+
 
 def enrollment_fixture():
     owner = User.objects.create_user(
@@ -32,6 +39,7 @@ def enrollment_fixture():
         model_name="Canary Tablet",
         firmware_version="pilot-build-1",
         android_version="12",
+        security_patch_level=HARDWARE_DETAILS["security_patch_level"],
         tested_by=owner,
         test_date=timezone.localdate(),
         evidence_reference="restricted/hardware/canary-tablet",
@@ -76,11 +84,36 @@ def test_production_challenge_requires_approved_hardware(client):
             "android_id": "unqualified-device",
             "android_version": "12",
             "app_version": "0.1.0",
+            **HARDWARE_DETAILS,
         },
         content_type="application/json",
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+@override_settings(
+    DEPLOYMENT_ENV="production",
+    PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
+)
+def test_production_challenge_rejects_approved_device_hardware_mismatch(client):
+    _, raw_code = enrollment_fixture()
+
+    response = client.post(
+        reverse("device-enrollment-challenge"),
+        {
+            "code": raw_code,
+            "android_id": "mismatched-device",
+            "android_version": "12",
+            "app_version": "0.1.0",
+            **{**HARDWARE_DETAILS, "firmware_version": "unexpected-build"},
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+    assert not EnrollmentChallenge.objects.exists()
 
 
 @pytest.mark.django_db
@@ -99,6 +132,7 @@ def test_production_enrollment_requires_verified_single_use_challenge(
             "android_id": "integrity-device",
             "android_version": "12",
             "app_version": "0.1.0",
+            **HARDWARE_DETAILS,
         },
         content_type="application/json",
     )
@@ -140,6 +174,7 @@ def test_device_disabled_after_challenge_cannot_finish_enrollment(client, monkey
             "android_id": "disabled-after-challenge",
             "android_version": "12",
             "app_version": "0.1.0",
+            **HARDWARE_DETAILS,
         },
         content_type="application/json",
     )
@@ -183,6 +218,7 @@ def test_failed_integrity_does_not_consume_enrollment(client, monkeypatch):
             "android_id": "integrity-device",
             "android_version": "12",
             "app_version": "0.1.0",
+            **HARDWARE_DETAILS,
         },
         content_type="application/json",
     )
@@ -217,6 +253,7 @@ def test_expired_integrity_challenge_is_rejected_without_consuming_code(client):
             "android_id": "integrity-device",
             "android_version": "12",
             "app_version": "0.1.0",
+            **HARDWARE_DETAILS,
         },
         content_type="application/json",
     )
@@ -296,6 +333,36 @@ def test_issuing_a_new_enrollment_code_expires_the_previous_code():
     first.refresh_from_db()
     assert first.is_usable is False
     assert second.is_usable is True
+
+
+@pytest.mark.django_db
+def test_enrollment_code_retries_a_global_six_digit_collision(monkeypatch):
+    device, _ = enrollment_fixture()
+    owner = EnrollmentCode.objects.get(device=device).created_by
+    other_device = Device.objects.create(label="COLLISION-OTHER")
+    other_driver = Driver.objects.create(internal_id="COLLISION", name="Example")
+    other_vehicle = Vehicle.objects.create(registration="COLLIDE1")
+    DeviceAssignment.objects.create(
+        device=other_device,
+        driver=other_driver,
+        vehicle=other_vehicle,
+    )
+    issue_kiosk_pin(other_device, owner)
+    EnrollmentCode.objects.create(
+        device=other_device,
+        code_hash=token_hash("000001"),
+        expires_at=timezone.now() + timedelta(minutes=15),
+        created_by=owner,
+    )
+    values = iter([1, 2])
+    monkeypatch.setattr(
+        "signage.models.secrets.randbelow", lambda upper: next(values)
+    )
+
+    enrollment, raw_code = EnrollmentCode.issue(device, owner)
+
+    assert raw_code == "000002"
+    assert enrollment.code_hash == token_hash(raw_code)
 
 
 @pytest.mark.django_db
@@ -597,6 +664,48 @@ def test_disablement_invalidates_enrollment_and_blocks_new_codes(client):
     assert enrollment.is_usable is False
     with pytest.raises(ValidationError, match="enabled, assigned device"):
         EnrollmentCode.issue(device, owner)
+
+
+@pytest.mark.django_db
+def test_only_owner_can_issue_or_revoke_device_credentials(client):
+    device, _ = enrollment_fixture()
+    marketing = User.objects.create_user(
+        "marketing-revoke@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    client.force_login(marketing)
+
+    issue_response = client.post(reverse("issue-enrollment", args=[device.id]))
+    revoke_response = client.post(
+        reverse("device-credentials-revoke", args=[device.id])
+    )
+
+    assert issue_response.status_code == 403
+    assert revoke_response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_owner_credential_revoke_expires_pending_enrollment_and_access(client):
+    device, _ = enrollment_fixture()
+    owner = EnrollmentCode.objects.get(device=device).created_by
+    credential, refresh_token = DeviceCredential.issue(device)
+    access, _ = DeviceAccessToken.issue(credential)
+    client.force_login(owner)
+
+    response = client.post(reverse("device-credentials-revoke", args=[device.id]))
+
+    assert response.status_code == 302
+    credential.refresh_from_db()
+    assert credential.revoked_at is not None
+    assert not DeviceAccessToken.objects.filter(pk=access.pk).exists()
+    assert EnrollmentCode.objects.get(device=device).is_usable is False
+    refresh_response = client.post(
+        reverse("device-token"),
+        {"refresh_token": refresh_token},
+        content_type="application/json",
+    )
+    assert refresh_response.status_code == 401
 
 
 @pytest.mark.django_db

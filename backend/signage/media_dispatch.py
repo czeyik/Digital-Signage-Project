@@ -403,7 +403,7 @@ def dispatch_media_processing(asset_id, *, bypass_backoff=False):
                         "name": ecs["container_name"],
                         "command": [
                             "sh",
-                            "worker-entrypoint.sh",
+                            "worker-entrypoint-root-init.sh",
                             "--asset-id",
                             str(normalized_id),
                         ],

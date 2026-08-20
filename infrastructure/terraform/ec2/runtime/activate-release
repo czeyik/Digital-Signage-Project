@@ -1,0 +1,116 @@
+#!/bin/bash
+# Validate or activate one Terraform-reviewed release. Activation is deliberately
+# separate from runtime/config installation and requires an operation-bound phrase.
+set -Eeuo pipefail
+umask 0077
+
+mode=${1:-}
+commit=${2:-}
+operation_id=${3:-}
+confirmation=${4:-}
+activation_kind=${5:-}
+backend_image=${6:-}
+postgres_image=${7:-}
+caddy_image=${8:-}
+required_app_version=${9:-}
+manifest_dir=${10:-}
+runtime_manager=${11:-}
+
+if [ "$(id -u)" -ne 0 ]; then
+  echo "Release activation must run as root." >&2
+  exit 2
+fi
+case "$mode" in validate|activate) ;; *) echo "Mode must be validate or activate." >&2; exit 2 ;; esac
+case "$activation_kind" in existing|initial-empty) ;; *) echo "ActivationKind must be existing or initial-empty." >&2; exit 2 ;; esac
+[[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+[[ "$operation_id" =~ ^[0-9a-f]{32}$ ]]
+for image in "$backend_image" "$postgres_image" "$caddy_image"; do
+  [[ "$image" =~ ^[A-Za-z0-9][A-Za-z0-9./:_-]*@sha256:[0-9a-f]{64}$ ]] || {
+    echo "Every activated image must be pinned by SHA-256 digest." >&2
+    exit 2
+  }
+done
+[[ "$required_app_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
+
+release_config=/etc/duducar/release.env
+if ! test -f "$release_config" || test -L "$release_config" || \
+  [ "$(stat -c '%U:%G' "$release_config")" != root:root ] || \
+  [ $((8#$(stat -c '%a' "$release_config") & 0022)) -ne 0 ]; then
+  echo "release.env must be a root-owned, non-writable regular file." >&2
+  exit 1
+fi
+
+assignment_value() {
+  key=$1
+  awk -v key="$key" '
+    $0 ~ ("^" key "=") { count++; value = substr($0, length(key) + 2) }
+    END { if (count != 1) exit 1; print value }
+  ' "$release_config"
+}
+
+[ "$(assignment_value BACKEND_IMAGE)" = "$backend_image" ]
+[ "$(assignment_value POSTGRES_IMAGE)" = "$postgres_image" ]
+[ "$(assignment_value CADDY_IMAGE)" = "$caddy_image" ]
+[ "$(assignment_value REQUIRED_APP_VERSION)" = "$required_app_version" ]
+[ "$(assignment_value CADDY_CONFIG)" = /etc/duducar/Caddyfile.post-cutover ]
+
+"$runtime_manager" assert "$commit" "$operation_id" "$manifest_dir" "$caddy_image"
+/usr/local/sbin/render-duducar-runtime-env
+
+if [ "$mode" = validate ]; then
+  echo "Release activation validation passed; no service or container state changed."
+  exit 0
+fi
+[ "$confirmation" = "ACTIVATE $operation_id" ] || {
+  echo "Activation requires the exact operation-bound confirmation phrase." >&2
+  exit 2
+}
+
+timers=(
+  duducar-health.timer
+  duducar-playlists.timer
+  duducar-media-reconcile.timer
+  duducar-retention.timer
+  duducar-backup.timer
+)
+traffic_changed=0
+cleanup() {
+  status=$?
+  set +e
+  if [ "$status" -ne 0 ] && [ "$traffic_changed" -eq 1 ]; then
+    systemctl stop "${timers[@]}" duducar.service
+    /usr/local/sbin/duducar-alert duducar-activation \
+      "Release activation $operation_id failed after traffic shutdown; the stack remains stopped." || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+systemctl start duducar-credential-broker.service
+if [ "$activation_kind" = existing ]; then
+  /usr/local/sbin/duducar-backup-verify check
+  /usr/local/sbin/duducar-host-health
+elif find /srv/duducar/postgres -mindepth 1 -print -quit | grep -q .; then
+  echo "Initial-empty activation requires an empty PostgreSQL data directory." >&2
+  exit 1
+fi
+
+systemctl stop "${timers[@]}" duducar.service duducar-credential-broker.service
+traffic_changed=1
+/usr/local/sbin/render-duducar-runtime-env
+systemctl start duducar-credential-broker.service
+/usr/local/sbin/duducar-stack deploy
+/usr/local/sbin/duducar-command migrate
+/usr/local/sbin/duducar-command grant-runtime
+/usr/local/sbin/duducar-command migration-check
+systemctl enable duducar-credential-broker.service duducar.service "${timers[@]}"
+systemctl start duducar.service "${timers[@]}"
+/usr/local/sbin/duducar-command readiness
+/usr/local/sbin/duducar-stack assert-release
+systemctl is-active --quiet duducar-credential-broker.service duducar.service "${timers[@]}"
+systemctl is-enabled --quiet duducar-credential-broker.service duducar.service "${timers[@]}"
+/usr/local/sbin/duducar-command backup
+/usr/local/sbin/duducar-alert --clear duducar-activation \
+  "Release activation $operation_id completed and its remote backup was verified."
+traffic_changed=0
+echo "Release activation completed with reviewed image, version, service, timer, and remote-backup assertions."

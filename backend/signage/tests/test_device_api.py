@@ -1,7 +1,9 @@
+import csv
 import gzip
 import json
 import uuid
 from datetime import timedelta
+from io import StringIO
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -92,6 +94,10 @@ def playback_payload(playlist, item, **extra):
     return payload
 
 
+def set_manifest_media_url(monkeypatch, item, url):
+    monkeypatch.setattr(item.media.normalized_file.storage, "url", lambda name: url)
+
+
 @pytest.fixture
 def provisioned_device():
     owner = User.objects.create_user(
@@ -135,11 +141,19 @@ def provisioned_device():
 
 
 @pytest.mark.django_db
-@override_settings(DEPLOYMENT_ENV="production")
+@override_settings(
+    DEPLOYMENT_ENV="production",
+    AWS_S3_CUSTOM_DOMAIN="media.example.cloudfront.net",
+)
 def test_production_sync_requires_a_current_approved_hardware_qualification(
-    client, provisioned_device
+    client, provisioned_device, monkeypatch
 ):
-    device, _, _, access = provisioned_device
+    device, _, item, access = provisioned_device
+    set_manifest_media_url(
+        monkeypatch,
+        item,
+        "https://media.example.cloudfront.net/validated/poster.png?Expires=1",
+    )
     headers = {"HTTP_AUTHORIZATION": f"Bearer {access}"}
 
     absent_qualification = client.get(reverse("device-sync"), **headers)
@@ -151,6 +165,7 @@ def test_production_sync_requires_a_current_approved_hardware_qualification(
         model_name="Qualified Canary Tablet",
         firmware_version="pilot-1",
         android_version="13",
+        security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=timezone.localdate(),
         evidence_reference="restricted/hardware/qualified-canary-tablet",
@@ -159,7 +174,18 @@ def test_production_sync_requires_a_current_approved_hardware_qualification(
     )
     qualification.save()
     device.hardware_qualification = qualification
-    device.save(update_fields=["hardware_qualification", "updated_at"])
+    device.hardware_model = qualification.model_name
+    device.hardware_firmware_version = qualification.firmware_version
+    device.hardware_security_patch = qualification.security_patch_level
+    device.save(
+        update_fields=[
+            "hardware_qualification",
+            "hardware_model",
+            "hardware_firmware_version",
+            "hardware_security_patch",
+            "updated_at",
+        ]
+    )
 
     qualified = client.get(reverse("device-sync"), **headers)
     assert qualified.status_code == 200
@@ -175,6 +201,61 @@ def test_production_sync_requires_a_current_approved_hardware_qualification(
     assert device.status == Device.Status.ACTIVE
     assert device.last_sync_at is not None
     assert DeviceCredential.objects.get(device=device).revoked_at is None
+
+
+@pytest.mark.django_db
+@override_settings(AWS_S3_CUSTOM_DOMAIN="media.example.cloudfront.net")
+def test_sync_manifest_exposes_and_enforces_the_configured_media_origin(
+    client, provisioned_device, monkeypatch
+):
+    device, _, item, access = provisioned_device
+    set_manifest_media_url(
+        monkeypatch,
+        item,
+        "https://media.example.cloudfront.net/validated/poster.png?Expires=1",
+    )
+
+    response = client.get(
+        reverse("device-sync"), HTTP_AUTHORIZATION=f"Bearer {access}"
+    )
+
+    assert response.status_code == 200
+    manifest = response.json()["playlist"]
+    assert manifest["media_origin"] == "media.example.cloudfront.net"
+    assert manifest["items"][0]["download_url"].startswith(
+        "https://media.example.cloudfront.net/"
+    )
+    device.refresh_from_db()
+    successful_sync_at = device.last_sync_at
+
+    set_manifest_media_url(
+        monkeypatch,
+        item,
+        "https://untrusted.example.test/validated/poster.png?Expires=1",
+    )
+    rejected = client.get(
+        reverse("device-sync"), HTTP_AUTHORIZATION=f"Bearer {access}"
+    )
+
+    assert rejected.status_code == 500
+    assert rejected.json()["error"]["detail"] == "Media delivery is unavailable."
+    device.refresh_from_db()
+    assert device.last_sync_at == successful_sync_at
+
+
+@pytest.mark.django_db
+@override_settings(AWS_S3_CUSTOM_DOMAIN="https://media.example.cloudfront.net")
+def test_sync_manifest_rejects_a_non_hostname_media_origin(
+    client, provisioned_device
+):
+    _, _, _, access = provisioned_device
+
+    response = client.get(
+        reverse("device-sync"), HTTP_AUTHORIZATION=f"Bearer {access}"
+    )
+
+    assert response.status_code == 500
+    assert response.json()["error"]["detail"] == "Media delivery is unavailable."
 
 
 @pytest.mark.django_db
@@ -215,6 +296,8 @@ def test_valid_gzip_playback_batch_is_idempotent(client, provisioned_device):
         "external_power_lost",
         "planned_shutdown",
         "app_restart_or_unexpected_exit",
+        "credential_rejected",
+        "server_forbidden",
     ],
 )
 def test_playback_batch_accepts_a_known_interruption_category(
@@ -236,6 +319,29 @@ def test_playback_batch_accepts_a_known_interruption_category(
     event = PlaybackBatch.objects.get().events.get()
     assert event.status == "interrupted"
     assert event.failure_reason == reason
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "reason", ["decode_failure", "missing_file", "start_timeout", "playback_timeout"]
+)
+def test_playback_batch_accepts_a_known_failure_category(
+    client, provisioned_device, reason
+):
+    _, playlist, item, access = provisioned_device
+    payload = playback_payload(playlist, item)
+    payload["events"][0].update(
+        {
+            "duration_ms": 1_000,
+            "status": "failed",
+            "failure_reason": reason,
+        }
+    )
+
+    response = post_playback_batch(client, payload, access)
+
+    assert response.status_code == 201
+    assert PlaybackBatch.objects.get().events.get().failure_reason == reason
 
 
 @pytest.mark.django_db
@@ -707,7 +813,7 @@ def test_csv_filters_preserve_driver_privacy_and_finalization_notice(
             "offline": "true",
         },
     )
-    content = report.content.decode()
+    content = b"".join(report.streaming_content).decode()
 
     assert report.status_code == 200
     assert "Example Driver" not in content
@@ -817,8 +923,34 @@ def test_invalid_device_refresh_creates_security_alert(client):
             content_type="application/json",
         )
 
-    assert response.status_code == 403
+    assert response.status_code == 401
+    assert response["WWW-Authenticate"] == "Bearer"
     assert Alert.objects.filter(code="repeated_device_authentication").exists()
+
+
+@pytest.mark.django_db
+def test_disabled_device_access_and_refresh_tokens_are_unauthorized(
+    client, provisioned_device
+):
+    device, _, _, _ = provisioned_device
+    credential, refresh_token = DeviceCredential.issue(device)
+    _, access_token = DeviceAccessToken.issue(credential)
+    Device.objects.filter(pk=device.pk).update(status=Device.Status.DISABLED)
+
+    refresh_response = client.post(
+        reverse("device-token"),
+        {"refresh_token": refresh_token},
+        content_type="application/json",
+    )
+    access_response = client.get(
+        reverse("device-sync"),
+        HTTP_AUTHORIZATION=f"Bearer {access_token}",
+    )
+
+    assert refresh_response.status_code == 401
+    assert access_response.status_code == 401
+    assert refresh_response["WWW-Authenticate"] == "Bearer"
+    assert access_response["WWW-Authenticate"] == "Bearer"
 
 
 @pytest.mark.django_db
@@ -828,14 +960,25 @@ def test_operational_event_upload_is_idempotent(client, provisioned_device):
         "id": str(uuid.uuid4()),
         "kind": "forced_queue_loss",
         "recorded_at": timezone.now().isoformat(),
-        "details": {"removed_batches": 1},
+        "details": {
+            "removed_batches": 1,
+            "estimated_removed_bytes": 1_000,
+            "target_removed_bytes": 2_000,
+        },
     }
     first = post_operational_event(client, access, payload)
     replay = post_operational_event(client, access, payload)
     altered_replay = post_operational_event(
         client,
         access,
-        {**payload, "details": {"removed_batches": 2}},
+        {
+            **payload,
+            "details": {
+                "removed_batches": 2,
+                "estimated_removed_bytes": 1_000,
+                "target_removed_bytes": 2_000,
+            },
+        },
     )
 
     assert first.status_code == 201
@@ -923,6 +1066,39 @@ def test_new_operational_event_kinds_require_their_strict_details(
 
 
 @pytest.mark.django_db
+def test_replacement_failure_event_requires_a_known_stage_and_exact_fields(
+    client, provisioned_device
+):
+    _, playlist, _, access = provisioned_device
+    payload = {
+        "id": str(uuid.uuid4()),
+        "kind": "replacement_failed",
+        "recorded_at": timezone.now().isoformat(),
+        "details": {"playlist_id": str(playlist.id), "stage": "activation"},
+    }
+
+    valid = post_operational_event(client, access, payload)
+    invalid = post_operational_event(
+        client,
+        access,
+        {
+            **payload,
+            "id": str(uuid.uuid4()),
+            "details": {"playlist_id": str(playlist.id), "stage": "retry"},
+        },
+    )
+    unexpected = post_operational_event(
+        client,
+        access,
+        {**payload, "id": str(uuid.uuid4()), "untrusted": True},
+    )
+
+    assert valid.status_code == 201
+    assert invalid.status_code == 400
+    assert unexpected.status_code == 400
+
+
+@pytest.mark.django_db
 def test_heartbeat_preserves_legacy_power_telemetry_and_allows_nulls(
     client, provisioned_device
 ):
@@ -984,6 +1160,77 @@ def test_heartbeat_rejects_non_boolean_power_telemetry(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("screen_on", "true"), ("playback_active", 1)],
+)
+def test_heartbeat_requires_boolean_display_state(
+    client, provisioned_device, field, value
+):
+    _, _, _, access = provisioned_device
+
+    response = post_heartbeat(client, access, **{field: value})
+
+    assert response.status_code == 400
+    assert field in str(response.json()["error"]["detail"])
+    assert not DeviceHeartbeat.objects.exists()
+
+
+@pytest.mark.django_db
+def test_stale_heartbeat_cannot_regress_device_aggregate_state(
+    client, provisioned_device
+):
+    device, playlist, _, access = provisioned_device
+    newer = timezone.now() - timedelta(minutes=1)
+    older = newer - timedelta(minutes=1)
+    newer_sync = newer - timedelta(seconds=10)
+    newer_playback = newer - timedelta(seconds=5)
+
+    assert post_heartbeat(
+        client,
+        access,
+        recorded_at=newer.isoformat(),
+        app_version="0.1.0",
+        android_version="13",
+        active_playlist_id=str(playlist.id),
+        last_successful_sync_at=newer_sync.isoformat(),
+        last_playback_at=newer_playback.isoformat(),
+    ).status_code == 200
+    assert post_heartbeat(
+        client,
+        access,
+        recorded_at=older.isoformat(),
+        app_version="stale-version",
+        android_version="12",
+        active_playlist_id=None,
+        last_successful_sync_at=older.isoformat(),
+        last_playback_at=older.isoformat(),
+    ).status_code == 200
+
+    device.refresh_from_db()
+    assert device.last_heartbeat_recorded_at == newer
+    assert device.app_version == "0.1.0"
+    assert device.android_version == "13"
+    assert device.current_playlist_id == playlist.id
+    assert device.last_sync_at == newer_sync
+    assert device.last_playback_at == newer_playback
+
+
+@pytest.mark.django_db
+def test_csv_neutralizes_leading_whitespace_formula_cells(client, provisioned_device):
+    _, playlist, item, access = provisioned_device
+    MediaAsset.objects.filter(pk=item.media_id).update(title="\t=HYPERLINK(\"bad\")")
+    response = post_playback_batch(client, playback_payload(playlist, item), access)
+    assert response.status_code == 201
+    client.force_login(User.objects.get(email="owner@duducar.co"))
+
+    report = client.get(reverse("playback-csv"))
+    rows = list(csv.reader(StringIO(b"".join(report.streaming_content).decode())))
+
+    assert rows[1][5] == "'\t=HYPERLINK(\"bad\")"
+
+
+@pytest.mark.django_db
 def test_low_battery_alert_opens_and_escalates_without_auto_deescalation(
     client, provisioned_device
 ):
@@ -1033,7 +1280,11 @@ def test_low_battery_alert_opens_and_escalates_without_auto_deescalation(
             {
                 "id": str(uuid.uuid4()),
                 "kind": "forced_queue_loss",
-                "details": {"removed_batches": 1},
+                "details": {
+                    "removed_batches": 1,
+                    "estimated_removed_bytes": 1_000,
+                    "target_removed_bytes": 2_000,
+                },
             },
         ),
     ],

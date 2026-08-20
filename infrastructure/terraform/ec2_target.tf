@@ -36,18 +36,67 @@ resource "aws_security_group" "ec2_target_worker" {
   description = "Dedicated network identity for isolated candidate media tasks"
   vpc_id      = aws_vpc.production.id
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
   tags = { Name = "${local.name}-ec2-media-worker" }
 
   lifecycle {
     create_before_destroy = true
   }
+}
+
+resource "aws_vpc_security_group_egress_rule" "ec2_target_worker_https" {
+  count = var.enable_ec2_target ? 1 : 0
+
+  security_group_id = aws_security_group.ec2_target_worker[0].id
+  description       = "HTTPS only for AWS APIs, ECR/S3, and ClamAV updates"
+  cidr_ipv4         = "0.0.0.0/0"
+  from_port         = 443
+  to_port           = 443
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "ec2_target_worker_postgresql" {
+  count = var.enable_ec2_target ? 1 : 0
+
+  security_group_id            = aws_security_group.ec2_target_worker[0].id
+  description                  = "PostgreSQL only to the production host"
+  referenced_security_group_id = aws_security_group.ec2_target[0].id
+  from_port                    = 5432
+  to_port                      = 5432
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "ec2_target_worker_dns_udp" {
+  count = var.enable_ec2_target ? 1 : 0
+
+  security_group_id = aws_security_group.ec2_target_worker[0].id
+  description       = "DNS only to the VPC resolver"
+  cidr_ipv4         = "${cidrhost(aws_vpc.production.cidr_block, 2)}/32"
+  from_port         = 53
+  to_port           = 53
+  ip_protocol       = "udp"
+}
+
+resource "aws_vpc_security_group_egress_rule" "ec2_target_worker_dns_tcp" {
+  count = var.enable_ec2_target ? 1 : 0
+
+  security_group_id = aws_security_group.ec2_target_worker[0].id
+  description       = "TCP DNS fallback only to the VPC resolver"
+  cidr_ipv4         = "${cidrhost(aws_vpc.production.cidr_block, 2)}/32"
+  from_port         = 53
+  to_port           = 53
+  ip_protocol       = "tcp"
+}
+
+resource "aws_vpc_security_group_rules_exclusive" "ec2_target_worker" {
+  count             = var.enable_ec2_target ? 1 : 0
+  security_group_id = aws_security_group.ec2_target_worker[0].id
+  ingress_rule_ids  = []
+  egress_rule_ids = [
+    aws_vpc_security_group_egress_rule.ec2_target_worker_https[0].id,
+    aws_vpc_security_group_egress_rule.ec2_target_worker_postgresql[0].id,
+    aws_vpc_security_group_egress_rule.ec2_target_worker_dns_udp[0].id,
+    aws_vpc_security_group_egress_rule.ec2_target_worker_dns_tcp[0].id,
+  ]
 }
 
 resource "aws_vpc_security_group_ingress_rule" "ec2_target_web" {
@@ -147,53 +196,22 @@ resource "aws_iam_role_policy" "ec2_target" {
         Resource = [aws_secretsmanager_secret.application.arn]
       },
       {
-        Sid      = "UseApplicationKey"
+        Sid      = "DecryptRuntimeSecretThroughSecretsManager"
         Effect   = "Allow"
-        Action   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+        Action   = ["kms:Decrypt"]
         Resource = [aws_kms_key.production.arn]
-      },
-      {
-        Sid      = "LocatePrivateBuckets"
-        Effect   = "Allow"
-        Action   = ["s3:GetBucketLocation"]
-        Resource = [aws_s3_bucket.media.arn, aws_s3_bucket.backups.arn]
-      },
-      {
-        Sid      = "ListMediaPrefixes"
-        Effect   = "Allow"
-        Action   = ["s3:ListBucket"]
-        Resource = [aws_s3_bucket.media.arn]
         Condition = {
-          StringLike = {
-            "s3:prefix" = ["quarantine", "quarantine/*", "validated", "validated/*"]
+          StringEquals = {
+            "kms:ViaService"                  = "secretsmanager.${var.aws_region}.amazonaws.com"
+            "kms:EncryptionContext:SecretARN" = aws_secretsmanager_secret.application.arn
           }
         }
       },
       {
-        Sid      = "ListDatabaseBackups"
+        Sid      = "AssumeApplicationRuntimeRole"
         Effect   = "Allow"
-        Action   = ["s3:ListBucket"]
-        Resource = [aws_s3_bucket.backups.arn]
-        Condition = {
-          StringLike = {
-            "s3:prefix" = ["database-backups", "database-backups/*"]
-          }
-        }
-      },
-      {
-        Sid    = "UseMediaObjects"
-        Effect = "Allow"
-        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-        Resource = [
-          "${aws_s3_bucket.media.arn}/quarantine/*",
-          "${aws_s3_bucket.media.arn}/validated/*"
-        ]
-      },
-      {
-        Sid      = "UseDatabaseBackups"
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject"]
-        Resource = ["${aws_s3_bucket.backups.arn}/database-backups/*"]
+        Action   = ["sts:AssumeRole"]
+        Resource = [aws_iam_role.ec2_target_application[0].arn]
       },
       {
         Sid      = "AuthenticateToEcr"
@@ -212,6 +230,12 @@ resource "aws_iam_role_policy" "ec2_target" {
         Resource = [aws_ecr_repository.backend.arn]
       },
       {
+        Sid      = "InspectDataVolumeSnapshots"
+        Effect   = "Allow"
+        Action   = ["ec2:DescribeSnapshots"]
+        Resource = ["*"]
+      },
+      {
         Sid      = "PublishOperationalAlerts"
         Effect   = "Allow"
         Action   = ["sns:Publish"]
@@ -221,9 +245,91 @@ resource "aws_iam_role_policy" "ec2_target" {
   })
 }
 
+resource "aws_iam_role" "ec2_target_application" {
+  count                = var.enable_ec2_target ? 1 : 0
+  name                 = "${local.name}-ec2-application"
+  max_session_duration = 3600
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        AWS = aws_iam_role.ec2_target[0].arn
+      }
+      Action = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "ec2_target_application" {
+  count = var.enable_ec2_target ? 1 : 0
+  role  = aws_iam_role.ec2_target_application[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "LocateApplicationBuckets"
+        Effect   = "Allow"
+        Action   = ["s3:GetBucketLocation"]
+        Resource = [aws_s3_bucket.media.arn, aws_s3_bucket.backups.arn]
+      },
+      {
+        Sid      = "ListApplicationPrefixes"
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.media.arn, aws_s3_bucket.backups.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["quarantine", "quarantine/*", "validated", "validated/*", "database-backups", "database-backups/*"]
+          }
+        }
+      },
+      {
+        Sid    = "UseMediaObjects"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = [
+          "${aws_s3_bucket.media.arn}/quarantine/*",
+          "${aws_s3_bucket.media.arn}/validated/*"
+        ]
+      },
+      {
+        Sid      = "UseDatabaseBackups"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject"]
+        Resource = ["${aws_s3_bucket.backups.arn}/database-backups/*"]
+      },
+      {
+        Sid      = "UseApplicationBucketsKeyThroughS3"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+        Resource = [aws_kms_key.production.arn]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "s3.${var.aws_region}.amazonaws.com"
+          }
+          StringLike = {
+            # S3 uses the bucket ARN when Bucket Keys are enabled and an
+            # object ARN otherwise. Keep both exact forms so a similarly
+            # named sibling bucket cannot match this application role.
+            "kms:EncryptionContext:aws:s3:arn" = [
+              aws_s3_bucket.media.arn,
+              "${aws_s3_bucket.media.arn}/*",
+              aws_s3_bucket.backups.arn,
+              "${aws_s3_bucket.backups.arn}/*"
+            ]
+          }
+        }
+      }
+    ]
+  })
+}
+
 resource "aws_iam_role_policy" "ec2_target_media_dispatch" {
   count = var.enable_ec2_target && var.container_image != "" ? 1 : 0
-  role  = aws_iam_role.ec2_target[0].id
+  role  = aws_iam_role.ec2_target_application[0].id
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -302,7 +408,7 @@ resource "aws_instance" "ec2_target" {
   metadata_options {
     http_endpoint               = "enabled"
     http_protocol_ipv6          = "disabled"
-    http_put_response_hop_limit = 2
+    http_put_response_hop_limit = 1
     http_tokens                 = "required"
     instance_metadata_tags      = "disabled"
   }
@@ -312,17 +418,22 @@ resource "aws_instance" "ec2_target" {
   user_data_base64 = base64gzip(templatefile("${path.module}/ec2/bootstrap.sh.tftpl", {
     aws_region                   = var.aws_region
     application_secret_arn       = aws_secretsmanager_secret.application.arn
+    application_role_arn         = aws_iam_role.ec2_target_application[0].arn
     media_bucket                 = aws_s3_bucket.media.bucket
     backup_bucket                = aws_s3_bucket.backups.bucket
     dashboard_hostname           = var.dashboard_hostname
     api_hostname                 = var.api_hostname
     required_app_version         = var.required_app_version
+    backend_image                = var.container_image
+    postgres_image               = var.postgres_image
+    caddy_image                  = var.caddy_image
     play_integrity_project       = var.play_integrity_project_number
     smtp_host                    = var.smtp_host
     smtp_port                    = var.smtp_port
     default_from_email           = var.default_from_email
     operations_sns_topic         = aws_sns_topic.operations.arn
     data_volume_id               = replace(aws_ebs_volume.ec2_target_data[0].id, "-", "")
+    data_volume_api_id           = aws_ebs_volume.ec2_target_data[0].id
     ecs_cluster                  = aws_ecs_cluster.production.arn
     ecs_worker_task_definition   = "${local.name}-ec2-media-worker"
     ecs_media_subnet_ids         = join(",", aws_subnet.public[*].id)
@@ -333,25 +444,6 @@ resource "aws_instance" "ec2_target" {
     media_dispatch_retry         = var.media_dispatch_retry_seconds
     media_max_dispatch_attempts  = var.media_max_dispatch_attempts
     media_reconcile_max_assets   = var.media_reconcile_max_assets
-    caddyfile_preflight_b64      = filebase64("${path.module}/ec2/runtime/Caddyfile.preflight")
-    caddyfile_production_b64     = filebase64("${path.module}/ec2/runtime/Caddyfile.production")
-    caddyfile_post_cutover_b64   = filebase64("${path.module}/ec2/runtime/Caddyfile.post-cutover")
-    postgres_hba_b64             = filebase64("${path.module}/ec2/runtime/pg_hba.conf")
-    postgres_init_roles_b64      = filebase64("${path.module}/ec2/runtime/postgres-init-roles.sh")
-    postgres_runtime_grants_b64  = filebase64("${path.module}/ec2/runtime/postgres-runtime-grants.sql")
-    render_env_b64               = filebase64("${path.module}/ec2/runtime/render-runtime-env")
-    stack_b64                    = filebase64("${path.module}/ec2/runtime/duducar-stack")
-    command_b64                  = filebase64("${path.module}/ec2/runtime/duducar-command")
-    alert_b64                    = filebase64("${path.module}/ec2/runtime/duducar-alert")
-    host_health_b64              = filebase64("${path.module}/ec2/runtime/duducar-host-health")
-    service_b64                  = filebase64("${path.module}/ec2/runtime/duducar.service")
-    command_service_b64          = filebase64("${path.module}/ec2/runtime/duducar-command@.service")
-    alert_service_b64            = filebase64("${path.module}/ec2/runtime/duducar-alert@.service")
-    health_timer_b64             = filebase64("${path.module}/ec2/runtime/duducar-health.timer")
-    playlist_timer_b64           = filebase64("${path.module}/ec2/runtime/duducar-playlists.timer")
-    reconcile_timer_b64          = filebase64("${path.module}/ec2/runtime/duducar-media-reconcile.timer")
-    retention_timer_b64          = filebase64("${path.module}/ec2/runtime/duducar-retention.timer")
-    backup_timer_b64             = filebase64("${path.module}/ec2/runtime/duducar-backup.timer")
   }))
 
   tags = {
@@ -474,9 +566,16 @@ resource "aws_iam_role_policy" "ec2_target_worker_execution" {
         Resource = [aws_secretsmanager_secret.application.arn]
       },
       {
+        Sid      = "DecryptWorkerSecretThroughSecretsManager"
         Effect   = "Allow"
         Action   = ["kms:Decrypt"]
         Resource = [aws_kms_key.production.arn]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService"                  = "secretsmanager.${var.aws_region}.amazonaws.com"
+            "kms:EncryptionContext:SecretARN" = aws_secretsmanager_secret.application.arn
+          }
+        }
       }
     ]
   })
@@ -498,9 +597,49 @@ resource "aws_iam_role_policy" "ec2_target_worker" {
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
-      { Effect = "Allow", Action = ["s3:GetBucketLocation", "s3:ListBucket"], Resource = [aws_s3_bucket.media.arn] },
-      { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], Resource = ["${aws_s3_bucket.media.arn}/*"] },
-      { Effect = "Allow", Action = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"], Resource = [aws_kms_key.production.arn] }
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetBucketLocation"]
+        Resource = [aws_s3_bucket.media.arn]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [aws_s3_bucket.media.arn]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = ["quarantine", "quarantine/*", "validated", "validated/*"]
+          }
+        }
+      },
+      {
+        Sid      = "ReadQuarantinedMedia"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${aws_s3_bucket.media.arn}/quarantine/*"]
+      },
+      {
+        Sid      = "ManageValidatedMedia"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
+        Resource = ["${aws_s3_bucket.media.arn}/validated/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"]
+        Resource = [aws_kms_key.production.arn]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService" = "s3.${var.aws_region}.amazonaws.com"
+          }
+          StringLike = {
+            "kms:EncryptionContext:aws:s3:arn" = [
+              aws_s3_bucket.media.arn,
+              "${aws_s3_bucket.media.arn}/*"
+            ]
+          }
+        }
+      }
     ]
   })
 }
@@ -512,8 +651,11 @@ locals {
       { name = "DB_HOST", value = aws_network_interface.ec2_target[0].private_ip },
       { name = "DB_PORT", value = "5432" },
       { name = "DB_NAME", value = "signage" },
-      { name = "DB_USER", value = "signage_app" },
-      { name = "DB_SSLMODE", value = "require" }
+      { name = "DB_USER", value = "signage_worker" },
+      { name = "DB_SSLMODE", value = "require" },
+      { name = "DEPLOYMENT_COMPONENT", value = "media-worker" },
+      { name = "WORKER_ROOT_INIT", value = "1" },
+      { name = "DJANGO_SECRET_KEY", value = "media-worker-does-not-serve-or-sign-web-sessions" }
     ]
   ) : []
 }
@@ -529,20 +671,33 @@ resource "aws_ecs_task_definition" "ec2_target_worker" {
   execution_role_arn       = aws_iam_role.ec2_target_worker_execution[0].arn
   task_role_arn            = aws_iam_role.ec2_target_worker[0].arn
 
+  volume {
+    name = "clamav-data"
+  }
+
+  volume {
+    name = "scratch"
+  }
+
   runtime_platform {
     cpu_architecture        = "ARM64"
     operating_system_family = "LINUX"
   }
 
   container_definitions = jsonencode([{
-    name        = "application"
-    image       = var.container_image
-    essential   = true
-    command     = ["sh", "worker-entrypoint.sh"]
+    name                   = "application"
+    image                  = var.container_image
+    essential              = true
+    command                = ["sh", "worker-entrypoint-root-init.sh"]
+    user                   = "0:0"
+    readonlyRootFilesystem = true
+    mountPoints = [
+      { sourceVolume = "clamav-data", containerPath = "/var/lib/clamav", readOnly = false },
+      { sourceVolume = "scratch", containerPath = "/tmp", readOnly = false }
+    ]
     environment = local.ec2_target_worker_environment
     secrets = [
-      { name = "DJANGO_SECRET_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:DJANGO_SECRET_KEY::" },
-      { name = "DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.application.arn}:DB_PASSWORD::" }
+      { name = "DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.application.arn}:WORKER_DB_PASSWORD::" }
     ]
     logConfiguration = {
       logDriver = "awslogs"
@@ -608,6 +763,59 @@ resource "aws_dlm_lifecycle_policy" "ec2_target_data" {
   tags = { Name = "${local.name}-ec2-target-data" }
 
   depends_on = [aws_iam_role_policy_attachment.dlm_data_volume]
+}
+
+resource "aws_cloudwatch_metric_alarm" "ec2_target_dlm_snapshot_create_failed" {
+  count               = var.enable_ec2_target ? 1 : 0
+  alarm_name          = "${local.name}-dlm-snapshot-create-failed"
+  alarm_description   = "The production data-volume DLM policy exhausted its snapshot-creation retries."
+  namespace           = "AWS/EBS"
+  metric_name         = "SnapshotsCreateFailed"
+  dimensions          = { DLMPolicyId = aws_dlm_lifecycle_policy.ec2_target_data[0].id }
+  statistic           = "Sum"
+  period              = 3600
+  evaluation_periods  = 1
+  datapoints_to_alarm = 1
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+}
+
+resource "aws_cloudwatch_metric_alarm" "ec2_target_dlm_snapshot_stale" {
+  count               = var.enable_ec2_target ? 1 : 0
+  alarm_name          = "${local.name}-dlm-snapshot-stale"
+  alarm_description   = "No production data-volume DLM snapshot completed during the last 36 hourly periods."
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = 36
+  datapoints_to_alarm = 36
+  threshold           = 1
+  treat_missing_data  = "breaching"
+  alarm_actions       = [aws_sns_topic.operations.arn]
+  ok_actions          = [aws_sns_topic.operations.arn]
+
+  metric_query {
+    id          = "completed"
+    return_data = false
+
+    metric {
+      namespace   = "AWS/EBS"
+      metric_name = "SnapshotsCreateCompleted"
+      dimensions  = { DLMPolicyId = aws_dlm_lifecycle_policy.ec2_target_data[0].id }
+      period      = 3600
+      stat        = "Sum"
+    }
+  }
+
+  # DLM emits one sparse completion point per daily run. Converting each
+  # missing hour to zero prevents CloudWatch's wider lookback from reusing an
+  # older success after it has crossed the 36-hour recovery-point objective.
+  metric_query {
+    id          = "fresh"
+    expression  = "FILL(completed, 0)"
+    label       = "Hourly DLM snapshot completion"
+    return_data = true
+  }
 }
 
 resource "aws_cloudwatch_metric_alarm" "ec2_target_status" {

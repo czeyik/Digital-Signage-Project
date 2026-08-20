@@ -2,16 +2,22 @@ import uuid
 from datetime import timedelta
 
 import pytest
+from django.contrib.sessions.models import Session
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
-from django.db import IntegrityError
+from django.test import override_settings
 from django.utils import timezone
 
 from signage.models import (
     AuditEvent,
     Device,
+    DeviceAccessToken,
     DeviceAssignment,
+    DeviceCredential,
     Driver,
+    EnrollmentChallenge,
+    EnrollmentCode,
+    LoginThrottle,
     MediaAsset,
     PlaybackBatch,
     PlaybackCorrection,
@@ -20,6 +26,7 @@ from signage.models import (
     PlaylistItem,
     User,
     Vehicle,
+    token_hash,
 )
 
 
@@ -59,7 +66,7 @@ def test_retention_uses_final_unassignment_date():
 
 
 @pytest.mark.django_db
-def test_retention_rolls_back_all_changes_when_anonymization_fails():
+def test_retention_retries_anonymized_registration_collision(monkeypatch):
     old = timezone.now() - timedelta(days=400)
     driver = Driver.objects.create(internal_id="D-ROLLBACK", name="Private Name")
     vehicle = Vehicle.objects.create(registration="ROLLBACK-1")
@@ -71,18 +78,78 @@ def test_retention_rolls_back_all_changes_when_anonymization_fails():
         assigned_at=old - timedelta(days=1),
         unassigned_at=old,
     )
-    Vehicle.objects.create(registration=f"ANON-{vehicle.pk}")
+    Vehicle.objects.create(registration=f"ANON-{vehicle.pk}-abc123")
+    suffixes = iter(["abc123", "def456"])
+    monkeypatch.setattr(
+        "signage.management.commands.apply_retention.secrets.token_hex",
+        lambda bytes_count: next(suffixes),
+    )
 
-    with pytest.raises(IntegrityError):
-        call_command("apply_retention", verbosity=0)
+    call_command("apply_retention", verbosity=0)
 
     driver.refresh_from_db()
     vehicle.refresh_from_db()
-    assert driver.name == "Private Name"
-    assert driver.anonymized_at is None
-    assert vehicle.registration == "ROLLBACK-1"
-    assert vehicle.anonymized_at is None
-    assert not AuditEvent.objects.filter(action="retention.apply").exists()
+    assert driver.name == "Anonymized driver"
+    assert driver.anonymized_at is not None
+    assert vehicle.registration == f"ANON-{vehicle.pk}-def456"
+    assert vehicle.anonymized_at is not None
+    assert AuditEvent.objects.filter(action="retention.apply").exists()
+
+
+@pytest.mark.django_db
+@override_settings(AUTH_ARTIFACT_RETENTION_DAYS=30)
+def test_retention_deletes_expired_auth_artifacts():
+    old = timezone.now() - timedelta(days=31)
+    owner = User.objects.create_user(
+        "retention-auth-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="RETENTION-AUTH")
+    revoked, _ = DeviceCredential.issue(device)
+    DeviceCredential.objects.filter(pk=revoked.pk).update(revoked_at=old)
+    active, _ = DeviceCredential.issue(device)
+    access = DeviceAccessToken.objects.create(
+        credential=active,
+        token_hash=token_hash("expired-access"),
+        expires_at=old,
+    )
+    enrollment = EnrollmentCode.objects.create(
+        device=device,
+        code_hash=token_hash("expired-enrollment"),
+        expires_at=old,
+        created_by=owner,
+    )
+    challenge = EnrollmentChallenge.objects.create(
+        enrollment=enrollment,
+        request_hash=token_hash("expired-challenge"),
+        android_id_hash=token_hash("android"),
+        android_version="13",
+        app_version="0.1.0",
+        expires_at=old,
+    )
+    login = LoginThrottle.objects.create(key_hash=token_hash("old-login"))
+    LoginThrottle.objects.filter(pk=login.pk).update(updated_at=old)
+    from signage.models import ApiThrottle
+
+    api = ApiThrottle.objects.create(key_hash=token_hash("old-api"))
+    ApiThrottle.objects.filter(pk=api.pk).update(updated_at=old)
+    session = Session.objects.create(
+        session_key="expired-retention-session",
+        session_data="e30:1w",
+        expire_date=old,
+    )
+
+    call_command("apply_retention", verbosity=0)
+
+    assert not DeviceCredential.objects.filter(pk=revoked.pk).exists()
+    assert DeviceCredential.objects.filter(pk=active.pk).exists()
+    assert not DeviceAccessToken.objects.filter(pk=access.pk).exists()
+    assert not EnrollmentChallenge.objects.filter(pk=challenge.pk).exists()
+    assert not EnrollmentCode.objects.filter(pk=enrollment.pk).exists()
+    assert not LoginThrottle.objects.filter(pk=login.pk).exists()
+    assert not ApiThrottle.objects.filter(pk=api.pk).exists()
+    assert not Session.objects.filter(pk=session.pk).exists()
 
 
 @pytest.mark.django_db

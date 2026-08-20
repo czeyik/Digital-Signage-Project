@@ -1,6 +1,5 @@
 # The EC2 user data is bootstrap-only. This separate, opt-in document updates
-# only the two non-secret release selections that must change together for an
-# Android rollout. It never restarts services and keeps a per-operation backup
+# the complete non-secret release selection. It never restarts services and keeps a per-operation backup
 # on the host for an exact, guarded rollback.
 locals {
   ec2_release_config_manager_sha256 = filesha256(
@@ -17,11 +16,11 @@ resource "aws_ssm_document" "ec2_release_config" {
 
   content = jsonencode({
     schemaVersion = "2.2"
-    description   = "Validate, install, or roll back the reviewed DUDU release image and app version"
+    description   = "Validate, install, or roll back the complete reviewed DUDU release selection"
     parameters = {
       Mode = {
         type          = "String"
-        description   = "Validate is read-only; install and rollback replace only BACKEND_IMAGE and REQUIRED_APP_VERSION and never restart services."
+        description   = "Validate is read-only; install and rollback replace the exact backend, PostgreSQL, Caddy, app-version, and Caddy-config selection without restarting services."
         default       = "validate"
         allowedValues = ["validate", "install", "rollback"]
       }
@@ -47,6 +46,16 @@ resource "aws_ssm_document" "ec2_release_config" {
         allowedPattern = "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
         allowedValues  = [var.required_app_version]
       }
+      PostgresImage = {
+        type          = "String"
+        description   = "Exact Terraform-reviewed digest-pinned PostgreSQL image."
+        allowedValues = [var.postgres_image]
+      }
+      CaddyImage = {
+        type          = "String"
+        description   = "Exact Terraform-reviewed digest-pinned Caddy image."
+        allowedValues = [var.caddy_image]
+      }
     }
     mainSteps = [
       {
@@ -63,15 +72,19 @@ resource "aws_ssm_document" "ec2_release_config" {
             "operation_id='{{ OperationId }}'",
             "backend_image='{{ BackendImage }}'",
             "required_app_version='{{ RequiredAppVersion }}'",
+            "postgres_image='{{ PostgresImage }}'",
+            "caddy_image='{{ CaddyImage }}'",
             "expected_backend_image='${var.container_image}'",
             "expected_required_app_version='${var.required_app_version}'",
+            "expected_postgres_image='${var.postgres_image}'",
+            "expected_caddy_image='${var.caddy_image}'",
             "stage_dir=$(mktemp -d /var/tmp/duducar-release-config.XXXXXX)",
             "trap 'rm -rf -- \"$stage_dir\"' EXIT",
             "printf '%s' '${filebase64("${path.module}/ec2/runtime/manage-release-config")}' | base64 -d > \"$stage_dir/manage-release-config\"",
             "chmod 0500 \"$stage_dir/manage-release-config\"",
             "printf '%s  %s\\n' '${local.ec2_release_config_manager_sha256}' \"$stage_dir/manage-release-config\" | sha256sum -c -",
             "bash -n \"$stage_dir/manage-release-config\"",
-            "\"$stage_dir/manage-release-config\" \"$mode\" \"$commit\" \"$operation_id\" \"$backend_image\" \"$required_app_version\" '${aws_ecr_repository.backend.repository_url}' \"$expected_backend_image\" \"$expected_required_app_version\"",
+            "\"$stage_dir/manage-release-config\" \"$mode\" \"$commit\" \"$operation_id\" \"$backend_image\" \"$required_app_version\" '${split("@sha256:", var.container_image)[0]}' \"$postgres_image\" \"$caddy_image\" \"$expected_backend_image\" \"$expected_required_app_version\" \"$expected_postgres_image\" \"$expected_caddy_image\"",
           ]
         }
       }

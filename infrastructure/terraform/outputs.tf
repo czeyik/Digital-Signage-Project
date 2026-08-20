@@ -8,6 +8,16 @@ output "production_backend_image" {
   value       = var.container_image
 }
 
+output "production_postgres_image" {
+  description = "Reviewed digest-pinned PostgreSQL image selected for the production host."
+  value       = var.postgres_image
+}
+
+output "production_caddy_image" {
+  description = "Reviewed digest-pinned Caddy image selected for the production host."
+  value       = var.caddy_image
+}
+
 output "production_required_app_version" {
   description = "Exact semantic Android version required by the reviewed production backend release."
   value       = var.required_app_version
@@ -156,15 +166,13 @@ output "production_runtime_asset_document_hash_type" {
 
 output "production_runtime_asset_sha256" {
   description = "Reviewed SHA-256 values embedded in the runtime asset document."
-  value = {
-    caddyfile          = local.ec2_runtime_caddy_sha256
-    environment_render = local.ec2_runtime_renderer_sha256
-    operation_manager  = local.ec2_runtime_manager_sha256
-  }
+  value = merge(local.ec2_runtime_asset_sha256, {
+    operation_manager = local.ec2_runtime_manager_sha256
+  })
 }
 
 output "production_release_config_document" {
-  description = "SSM document that atomically updates only the pinned backend image and required Android app version."
+  description = "SSM document that atomically updates the complete Terraform-reviewed non-secret release selection."
   value       = try(aws_ssm_document.ec2_release_config[0].name, null)
 }
 
@@ -186,4 +194,29 @@ output "production_release_config_document_hash_type" {
 output "production_release_config_manager_sha256" {
   description = "Reviewed SHA-256 for the host-side release configuration manager staged by the SSM document."
   value       = local.ec2_release_config_manager_sha256
+}
+
+output "production_release_activation_document" {
+  description = "SSM document for explicit validated production release activation."
+  value       = try(aws_ssm_document.ec2_release_activation[0].name, null)
+}
+
+output "production_release_activation_document_version" {
+  description = "Exact SSM release activation document version to pin."
+  value       = try(aws_ssm_document.ec2_release_activation[0].document_version, null)
+}
+
+output "production_release_activation_document_hash" {
+  description = "AWS-generated release activation document hash to pin."
+  value       = try(aws_ssm_document.ec2_release_activation[0].hash, null)
+}
+
+output "production_release_activation_document_hash_type" {
+  description = "Hash algorithm for the pinned release activation document."
+  value       = try(aws_ssm_document.ec2_release_activation[0].hash_type, null)
+}
+
+output "production_release_activation_sha256" {
+  description = "Reviewed SHA-256 of the activation helper embedded in its SSM document."
+  value       = local.ec2_release_activation_sha256
 }
