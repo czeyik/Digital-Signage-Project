@@ -765,7 +765,7 @@ def heartbeat(request):
     )
     with transaction.atomic():
         device = (
-            Device.objects.select_for_update()
+            Device.objects.select_for_update(of=("self",))
             .select_related("hardware_qualification")
             .get(pk=authenticated_device.pk)
         )

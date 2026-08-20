@@ -12,7 +12,7 @@ version = "0.1.0"
 description = "DUDU Car in-car digital signage dashboard and device API"
 requires-python = ">=3.10"
 dependencies = [
-  "Django==5.2.16",
+  "Django==5.2.17",
   "djangorestframework==3.17.1",
   "argon2-cffi==25.1.0",
   "psycopg[binary]==3.3.4",
