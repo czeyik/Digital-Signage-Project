@@ -98,6 +98,8 @@ require_literal 'refusing silent replacement' "$renderer"
 require_literal 'BIND_PORT = 51679' "$broker"
 reject_literal 'BIND_PORT = 80' "$broker"
 require_literal 'BROKER_URL = "http://169.254.170.2:51679/v2/credentials"' "$backup_verifier"
+require_literal 'DUDUCAR_BACKUP_ASSUME_ROLE' "$backup_verifier"
+require_literal '"sts",' "$backup_verifier"
 require_literal 'CapabilityBoundingSet=CAP_NET_ADMIN' "$runtime_dir/duducar-credential-broker.service"
 reject_literal 'CAP_NET_BIND_SERVICE' "$runtime_dir/duducar-credential-broker.service"
 require_literal 'duducar-credential-broker.service' "$runtime_dir/duducar.service"
@@ -138,6 +140,8 @@ assert_before '/usr/local/sbin/duducar-stack deploy' '/usr/local/sbin/duducar-co
 assert_before '/usr/local/sbin/duducar-command migrate' '/usr/local/sbin/duducar-command grant-runtime' "$activation"
 assert_before '/usr/local/sbin/duducar-command grant-runtime' 'systemctl start duducar.service' "$activation"
 assert_before 'systemctl start duducar.service' '/usr/local/sbin/duducar-stack assert-release' "$activation"
+assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' 'systemctl start duducar-credential-broker.service' "$activation"
+assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health' 'systemctl start duducar-credential-broker.service' "$activation"
 deploy_body=$(sed -n '/^deploy_stack()/,/^}/p' "$stack")
 if grep -Fq 'create_caddy' <<< "$deploy_body"; then
   echo "Deployment must keep Caddy absent until systemd activation." >&2

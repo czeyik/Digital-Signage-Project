@@ -23,6 +23,7 @@ with tempfile.TemporaryDirectory() as directory:
     work = Path(directory)
     backup_root = work / "backups"
     receipt = work / "state" / "latest-remote.json"
+    host_config = work / "host.env"
     backup_root.mkdir()
     archive = backup_root / "duducar-signage-postgres-20260818T000000Z.dump"
     archive.write_bytes(b"verified database archive")
@@ -31,9 +32,16 @@ with tempfile.TemporaryDirectory() as directory:
     sidecar = archive.with_suffix(".dump.sha256")
     sidecar.write_text(f"{digest}  {archive.name}\n", encoding="ascii")
     sidecar.chmod(0o600)
+    host_config.write_text(
+        "AWS_REGION=ap-southeast-5\n"
+        "APPLICATION_ROLE_ARN=arn:aws:iam::173454940059:role/duducar-signage-production-ec2-application\n",
+        encoding="ascii",
+    )
+    host_config.chmod(0o644)
 
     verifier.BACKUP_ROOT = backup_root
     verifier.RECEIPT = receipt
+    verifier.HOST_CONFIG = host_config
     real_fstat = os.fstat
     real_lstat = os.lstat
     corrupt_metadata = False
@@ -41,7 +49,7 @@ with tempfile.TemporaryDirectory() as directory:
     def reviewed_fstat(descriptor):
         value = real_fstat(descriptor)
         target = os.readlink(f"/proc/self/fd/{descriptor}")
-        uid = 0 if target == str(receipt) else 10001
+        uid = 0 if target in {str(receipt), str(host_config)} else 10001
         return SimpleNamespace(st_mode=value.st_mode, st_uid=uid)
 
     def reviewed_lstat(path):
@@ -50,6 +58,22 @@ with tempfile.TemporaryDirectory() as directory:
 
     def fake_aws_run(command, **_kwargs):
         nonlocal_corrupt = corrupt_metadata
+        if command[1:3] == ["sts", "assume-role"]:
+            assert command[command.index("--role-arn") + 1] == (
+                "arn:aws:iam::173454940059:role/duducar-signage-production-ec2-application"
+            )
+            assert command[command.index("--region") + 1] == "ap-southeast-5"
+            return SimpleNamespace(
+                stdout=json.dumps(
+                    {
+                        "Credentials": {
+                            "AccessKeyId": "assumed-access-key",
+                            "SecretAccessKey": "assumed-secret-key",
+                            "SessionToken": "assumed-session-token",
+                        }
+                    }
+                )
+            )
         key = command[command.index("--key") + 1]
         if command[2] == "head-object":
             object_digest = digest if key.endswith(".dump") else hashlib.sha256(sidecar.read_bytes()).hexdigest()
@@ -69,6 +93,10 @@ with tempfile.TemporaryDirectory() as directory:
     with mock.patch.object(verifier.os, "fstat", side_effect=reviewed_fstat), mock.patch.object(
         verifier.os, "lstat", side_effect=reviewed_lstat
     ), mock.patch.object(verifier.subprocess, "run", side_effect=fake_aws_run):
+        with mock.patch.dict(os.environ, {"DUDUCAR_BACKUP_ASSUME_ROLE": "1"}, clear=True):
+            assumed_credentials = verifier.application_credentials()
+        assert assumed_credentials["AWS_ACCESS_KEY_ID"] == "assumed-access-key"
+        assert assumed_credentials["AWS_EC2_METADATA_DISABLED"] == "true"
         verifier.record("backup-bucket", {})
         document = json.loads(receipt.read_text(encoding="utf-8"))
         assert document["archive_version_id"] == "archive-version"

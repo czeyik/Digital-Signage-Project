@@ -16,11 +16,14 @@ from pathlib import Path
 
 BACKUP_ROOT = Path("/srv/duducar/backups")
 RECEIPT = Path("/var/lib/duducar-backups/latest-remote.json")
+HOST_CONFIG = Path("/etc/duducar/host.env")
 TOKEN_PATH = Path("/run/duducar/backend-secrets/aws-credentials-token")
 BROKER_URL = "http://169.254.170.2:51679/v2/credentials"
 BROKER_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 ARCHIVE_PATTERN = re.compile(r"^duducar-signage-postgres-[0-9]{8}T[0-9]{6}Z\.dump$")
 DIGEST_PATTERN = re.compile(r"^([0-9a-f]{64})  ([^/\n]+)\n$")
+ROLE_ARN_PATTERN = re.compile(r"^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$")
+REGION_PATTERN = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$")
 
 
 def secure_file(path, expected_uid, mode):
@@ -35,7 +38,7 @@ def secure_file(path, expected_uid, mode):
     return descriptor
 
 
-def application_credentials():
+def broker_credentials():
     descriptor = secure_file(TOKEN_PATH, 10001, 0o400)
     with os.fdopen(descriptor, encoding="ascii") as handle:
         token = handle.read().strip()
@@ -50,6 +53,83 @@ def application_credentials():
         "AWS_SESSION_TOKEN": document["Token"],
         "AWS_EC2_METADATA_DISABLED": "true",
     }
+
+
+def host_setting(config, name):
+    values = [
+        line[len(name) + 1 :]
+        for line in config.splitlines()
+        if line.startswith(f"{name}=")
+    ]
+    if len(values) != 1 or not values[0]:
+        raise RuntimeError(f"Host configuration must contain one non-empty {name} setting.")
+    return values[0]
+
+
+def assumed_role_credentials():
+    descriptor = os.open(HOST_CONFIG, os.O_RDONLY | os.O_NOFOLLOW)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0 or stat.S_IMODE(metadata.st_mode) & 0o022:
+        os.close(descriptor)
+        raise RuntimeError("Host configuration is not a root-owned non-writable regular file.")
+    with os.fdopen(descriptor, encoding="ascii") as handle:
+        config = handle.read()
+    if "\r" in config:
+        raise RuntimeError("Host configuration must not use carriage-return line endings.")
+    region = host_setting(config, "AWS_REGION")
+    role_arn = host_setting(config, "APPLICATION_ROLE_ARN")
+    if not REGION_PATTERN.fullmatch(region) or not ROLE_ARN_PATTERN.fullmatch(role_arn):
+        raise RuntimeError("Host application role configuration is malformed.")
+    environment = dict(os.environ)
+    for name in (
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN",
+        "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+    ):
+        environment.pop(name, None)
+    environment["AWS_EC2_METADATA_DISABLED"] = "false"
+    result = subprocess.run(
+        [
+            "/usr/bin/aws",
+            "sts",
+            "assume-role",
+            "--region",
+            region,
+            "--role-arn",
+            role_arn,
+            "--role-session-name",
+            "duducar-backup-verify",
+            "--duration-seconds",
+            "900",
+        ],
+        check=True,
+        capture_output=True,
+        env=environment,
+        text=True,
+        timeout=30,
+    )
+    credentials = json.loads(result.stdout)["Credentials"]
+    fields = ("AccessKeyId", "SecretAccessKey", "SessionToken")
+    if any(not isinstance(credentials.get(field), str) or not credentials[field] for field in fields):
+        raise RuntimeError("STS did not return complete application credentials.")
+    return {
+        "AWS_ACCESS_KEY_ID": credentials["AccessKeyId"],
+        "AWS_SECRET_ACCESS_KEY": credentials["SecretAccessKey"],
+        "AWS_SESSION_TOKEN": credentials["SessionToken"],
+        "AWS_EC2_METADATA_DISABLED": "true",
+    }
+
+
+def application_credentials():
+    mode = os.environ.get("DUDUCAR_BACKUP_ASSUME_ROLE", "")
+    if mode == "1":
+        return assumed_role_credentials()
+    if mode:
+        raise RuntimeError("DUDUCAR_BACKUP_ASSUME_ROLE must be empty or 1.")
+    return broker_credentials()
 
 
 def aws(arguments, credentials, output_file=None):
