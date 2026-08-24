@@ -61,6 +61,11 @@ for asset in "${assets[@]}"; do
   chown root:root "$target"
   chmod 0640 "$target"
 done
+# Simulate an existing host whose broker unit references the new executable,
+# while that executable has not yet been installed.
+install -o root -g root -m 0640 \
+  "$(source_for duducar-credential-broker.service)" \
+  "$(target_for duducar-credential-broker.service)"
 old_stack_sha=$(sha256sum "$(target_for duducar-stack)" | awk '{print $1}')
 
 cat > "$fake_bin/docker" <<'EOF'
@@ -69,7 +74,14 @@ exit 0
 EOF
 cat > "$fake_bin/systemd-analyze" <<'EOF'
 #!/bin/sh
-exit 0
+for unit in "$@"; do
+  test -f "$unit"
+done
+if grep -q '^ExecStart=/usr/local/sbin/duducar-credential-broker$' \
+  "$DUDUCAR_RUNTIME_ASSET_TEST_ROOT/etc/systemd/system/duducar-credential-broker.service"; then
+  test -x "$DUDUCAR_RUNTIME_ASSET_TEST_ROOT/usr/local/sbin/duducar-credential-broker"
+fi
+printf '%s\n' "$*" >> "$DUDUCAR_TEST_SYSTEMD_ANALYZE_LOG"
 EOF
 cat > "$fake_bin/systemctl" <<'EOF'
 #!/bin/sh
@@ -83,14 +95,17 @@ operation_id=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 caddy_image=caddy@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 export DUDUCAR_RUNTIME_ASSET_TEST_ROOT=$test_root
 export DUDUCAR_TEST_SYSTEMCTL_LOG=$test_root/systemctl.log
+export DUDUCAR_TEST_SYSTEMD_ANALYZE_LOG=$test_root/systemd-analyze.log
 export PATH=$fake_bin:$PATH
 
 "$manager" validate "$commit" "$operation_id" "$stage" "$caddy_image"
 test ! -e "$test_root/var/lib/duducar/runtime-backups"
+test ! -e "$DUDUCAR_TEST_SYSTEMD_ANALYZE_LOG"
 "$manager" install "$commit" "$operation_id" "$stage" "$caddy_image"
 cmp -s "$stage/duducar-stack" "$(target_for duducar-stack)"
 cmp -s "$stage/duducar-credential-broker" "$(target_for duducar-credential-broker)"
 test "$(cat "$test_root/systemctl.log")" = daemon-reload
+test "$(wc -l < "$DUDUCAR_TEST_SYSTEMD_ANALYZE_LOG")" -eq 1
 
 installed_sha=$(sha256sum "$(target_for duducar-stack)" | awk '{print $1}')
 "$manager" install "$commit" "$operation_id" "$stage" "$caddy_image"
