@@ -193,13 +193,21 @@ jobs:
           --load
           -t duducar-signage-backend:ci
           backend
-      - name: Inspect and exercise ARM64 image
+      - name: Build hardened production-architecture base images
         run: |
-          architecture="$(docker image inspect --format '{{.Architecture}}' duducar-signage-backend:ci)"
-          if [ "$architecture" != "arm64" ]; then
-            echo "Expected arm64 image, received $architecture" >&2
-            exit 1
-          fi
+          docker buildx build --platform linux/arm64 --load \
+            -t duducar-caddy-hardened:ci infrastructure/images/caddy
+          docker buildx build --platform linux/arm64 --load \
+            -t duducar-postgres-hardened:ci infrastructure/images/postgres
+      - name: Inspect and exercise ARM64 images
+        run: |
+          for image in duducar-signage-backend:ci duducar-caddy-hardened:ci duducar-postgres-hardened:ci; do
+            architecture="$(docker image inspect --format '{{.Architecture}}' "$image")"
+            if [ "$architecture" != "arm64" ]; then
+              echo "Expected ARM64 image, received $architecture for $image" >&2
+              exit 1
+            fi
+          done
           docker run --rm --platform linux/arm64 \
             -e DJANGO_SECRET_KEY=ci-container-check-secret \
             duducar-signage-backend:ci \
@@ -207,10 +215,74 @@ jobs:
           docker run --rm --platform linux/arm64 \
             duducar-signage-backend:ci \
             python -c "import importlib.util; assert all(importlib.util.find_spec(name) is None for name in ('pip', 'setuptools', 'ensurepip'))"
-      - name: Scan container
+          test "$(docker run --rm --platform linux/arm64 duducar-caddy-hardened:ci caddy version)" = v2.11.4-dudu.1
+          docker run --rm --platform linux/arm64 \
+            --read-only \
+            --tmpfs /config \
+            --tmpfs /data \
+            --mount type=bind,source="$PWD/infrastructure/terraform/ec2/runtime/Caddyfile.post-cutover",target=/etc/caddy/Caddyfile,readonly \
+            duducar-caddy-hardened:ci \
+            caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+          postgres_volume=duducar-postgres-hardened-ci
+          init_container=duducar-postgres-hardened-ci-init
+          restart_container=duducar-postgres-hardened-ci-restart
+          cleanup() {
+            docker stop "$init_container" "$restart_container" >/dev/null 2>&1 || true
+            docker volume rm "$postgres_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          wait_for_postgres() {
+            local name=$1
+            for _ in {1..30}; do
+              if docker exec "$name" pg_isready -U signage -d signage >/dev/null 2>&1; then
+                return
+              fi
+              sleep 2
+            done
+            docker logs "$name" >&2
+            return 1
+          }
+          docker volume create "$postgres_volume" >/dev/null
+          docker run -d --rm --name "$init_container" --platform linux/arm64 \
+            -e POSTGRES_DB=signage \
+            -e POSTGRES_USER=signage \
+            -e POSTGRES_PASSWORD=postgres-ci-only \
+            -e PGDATA=/var/lib/postgresql/data/pgdata \
+            -v "$postgres_volume":/var/lib/postgresql/data \
+            duducar-postgres-hardened:ci >/dev/null
+          wait_for_postgres "$init_container"
+          docker exec "$init_container" sh -ec 'test "$(id -u postgres)" = 70; test "$(cat "$PGDATA/PG_VERSION")" = 16; test "$(stat -c %u "$PGDATA")" = 70'
+          docker exec "$init_container" gosu postgres sh -ec 'test "$(id -u):$(id -g)" = 70:70'
+          docker exec "$init_container" gosu --version | grep -F go1.26.6
+          docker exec "$init_container" psql -U signage -d signage -c 'CREATE TABLE canary_probe (id integer primary key); INSERT INTO canary_probe VALUES (1);' >/dev/null
+          docker stop "$init_container" >/dev/null
+          docker run -d --rm --name "$restart_container" --platform linux/arm64 \
+            -e POSTGRES_DB=signage \
+            -e POSTGRES_USER=signage \
+            -e POSTGRES_PASSWORD=postgres-ci-only \
+            -e PGDATA=/var/lib/postgresql/data/pgdata \
+            -v "$postgres_volume":/var/lib/postgresql/data \
+            duducar-postgres-hardened:ci >/dev/null
+          wait_for_postgres "$restart_container"
+          test "$(docker exec "$restart_container" psql -U signage -d signage -tAc 'SELECT count(*) FROM canary_probe')" = 1
+      - name: Scan backend container
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: duducar-signage-backend:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+      - name: Scan hardened Caddy image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: duducar-caddy-hardened:ci
+          format: table
+          exit-code: "1"
+          severity: CRITICAL,HIGH
+      - name: Scan hardened PostgreSQL image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: duducar-postgres-hardened:ci
           format: table
           exit-code: "1"
           severity: CRITICAL,HIGH
