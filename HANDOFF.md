@@ -1,12 +1,26 @@
 # DUDU Car — Production Release Handoff
 
-**Updated:** 2026-08-21, Asia/Kuala_Lumpur
+**Updated:** 2026-08-24, Asia/Kuala_Lumpur
 
 ## Objective
 
 Reach the first one-device Malaysia production canary without weakening the
 Android 12+, private-media, SSM-only, backup/recovery, or USD 30/month
 controls.
+
+## Latest release-build update (2026-08-24)
+
+- Investigated an Android packaging failure while unlocking the
+  `duducar-production` PKCS#12 private key. The project signing configuration
+  supports PKCS#12; no source or build-config change was needed.
+- A subsequent production release build completed successfully. No signing
+  password, key material, or other secret was recorded or changed.
+- The signed artifact was moved out of `/tmp` to
+  `/home/czeyik/dudu-signage-1.0.0-9d71fe1.apk` (do not commit it).
+- SHA-256:
+  `4424e4d26cc9a1bdcb15cc8630f589ee513658059cdc91456dde4c55e3707c57`.
+- Before activation, verify the APK certificate/version against the release
+  runbook and complete the remaining required gates below.
 
 ## Canonical procedures
 
