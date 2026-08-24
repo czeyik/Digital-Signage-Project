@@ -19,8 +19,10 @@ broad authorization never permits an unexpected plan.
 3. Require a final signed APK and matching `required_app_version`; its version
    name, version code, package, checksum and signing certificate fingerprint
    must be recorded. Never send signing or service secrets through Git/chat.
-4. Require an exact Android 12+ device qualification and real signed-APK
-   `MEETS_DEVICE_INTEGRITY`; enrollment stays disabled if either is absent.
+4. Require an exact Android 12+ device identity record with a 9.00–12.00-inch
+   attested display measurement, nonempty evidence reference, and real
+   signed-APK `MEETS_DEVICE_INTEGRITY`; enrollment stays disabled if any is
+   absent. Full physical approval remains a tracked pilot-approval gate.
 5. Review `docs/aws-cost-estimate.md`; stop if projected monthly cost exceeds
    USD 30 excluding per-tablet mobile data, unless the owner changes the target.
 

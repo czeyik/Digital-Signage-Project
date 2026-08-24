@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django import forms
 from django.conf import settings
 from django.contrib.auth.password_validation import validate_password
@@ -111,8 +113,8 @@ class DeviceProvisioningForm(forms.Form):
         queryset=HardwareQualification.objects.none(),
         required=False,
         help_text=(
-            "Required before production enrollment; select the approved exact model "
-            "and firmware qualification."
+            "Required before production enrollment; select the exact model and "
+            "firmware record with an attested 9.00–12.00-inch display."
         ),
     )
     driver_internal_id = forms.CharField(max_length=64)
@@ -122,9 +124,15 @@ class DeviceProvisioningForm(forms.Form):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields["hardware_qualification"].queryset = (
-            HardwareQualification.objects.filter(approved_for_pilot=True).order_by(
-                "model_name", "firmware_version"
+            HardwareQualification.objects.filter(
+                measured_display_diagonal_inches__gte=Decimal("9.00"),
+                measured_display_diagonal_inches__lte=Decimal("12.00"),
             )
+            .exclude(model_name="")
+            .exclude(firmware_version="")
+            .exclude(security_patch_level="")
+            .exclude(evidence_reference="")
+            .order_by("model_name", "firmware_version")
         )
 
     @transaction.atomic

@@ -108,4 +108,6 @@ ADB preflight on the exact tablet and record model, firmware, Android API
 (`ro.build.version.sdk >= 31`), platform/vendor patch, verified-boot state, and
 Google Play availability. If it passes, begin the documented hardware
 qualification in an isolated qualification/development workflow; do not issue
-production enrollment until its `HardwareQualification` record is approved.
+production enrollment until its `HardwareQualification` record has an exact
+model/firmware/security-patch match, an attested 9.00–12.00-inch display, and a
+nonempty evidence reference. Full physical approval remains tracked separately.
