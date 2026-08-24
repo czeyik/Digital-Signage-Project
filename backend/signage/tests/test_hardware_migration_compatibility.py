@@ -33,13 +33,13 @@ def test_hardware_qualification_schema_supports_old_image_rollback(tmp_path):
     )
     rehearsal = dedent(
         """
-        from datetime import date
+        from datetime import date, datetime, timezone
 
         import django
 
         django.setup()
 
-        from django.db import IntegrityError, connection
+        from django.db import IntegrityError, connection, models
         from django.db.migrations.executor import MigrationExecutor
 
         old_target = [("signage", "0009_revoke_marketing_admin_access")]
@@ -153,6 +153,61 @@ def test_hardware_qualification_schema_supports_old_image_rollback(tmp_path):
         rollback_row = OldHardwareQualification.objects.get(pk=qualification.pk)
         assert rollback_row.boot_on_power_passed is True
         assert rollback_row.power_loss_path_passed is True
+
+        pre_display_target = [("signage", "0012_backend_hardening")]
+        display_target = [("signage", "0013_display_diagonal_qualification")]
+        executor = MigrationExecutor(connection)
+        executor.migrate(pre_display_target)
+        pre_display_apps = executor.loader.project_state(pre_display_target).apps
+        PreDisplayUser = pre_display_apps.get_model("signage", "User")
+        PreDisplayQualification = pre_display_apps.get_model(
+            "signage", "HardwareQualification"
+        )
+        display_owner = PreDisplayUser.objects.create(
+            email="display-policy-owner@duducar.co",
+            password="not-used-for-this-rehearsal",
+            role="owner",
+        )
+        display_pass_fields = {
+            field.name: True
+            for field in PreDisplayQualification._meta.fields
+            if isinstance(field, models.BooleanField)
+            and field.name != "approved_for_pilot"
+        }
+        unmeasured_approval = PreDisplayQualification.objects.create(
+            model_name="Unmeasured approved tablet",
+            firmware_version="1.0",
+            android_version="13",
+            security_patch_level="2026-08-05",
+            tested_by=display_owner,
+            test_date=date(2026, 8, 9),
+            evidence_reference="internal://release/display-policy-rehearsal",
+            approved_for_pilot=True,
+            approved_at=datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc),
+            **display_pass_fields,
+        )
+
+        executor = MigrationExecutor(connection)
+        executor.migrate(display_target)
+        display_apps = executor.loader.project_state(display_target).apps
+        DisplayQualification = display_apps.get_model(
+            "signage", "HardwareQualification"
+        )
+        revoked_approval = DisplayQualification.objects.get(pk=unmeasured_approval.pk)
+        assert revoked_approval.approved_for_pilot is False
+        assert revoked_approval.approved_at == datetime(
+            2026, 8, 9, 12, 0, tzinfo=timezone.utc
+        )
+        try:
+            DisplayQualification.objects.filter(pk=revoked_approval.pk).update(
+                approved_for_pilot=True
+            )
+        except IntegrityError:
+            pass
+        else:
+            raise AssertionError(
+                "The display policy must block re-approval without a measurement."
+            )
         """
     )
     environment = {

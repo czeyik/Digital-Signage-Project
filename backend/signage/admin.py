@@ -231,6 +231,7 @@ class HardwareQualificationAdmin(OwnerOnlyAdmin):
         "model_name",
         "firmware_version",
         "android_version",
+        "measured_display_diagonal_inches",
         "test_date",
         "approved_for_pilot",
     )

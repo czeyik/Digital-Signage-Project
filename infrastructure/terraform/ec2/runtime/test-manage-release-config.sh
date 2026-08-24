@@ -20,6 +20,8 @@ new_image="$repository@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 other_image="$repository@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 postgres_image=postgres@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 caddy_image=caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+other_postgres_image=postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+other_caddy_image=caddy@sha256:1111111111111111111111111111111111111111111111111111111111111111
 test_root=$(mktemp -d /tmp/duducar-release-config-test.XXXXXX)
 
 cleanup() {
@@ -90,6 +92,20 @@ if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$repository" "$postgres_image" "$caddy_image" \
   "$new_image" 1.0.1 "$postgres_image" "$caddy_image"; then
   echo "Manager accepted a version different from the Terraform-reviewed value." >&2
+  exit 1
+fi
+if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
+  "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
+  "$repository" "$other_postgres_image" "$caddy_image" \
+  "$new_image" 1.0.0 "$postgres_image" "$caddy_image"; then
+  echo "Manager accepted a PostgreSQL image different from the reviewed value." >&2
+  exit 1
+fi
+if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
+  "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
+  "$repository" "$postgres_image" "$other_caddy_image" \
+  "$new_image" 1.0.0 "$postgres_image" "$caddy_image"; then
+  echo "Manager accepted a Caddy image different from the reviewed value." >&2
   exit 1
 fi
 printf 'REQUIRED_APP_VERSION=0.9.0\nREQUIRED_APP_VERSION=0.9.1\n' \

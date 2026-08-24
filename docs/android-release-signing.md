@@ -13,16 +13,16 @@ DUDU_SIGNING_KEY_PASSWORD
 ```
 
 It also requires the non-secret Google Cloud numeric project number. For the
-first-ever production APK, use prior version code `0` and a new version code of
-`1` (replace the sample version name with the approved release value):
+current reviewed canary APK, use the retained production code `1` as the prior
+value and build code `2` as version `1.0.1`:
 
 ```sh
 ./gradlew :app:assembleProductionRelease \
   -PproductionApiBaseUrl=https://api.marketing.duducaradmin.com/api/v1/ \
   -PplayIntegrityProjectNumber=123456789012 \
-  -PpreviousProductionVersionCode=0 \
-  -PproductionVersionCode=1 \
-  -PproductionVersionName=1.0.0 \
+  -PpreviousProductionVersionCode=1 \
+  -PproductionVersionCode=2 \
+  -PproductionVersionName=1.0.1 \
   --no-daemon
 ```
 
@@ -38,12 +38,13 @@ production tfvars to this exact `productionVersionName`. The server compares
 that value to the APK version name in every heartbeat; a mismatch produces an
 outdated-app alert even when the APK is otherwise valid.
 
-## Approved first production release identity — 2026-08-08
+## Current reviewed canary release identity — 2026-08-24
 
-The pending first production canary uses previous version code `0`, production
-version code `1`, and production version name `1.0.0`. The production tfvars
-must keep `required_app_version = "1.0.0"` until a later, explicitly reviewed
-APK release replaces it.
+The current canary candidate uses previous version code `1`, production version
+code `2`, and production version name `1.0.1`. The reviewed production tfvars
+must explicitly set `required_app_version = "1.0.1"` with the final immutable
+backend, PostgreSQL, and Caddy image digests. Do not infer a production release
+from the Terraform default or from a tag.
 
 Verify the APK certificate with Android
 `apksigner verify --verbose --print-certs`, record its SHA-256 fingerprint and

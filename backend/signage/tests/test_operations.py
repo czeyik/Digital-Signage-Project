@@ -7,6 +7,7 @@ import secrets
 import subprocess
 import sys
 from datetime import date
+from decimal import Decimal
 from io import StringIO
 from pathlib import Path
 
@@ -65,6 +66,7 @@ def test_hardware_cannot_be_approved_until_required_tests_pass():
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/example-10",
+        measured_display_diagonal_inches=Decimal("10.00"),
         approved_for_pilot=True,
     )
 
@@ -87,6 +89,7 @@ def test_hardware_approval_records_approved_timestamp():
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/example-10",
+        measured_display_diagonal_inches=Decimal("10.00"),
         approved_for_pilot=True,
         **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
     )
@@ -94,6 +97,47 @@ def test_hardware_approval_records_approved_timestamp():
     qualification.save()
 
     assert qualification.approved_at is not None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("measurement", "approved"),
+    [
+        (None, False),
+        (Decimal("8.99"), False),
+        (Decimal("9.00"), True),
+        (Decimal("12.00"), True),
+        (Decimal("12.01"), False),
+    ],
+)
+def test_hardware_approval_requires_a_measured_9_to_12_inch_display(
+    measurement, approved
+):
+    owner = User.objects.create_user(
+        f"display-{measurement}@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    qualification = HardwareQualification(
+        model_name="Measured Example 10",
+        firmware_version="1.0",
+        android_version="13",
+        security_patch_level="2026-08-05",
+        measured_display_diagonal_inches=measurement,
+        tested_by=owner,
+        test_date=date.today(),
+        evidence_reference="internal://hardware/measured-example-10",
+        approved_for_pilot=True,
+        **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
+    )
+
+    if approved:
+        qualification.save()
+        assert qualification.approved_at is not None
+    else:
+        with pytest.raises(ValidationError) as error:
+            qualification.save()
+        assert "measured_display_diagonal_inches" in error.value.message_dict
 
 
 @pytest.mark.django_db
@@ -111,11 +155,12 @@ def test_approved_hardware_evidence_is_immutable_and_cannot_be_reapproved():
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/immutable-example-10",
+        measured_display_diagonal_inches=Decimal("10.00"),
         approved_for_pilot=True,
         **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
     )
     qualification.save()
-    qualification.firmware_version = "changed-build"
+    qualification.measured_display_diagonal_inches = Decimal("10.50")
 
     with pytest.raises(ValidationError, match="evidence is immutable"):
         qualification.save()
@@ -145,6 +190,7 @@ def test_hardware_legacy_power_results_cannot_satisfy_new_battery_gates():
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/legacy-example-10",
+        measured_display_diagonal_inches=Decimal("10.00"),
         approved_for_pilot=True,
         legacy_boot_on_vehicle_power_passed=True,
         legacy_external_power_loss_path_passed=True,
@@ -183,6 +229,7 @@ def test_database_blocks_legacy_policy_hardware_reapproval():
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/legacy-example-10",
+        measured_display_diagonal_inches=Decimal("10.00"),
         legacy_boot_on_vehicle_power_passed=True,
         legacy_external_power_loss_path_passed=True,
     )
@@ -209,6 +256,7 @@ def test_battery_policy_migration_invalidates_existing_hardware_approval():
         tested_by=owner,
         test_date=date.today(),
         evidence_reference="internal://hardware/previously-approved-10",
+        measured_display_diagonal_inches=Decimal("10.00"),
         approved_for_pilot=True,
         **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
     )
@@ -222,6 +270,33 @@ def test_battery_policy_migration_invalidates_existing_hardware_approval():
     qualification.refresh_from_db()
     assert qualification.approved_for_pilot is False
     assert qualification.approved_at is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("measurement", [None, Decimal("8.99"), Decimal("12.01")])
+def test_database_blocks_unmeasured_or_out_of_range_hardware_approval(measurement):
+    owner = User.objects.create_user(
+        f"display-database-{measurement}@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    qualification = HardwareQualification.objects.create(
+        model_name="Database Measured Example 10",
+        firmware_version="1.0",
+        android_version="13",
+        security_patch_level="2026-08-05",
+        measured_display_diagonal_inches=measurement,
+        tested_by=owner,
+        test_date=date.today(),
+        evidence_reference="internal://hardware/database-measured-example-10",
+        **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
+    )
+
+    with transaction.atomic():
+        with pytest.raises(IntegrityError):
+            HardwareQualification.objects.filter(pk=qualification.pk).update(
+                approved_for_pilot=True
+            )
 
 
 def test_staticfiles_storage_matches_runtime_mode():
