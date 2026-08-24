@@ -146,7 +146,7 @@ def provisioned_device():
     DEPLOYMENT_ENV="production",
     AWS_S3_CUSTOM_DOMAIN="media.example.cloudfront.net",
 )
-def test_production_sync_requires_a_current_approved_hardware_qualification(
+def test_production_sync_requires_a_current_enrollment_eligible_hardware_record(
     client, provisioned_device, monkeypatch
 ):
     device, _, item, access = provisioned_device
@@ -171,8 +171,6 @@ def test_production_sync_requires_a_current_approved_hardware_qualification(
         test_date=timezone.localdate(),
         evidence_reference="restricted/hardware/qualified-canary-tablet",
         measured_display_diagonal_inches=Decimal("10.00"),
-        approved_for_pilot=True,
-        **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
     )
     qualification.save()
     device.hardware_qualification = qualification
@@ -193,7 +191,8 @@ def test_production_sync_requires_a_current_approved_hardware_qualification(
     assert qualified.status_code == 200
     assert qualified.json()["mode"] == "play"
 
-    qualification.approved_for_pilot = False
+    assert not qualification.approved_for_pilot
+    qualification.measured_display_diagonal_inches = Decimal("12.01")
     qualification.save()
     maintenance = client.get(reverse("device-sync"), **headers)
 

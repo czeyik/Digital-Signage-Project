@@ -326,7 +326,7 @@ def device_matches_qualification(
     qualification = device.hardware_qualification
     return bool(
         qualification
-        and qualification.approved_for_pilot
+        and qualification.is_enrollment_eligible
         and qualification.model_name == hardware_model
         and qualification.firmware_version == firmware_version
         and qualification.security_patch_level == security_patch_level
@@ -366,7 +366,7 @@ def enrollment_challenge(request):
         security_patch_level=security_patch_level,
     ):
         raise exceptions.PermissionDenied(
-            "This device does not match its approved hardware qualification."
+            "This device does not match its enrollment-eligible hardware record."
         )
     if not enrollment.device.assignments.filter(unassigned_at__isnull=True).exists():
         raise serializers.ValidationError("Device must have an active assignment.")
@@ -421,7 +421,7 @@ def _issue_device_credentials(
         security_patch_level=security_patch_level,
     ):
         raise exceptions.PermissionDenied(
-            "This device does not match its approved hardware qualification."
+            "This device does not match its enrollment-eligible hardware record."
         )
     if not device.assignments.filter(unassigned_at__isnull=True).exists():
         raise serializers.ValidationError("Device must have an active assignment.")
@@ -617,7 +617,7 @@ def sync_manifest(request):
         device.last_sync_at = timezone.now()
         device.save(update_fields=["last_sync_at", "updated_at"])
 
-    missing_approved_hardware = (
+    missing_enrollment_eligible_hardware = (
         settings.DEPLOYMENT_ENV == "production"
         and device.status == Device.Status.ACTIVE
         and not device_matches_qualification(
@@ -631,10 +631,10 @@ def sync_manifest(request):
         # Authentication normally rejects this before the view; keep the
         # defense-in-depth path aligned with credential revocation.
         raise exceptions.AuthenticationFailed("Invalid or expired device token.")
-    if missing_approved_hardware:
-        # A qualification can be revoked after fresh physical evidence shows
-        # a problem. Keep the active device in maintenance until an owner
-        # issues a fresh, qualified enrollment.
+    if missing_enrollment_eligible_hardware:
+        # Keep an active device in maintenance when its exact, attested hardware
+        # identity becomes ineligible. Physical checklist completion remains a
+        # pilot-approval gate but does not control this enrollment/sync path.
         mark_successful_sync()
         return Response(
             {

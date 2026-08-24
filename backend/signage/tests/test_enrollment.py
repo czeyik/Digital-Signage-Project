@@ -45,10 +45,7 @@ def enrollment_fixture():
         test_date=timezone.localdate(),
         evidence_reference="restricted/hardware/canary-tablet",
         measured_display_diagonal_inches=Decimal("10.00"),
-        approved_for_pilot=True,
     )
-    for field_name in HardwareQualification.REQUIRED_PASS_FIELDS:
-        setattr(qualification, field_name, True)
     qualification.save()
     device = Device.objects.create(
         label="INTEGRITY-01", hardware_qualification=qualification
@@ -66,7 +63,7 @@ def enrollment_fixture():
     DEPLOYMENT_ENV="production",
     PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
 )
-def test_production_challenge_requires_approved_hardware(client):
+def test_production_challenge_requires_enrollment_eligible_hardware(client):
     owner = User.objects.create_user(
         "owner@duducar.co",
         "A-very-long-password-123",
@@ -84,6 +81,61 @@ def test_production_challenge_requires_approved_hardware(client):
         {
             "code": raw_code,
             "android_id": "unqualified-device",
+            "android_version": "12",
+            "app_version": "0.1.0",
+            **HARDWARE_DETAILS,
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+
+    qualification = HardwareQualification(
+        model_name=HARDWARE_DETAILS["hardware_model"],
+        firmware_version=HARDWARE_DETAILS["firmware_version"],
+        android_version="12",
+        security_patch_level=HARDWARE_DETAILS["security_patch_level"],
+        tested_by=owner,
+        test_date=timezone.localdate(),
+        evidence_reference="restricted/hardware/attested-canary-tablet",
+        measured_display_diagonal_inches=Decimal("10.00"),
+    )
+    qualification.save()
+    device.hardware_qualification = qualification
+    device.save(update_fields=["hardware_qualification", "updated_at"])
+
+    eligible = client.post(
+        reverse("device-enrollment-challenge"),
+        {
+            "code": raw_code,
+            "android_id": "attested-device",
+            "android_version": "12",
+            "app_version": "0.1.0",
+            **HARDWARE_DETAILS,
+        },
+        content_type="application/json",
+    )
+
+    assert eligible.status_code == 201
+    assert not qualification.approved_for_pilot
+
+
+@pytest.mark.django_db
+@override_settings(
+    DEPLOYMENT_ENV="production",
+    PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
+)
+def test_production_challenge_rejects_out_of_range_hardware_record(client):
+    device, raw_code = enrollment_fixture()
+    qualification = device.hardware_qualification
+    qualification.measured_display_diagonal_inches = Decimal("12.01")
+    qualification.save()
+
+    response = client.post(
+        reverse("device-enrollment-challenge"),
+        {
+            "code": raw_code,
+            "android_id": "out-of-range-device",
             "android_version": "12",
             "app_version": "0.1.0",
             **HARDWARE_DETAILS,
@@ -476,6 +528,42 @@ def test_dashboard_can_provision_device_with_assignment(client):
     assert len(response.context["pin"]) == 6
     assert "one_time_kiosk_pin" not in client.session
     assert response["Cache-Control"].startswith("no-store")
+
+
+@pytest.mark.django_db
+def test_dashboard_can_provision_device_with_attested_unapproved_hardware(client):
+    owner = User.objects.create_user(
+        "owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    qualification = HardwareQualification.objects.create(
+        model_name="Attested Canary Tablet",
+        firmware_version="pilot-build-1",
+        android_version="12",
+        security_patch_level="2026-08-05",
+        tested_by=owner,
+        test_date=timezone.localdate(),
+        evidence_reference="restricted/hardware/attested-canary-tablet",
+        measured_display_diagonal_inches=Decimal("10.00"),
+    )
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("device-create"),
+        {
+            "device_label": "PILOT-ATTESTED-03",
+            "hardware_qualification": str(qualification.pk),
+            "driver_internal_id": "D004",
+            "driver_name": "Example Driver",
+            "vehicle_registration": "WXY9013",
+        },
+    )
+
+    assert response.status_code == 200
+    device = Device.objects.get(label="PILOT-ATTESTED-03")
+    assert device.hardware_qualification_id == qualification.pk
+    assert not qualification.approved_for_pilot
 
 
 @pytest.mark.django_db

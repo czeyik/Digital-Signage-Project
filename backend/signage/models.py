@@ -135,6 +135,20 @@ class HardwareQualification(TimeStampedModel):
     approved_at = models.DateTimeField(null=True, blank=True)
 
     REQUIRED_PASS_FIELDS = HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS
+
+    @property
+    def is_enrollment_eligible(self):
+        return (
+            bool(self.model_name.strip())
+            and bool(self.firmware_version.strip())
+            and bool(self.security_patch_level.strip())
+            and bool(self.evidence_reference.strip())
+            and self.measured_display_diagonal_inches is not None
+            and MIN_QUALIFIED_DISPLAY_DIAGONAL_INCHES
+            <= self.measured_display_diagonal_inches
+            <= MAX_QUALIFIED_DISPLAY_DIAGONAL_INCHES
+        )
+
     # Approval attests to the exact physical build that was tested. A later
     # correction must be a new record, rather than rewriting that evidence.
     IMMUTABLE_AFTER_APPROVAL_FIELDS = (
