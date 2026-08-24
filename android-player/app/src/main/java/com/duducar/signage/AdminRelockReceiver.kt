@@ -12,6 +12,7 @@ class AdminRelockReceiver : BroadcastReceiver() {
         KioskPolicyManager(context).applyLockedPolicies(
             restrictUsbFileTransfer = KioskAdminPolicy.shouldRestrictUsbFileTransfer(
                 isEnrolled = credentials.hasRefreshToken(),
+                isProduction = BuildConfig.IS_PRODUCTION,
             ),
         )
         context.startActivity(
