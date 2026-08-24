@@ -70,8 +70,9 @@ Mark and evidence each current database field:
    mount/cable/fuse/adapter create no road-safety hazard.
 7. `device_time_change_passed`, `remote_disable_reboot_passed`, and
    `factory_reset_revocation_passed`: kiosk blocks wall-clock change and the
-   monotonic server-time anchor remains stable; offline reboot stays maintenance
-   after remote disable; reset plus server revocation blocks old credentials.
+   monotonic server-time anchor remains stable; remote disable revokes credentials
+   and offline reboot remains at non-playing re-enrollment; reset plus server
+   revocation blocks old credentials.
 
 ## Adversarial checks
 
