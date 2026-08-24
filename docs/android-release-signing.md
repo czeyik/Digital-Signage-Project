@@ -91,5 +91,11 @@ five-minute relock alarm and refuses to open Android settings when that durable
 relock cannot be scheduled.
 
 Keep USB debugging under staff control for manual sideloading and recovery.
-Disable it for normal vehicle operation only after the exact model and firmware
-pass the documented recovery and update rehearsal.
+Before enrollment, locked kiosk deliberately leaves USB transfer unrestricted so
+a previously authorized staff ADB connection survives device-owner startup.
+After enrollment, locked kiosk blocks USB transfer; a PIN-authenticated
+administrator session temporarily restores it for staff work, and either manual
+or timed relock reapplies the restriction. These paths do not enable USB
+debugging or accept Android's RSA authorization prompt automatically. Disable
+USB debugging for normal vehicle operation only after the exact model and
+firmware pass the documented recovery and update rehearsal.

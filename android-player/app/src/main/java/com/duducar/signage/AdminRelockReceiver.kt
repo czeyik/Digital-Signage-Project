@@ -7,8 +7,13 @@ import android.content.Intent
 class AdminRelockReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != AdminRelockScheduler.ACTION_RELOCK) return
-        CredentialStore(context).endAdminSession()
-        KioskPolicyManager(context).applyLockedPolicies()
+        val credentials = CredentialStore(context)
+        credentials.endAdminSession()
+        KioskPolicyManager(context).applyLockedPolicies(
+            restrictUsbFileTransfer = KioskAdminPolicy.shouldRestrictUsbFileTransfer(
+                isEnrolled = credentials.hasRefreshToken(),
+            ),
+        )
         context.startActivity(
             Intent(context, MainActivity::class.java).apply {
                 addFlags(

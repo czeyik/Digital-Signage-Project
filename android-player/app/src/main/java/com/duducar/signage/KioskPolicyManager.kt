@@ -13,7 +13,7 @@ class KioskPolicyManager(private val context: Context) {
 
     fun isDeviceOwner(): Boolean = manager.isDeviceOwnerApp(context.packageName)
 
-    fun applyLockedPolicies(): Boolean {
+    fun applyLockedPolicies(restrictUsbFileTransfer: Boolean): Boolean {
         if (!isDeviceOwner()) return false
         return try {
             manager.setLockTaskPackages(admin, arrayOf(context.packageName))
@@ -23,6 +23,11 @@ class KioskPolicyManager(private val context: Context) {
             if (!manager.setKeyguardDisabled(admin, true)) return false
             requiredUserRestrictions.forEach { restriction ->
                 manager.addUserRestriction(admin, restriction)
+            }
+            if (restrictUsbFileTransfer) {
+                manager.addUserRestriction(admin, usbFileTransferRestriction)
+            } else {
+                manager.clearUserRestriction(admin, usbFileTransferRestriction)
             }
             manager.addPersistentPreferredActivity(
                 admin,
@@ -43,9 +48,10 @@ class KioskPolicyManager(private val context: Context) {
     fun relaxForAdminSession(): Boolean {
         if (!isDeviceOwner()) return false
         return try {
-            // Keep HOME ownership, screen-capture prevention, and the safety
-            // restrictions in place. The bounded session only exposes system
-            // UI so staff can inspect the tablet or sideload an update.
+            // Keep HOME ownership, screen-capture prevention, and the other
+            // safety restrictions in place. The bounded PIN-authenticated
+            // session temporarily restores USB transfer for staff recovery.
+            manager.clearUserRestriction(admin, usbFileTransferRestriction)
             manager.setStatusBarDisabled(admin, false)
         } catch (_: SecurityException) {
             false
@@ -61,7 +67,7 @@ class KioskPolicyManager(private val context: Context) {
             UserManager.DISALLOW_CREATE_WINDOWS,
             UserManager.DISALLOW_CONFIG_DATE_TIME,
             UserManager.DISALLOW_MOUNT_PHYSICAL_MEDIA,
-            UserManager.DISALLOW_USB_FILE_TRANSFER,
         )
+        val usbFileTransferRestriction = UserManager.DISALLOW_USB_FILE_TRANSFER
     }
 }

@@ -74,6 +74,11 @@ class PlayerSecurityInstrumentationTest {
                 UserManager.DISALLOW_CONFIG_DATE_TIME,
             ),
         )
+        assertFalse(
+            KioskPolicyManager.requiredUserRestrictions.contains(
+                UserManager.DISALLOW_USB_FILE_TRANSFER,
+            ),
+        )
     }
 
     @Test

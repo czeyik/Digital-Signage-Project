@@ -90,6 +90,8 @@ data class PinThrottleState(
 object KioskAdminPolicy {
     const val SESSION_DURATION_MS = 5 * 60 * 1000L
 
+    fun shouldRestrictUsbFileTransfer(isEnrolled: Boolean): Boolean = isEnrolled
+
     fun remainingLockoutMs(state: PinThrottleState, nowEpochMs: Long): Long =
         (state.lockedUntilEpochMs - nowEpochMs).coerceAtLeast(0)
 
