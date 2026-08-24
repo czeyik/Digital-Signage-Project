@@ -165,7 +165,20 @@ validate_stage() {
   rm -rf -- "$python_cache"
   # The exact digest is an input allowed by Terraform's document. Caching it is
   # the only validate-mode mutation and makes first-host validation possible.
-  docker pull "$caddy_image" >/dev/null
+  # Use an operation-local ECR login so this preflight works on a fresh host
+  # without leaving registry credentials in Docker's default configuration.
+  ecr_registry=${caddy_image%%/*}
+  docker_auth=$(mktemp -d "$stage/.duducar-docker-auth.XXXXXX")
+  if ! aws ecr get-login-password --region "${AWS_REGION:-ap-southeast-5}" |
+    docker --config "$docker_auth" login --username AWS --password-stdin "$ecr_registry" >/dev/null; then
+    rm -rf -- "$docker_auth"
+    return 1
+  fi
+  if ! docker --config "$docker_auth" pull "$caddy_image" >/dev/null; then
+    rm -rf -- "$docker_auth"
+    return 1
+  fi
+  rm -rf -- "$docker_auth"
   docker image inspect "$caddy_image" >/dev/null
   docker run --rm \
     --network none \

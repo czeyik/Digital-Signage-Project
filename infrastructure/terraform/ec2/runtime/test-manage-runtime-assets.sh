@@ -68,9 +68,41 @@ install -o root -g root -m 0640 \
   "$(target_for duducar-credential-broker.service)"
 old_stack_sha=$(sha256sum "$(target_for duducar-stack)" | awk '{print $1}')
 
+cat > "$fake_bin/aws" <<'EOF'
+#!/bin/sh
+test "$1" = ecr
+test "$2" = get-login-password
+test "$3" = --region
+test "$4" = ap-southeast-5
+printf 'test-ecr-password\n'
+EOF
 cat > "$fake_bin/docker" <<'EOF'
 #!/bin/sh
-exit 0
+has_config=0
+if [ "$1" = --config ]; then
+  test -d "$2"
+  has_config=1
+  shift 2
+fi
+case "$1" in
+  login)
+    test "$has_config" = 1
+    test "$2" = --username
+    test "$3" = AWS
+    test "$4" = --password-stdin
+    test "$5" = caddy@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    cat >/dev/null
+    ;;
+  pull)
+    test "$has_config" = 1
+    test "$2" = caddy@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+    ;;
+  image|run)
+    ;;
+  *)
+    exit 1
+    ;;
+esac
 EOF
 cat > "$fake_bin/systemd-analyze" <<'EOF'
 #!/bin/sh
@@ -101,6 +133,7 @@ export PATH=$fake_bin:$PATH
 "$manager" validate "$commit" "$operation_id" "$stage" "$caddy_image"
 test ! -e "$test_root/var/lib/duducar/runtime-backups"
 test ! -e "$DUDUCAR_TEST_SYSTEMD_ANALYZE_LOG"
+! find "$stage" -maxdepth 1 -name '.duducar-docker-auth.*' -print -quit | grep -q .
 "$manager" install "$commit" "$operation_id" "$stage" "$caddy_image"
 cmp -s "$stage/duducar-stack" "$(target_for duducar-stack)"
 cmp -s "$stage/duducar-credential-broker" "$(target_for duducar-credential-broker)"
