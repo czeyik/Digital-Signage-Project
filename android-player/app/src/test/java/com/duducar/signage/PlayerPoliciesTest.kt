@@ -213,6 +213,12 @@ class PlayerPoliciesTest {
     }
 
     @Test
+    fun usbTransferStaysAvailableForStaffUntilEnrollment() {
+        assertFalse(KioskAdminPolicy.shouldRestrictUsbFileTransfer(isEnrolled = false))
+        assertTrue(KioskAdminPolicy.shouldRestrictUsbFileTransfer(isEnrolled = true))
+    }
+
+    @Test
     fun onlyVisibleActiveMediaKeepsThePlaybackWindowAwake() {
         assertTrue(
             ScreenAwakePolicy.shouldKeepScreenAwake(

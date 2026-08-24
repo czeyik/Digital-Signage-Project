@@ -1,9 +1,10 @@
 # Exact Android Display Qualification
 
 Qualify the exact model **and firmware** before purchase or production
-enrollment. Record model, firmware/build, Android version/security patch, date,
-tester, APK version, photos/logs/video/notes, and an evidence location. An
-owner creates the `HardwareQualification` record in `/admin/`; it may be
+enrollment. Record model, measured display diagonal, firmware/build, Android
+version/security patch, date, tester, APK version, photos/logs/video/notes, and
+an evidence location. An owner creates the `HardwareQualification` record in
+`/admin/`; it may be
 `approved_for_pilot` only when every current required field is true and evidence
 is complete. Emulators, phones, and a different firmware never qualify it.
 The approval evidence is immutable: revoke it and create a new record rather
@@ -17,9 +18,10 @@ fresh qualification and owner-issued enrollment.
 
 ## Entry conditions
 
-- Android 12+ with current security updates; 10-inch landscape, battery-backed
-  display with LTE; factory-reset device-owner/lock-task provisioning; signed
-  release APK; appropriate SIM, mount, cable/fuse/adapter and safe test area.
+- Android 12+ with current security updates; 9–12-inch landscape (inclusive),
+  battery-backed display with LTE; factory-reset device-owner/lock-task
+  provisioning; signed release APK; appropriate SIM, mount, cable/fuse/adapter
+  and safe test area.
 - Preserve the exact device and tester identities. Do not install an unreviewed
   firmware or third-party image. Play Protect certification and signed-APK
   `MEETS_DEVICE_INTEGRITY` remain separate production-enrollment gates.
@@ -69,8 +71,11 @@ Mark and evidence each current database field:
   PIN automatic relock and **Relock now**; kill DUDU during admin Settings and
   ensure the exact-alarm relock still applies. Removing alarm permission must
   refuse admin mode rather than rely on an in-process timer.
-- Test same-key higher-version sideload and approved ADB/factory-reset recovery;
-  do not globally disable these unpaid physical-recovery paths. Test cloud and
+- Test same-key higher-version sideload and approved ADB/factory-reset recovery.
+  With staff-controlled USB debugging enabled, ADB must remain usable before
+  enrollment; after enrollment, only a PIN-authenticated administrator session
+  may temporarily restore USB transfer, and manual or timed relock must block it
+  again. These checks do not authorize global USB debugging. Test cloud and
   device-to-device transfer: tokens, PIN verifier/state, cache, manifests and
   evidence queue must not transfer.
 - Verify offline download/activation/playback/event upload, corrupt cache,

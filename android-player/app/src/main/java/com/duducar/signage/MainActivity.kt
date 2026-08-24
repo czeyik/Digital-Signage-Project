@@ -475,7 +475,12 @@ class MainActivity : Activity() {
         binding.adminUnlock.visibility = View.GONE
         binding.adminControls.visibility = View.GONE
         if (!activityResumed && bringToFront) {
-            if (!kioskPolicies.applyLockedPolicies()) {
+            if (!kioskPolicies.applyLockedPolicies(
+                    restrictUsbFileTransfer = KioskAdminPolicy.shouldRestrictUsbFileTransfer(
+                        isEnrolled = credentials.hasRefreshToken(),
+                    ),
+                )
+            ) {
                 showStatus(getString(R.string.kiosk_policy_failed))
                 return
             }
@@ -506,6 +511,16 @@ class MainActivity : Activity() {
         if (!EnrollmentPolicy.mayEnroll(BuildConfig.IS_PRODUCTION, kioskPolicies.isDeviceOwner())) {
             binding.enrollment.visibility = View.GONE
             showStatus(getString(R.string.device_owner_required))
+            return
+        }
+        if (!enterLockedKiosk()) {
+            showStatus(
+                if (BuildConfig.IS_PRODUCTION) {
+                    getString(R.string.device_owner_required)
+                } else {
+                    getString(R.string.kiosk_policy_failed)
+                },
+            )
             return
         }
         binding.status.visibility = View.GONE
@@ -545,6 +560,16 @@ class MainActivity : Activity() {
                     runOnUiThread {
                         if (isShutdownPrepared()) {
                             showShutdownReady()
+                            return@runOnUiThread
+                        }
+                        if (!enterLockedKiosk()) {
+                            showStatus(
+                                if (BuildConfig.IS_PRODUCTION) {
+                                    getString(R.string.device_owner_required)
+                                } else {
+                                    getString(R.string.kiosk_policy_failed)
+                                },
+                            )
                             return@runOnUiThread
                         }
                         binding.enrollment.visibility = View.GONE
@@ -1440,7 +1465,12 @@ class MainActivity : Activity() {
             if (!BuildConfig.IS_PRODUCTION) hideSystemUi()
             return !BuildConfig.IS_PRODUCTION
         }
-        if (!kioskPolicies.applyLockedPolicies()) return false
+        if (!kioskPolicies.applyLockedPolicies(
+                restrictUsbFileTransfer = KioskAdminPolicy.shouldRestrictUsbFileTransfer(
+                    isEnrolled = credentials.hasRefreshToken(),
+                ),
+            )
+        ) return false
         hideSystemUi()
         val activityManager = getSystemService(ActivityManager::class.java)
         if (activityManager.lockTaskModeState != ActivityManager.LOCK_TASK_MODE_NONE) {
