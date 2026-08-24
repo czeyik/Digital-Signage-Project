@@ -124,6 +124,8 @@ object KioskAdminPolicy {
 object EnrollmentPolicy {
     fun mayEnroll(isProduction: Boolean, isDeviceOwner: Boolean): Boolean =
         !isProduction || isDeviceOwner
+
+    fun requiresIntegrity(isProduction: Boolean): Boolean = isProduction
 }
 
 object ScreenAwakePolicy {

@@ -145,15 +145,45 @@ androidComponents {
 gradle.taskGraph.whenReady {
     val developmentRequested =
         allTasks.any { it.name.contains("DevelopmentDebug", ignoreCase = true) }
-    val developmentHost = runCatching {
-        URI(developmentApiBaseUrl).host?.lowercase()?.trimEnd('.')
+    val developmentUri = if (developmentRequested) {
+        runCatching { URI(developmentApiBaseUrl) }.getOrElse {
+            throw GradleException("Development API URL must be a valid absolute URL.")
+        }
+    } else {
+        null
     }
-        .getOrNull()
+    val developmentHost = developmentUri?.host?.lowercase()?.trimEnd('.')
+    val developmentScheme = developmentUri?.scheme?.lowercase()
+    if (
+        developmentRequested &&
+        (
+            developmentUri?.isAbsolute != true ||
+                developmentHost.isNullOrBlank() ||
+                developmentScheme !in setOf("http", "https") ||
+                developmentUri?.userInfo != null ||
+                developmentUri?.query != null ||
+                developmentUri?.fragment != null ||
+                developmentUri?.path?.endsWith('/') != true
+            )
+    ) {
+        throw GradleException(
+            "Development API URL must be an absolute HTTP(S) URL with a host and trailing slash.",
+        )
+    }
     if (
         developmentRequested &&
         developmentHost in productionHosts
     ) {
         throw GradleException("Development builds may not target a production hostname.")
+    }
+    if (
+        developmentRequested &&
+        developmentUri?.scheme?.equals("http", ignoreCase = true) == true &&
+        developmentUri?.host != "localhost"
+    ) {
+        throw GradleException(
+            "Development cleartext is permitted only for http://localhost over ADB reverse.",
+        )
     }
     val productionReleaseRequested =
         allTasks.any { it.name.contains("ProductionRelease", ignoreCase = true) }

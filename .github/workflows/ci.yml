@@ -132,6 +132,18 @@ jobs:
                 echo "Development build unexpectedly accepted trailing-dot production API" >&2
                 exit 1
               fi
+              if ./gradlew :app:assembleDevelopmentDebug -PdevelopmentApiBaseUrl=http://api.example-development.invalid/api/v1/ --no-daemon; then
+                echo "Development build unexpectedly accepted non-loopback cleartext API" >&2
+                exit 1
+              fi
+              if ./gradlew :app:assembleDevelopmentDebug -PdevelopmentApiBaseUrl="http://api.example-development.invalid/a b/" --no-daemon; then
+                echo "Development build unexpectedly accepted a malformed API URL" >&2
+                exit 1
+              fi
+              if ./gradlew :app:assembleDevelopmentDebug -PdevelopmentApiBaseUrl=ftp://api.example-development.invalid/api/v1/ --no-daemon; then
+                echo "Development build unexpectedly accepted a non-HTTP(S) API URL" >&2
+                exit 1
+              fi
             '
 
   terraform:

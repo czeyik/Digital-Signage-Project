@@ -27,14 +27,34 @@ class ApiClient(private val credentials: CredentialStore) {
     }
 
     fun enroll(challengeId: String, integrityToken: String): JSONObject {
-        val response = request(
-            "devices/enroll/",
-            "POST",
-            JSONObject()
-                .put("challenge_id", challengeId)
-                .put("integrity_token", integrityToken),
-            authenticated = false,
+        return saveEnrollment(
+            request(
+                "devices/enroll/",
+                "POST",
+                JSONObject()
+                    .put("challenge_id", challengeId)
+                    .put("integrity_token", integrityToken),
+                authenticated = false,
+            ),
         )
+    }
+
+    fun enrollDevelopment(code: String, androidId: String): JSONObject {
+        return saveEnrollment(
+            request(
+                "devices/enroll/",
+                "POST",
+                JSONObject()
+                    .put("code", code)
+                    .put("android_id", androidId)
+                    .put("android_version", Build.VERSION.RELEASE)
+                    .put("app_version", BuildConfig.VERSION_NAME),
+                authenticated = false,
+            ),
+        )
+    }
+
+    private fun saveEnrollment(response: JSONObject): JSONObject {
         if (!credentials.saveEnrollmentCredentials(
                 refreshToken = response.getString("refresh_token"),
                 kioskPinVerifier = response.getString("kiosk_pin_verifier"),

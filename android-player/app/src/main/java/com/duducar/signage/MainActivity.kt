@@ -546,15 +546,18 @@ class MainActivity : Activity() {
                         contentResolver,
                         Settings.Secure.ANDROID_ID,
                     )
-                    val challenge = api.enrollmentChallenge(code, androidId)
-                    val integrityToken = integrity.token(
-                        BuildConfig.PLAY_INTEGRITY_PROJECT_NUMBER,
-                        challenge.getString("request_hash"),
-                    )
-                    val response = api.enroll(
-                        challenge.getString("challenge_id"),
-                        integrityToken,
-                    )
+                    val response = if (
+                        EnrollmentPolicy.requiresIntegrity(BuildConfig.IS_PRODUCTION)
+                    ) {
+                        val challenge = api.enrollmentChallenge(code, androidId)
+                        val integrityToken = integrity.token(
+                            BuildConfig.PLAY_INTEGRITY_PROJECT_NUMBER,
+                            challenge.getString("request_hash"),
+                        )
+                        api.enroll(challenge.getString("challenge_id"), integrityToken)
+                    } else {
+                        api.enrollDevelopment(code, androidId)
+                    }
                     serverClock.update(response.getString("server_time"))
                     store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
                     runOnUiThread {
