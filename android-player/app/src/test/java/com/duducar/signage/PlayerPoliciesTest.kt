@@ -215,9 +215,25 @@ class PlayerPoliciesTest {
     }
 
     @Test
-    fun usbTransferStaysAvailableForStaffUntilEnrollment() {
-        assertFalse(KioskAdminPolicy.shouldRestrictUsbFileTransfer(isEnrolled = false))
-        assertTrue(KioskAdminPolicy.shouldRestrictUsbFileTransfer(isEnrolled = true))
+    fun usbTransferIsLockedOnlyForEnrolledProductionDevices() {
+        assertFalse(
+            KioskAdminPolicy.shouldRestrictUsbFileTransfer(
+                isEnrolled = false,
+                isProduction = true,
+            ),
+        )
+        assertTrue(
+            KioskAdminPolicy.shouldRestrictUsbFileTransfer(
+                isEnrolled = true,
+                isProduction = true,
+            ),
+        )
+        assertFalse(
+            KioskAdminPolicy.shouldRestrictUsbFileTransfer(
+                isEnrolled = true,
+                isProduction = false,
+            ),
+        )
     }
 
     @Test

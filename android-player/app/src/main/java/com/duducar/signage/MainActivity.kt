@@ -478,6 +478,7 @@ class MainActivity : Activity() {
             if (!kioskPolicies.applyLockedPolicies(
                     restrictUsbFileTransfer = KioskAdminPolicy.shouldRestrictUsbFileTransfer(
                         isEnrolled = credentials.hasRefreshToken(),
+                        isProduction = BuildConfig.IS_PRODUCTION,
                     ),
                 )
             ) {
@@ -1471,6 +1472,7 @@ class MainActivity : Activity() {
         if (!kioskPolicies.applyLockedPolicies(
                 restrictUsbFileTransfer = KioskAdminPolicy.shouldRestrictUsbFileTransfer(
                     isEnrolled = credentials.hasRefreshToken(),
+                    isProduction = BuildConfig.IS_PRODUCTION,
                 ),
             )
         ) return false
