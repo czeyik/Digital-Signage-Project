@@ -2,6 +2,7 @@ import hashlib
 import secrets
 import uuid
 from datetime import timedelta
+from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.base_user import BaseUserManager
@@ -37,6 +38,9 @@ HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS = (
     "remote_disable_reboot_passed",
     "factory_reset_revocation_passed",
 )
+
+MIN_QUALIFIED_DISPLAY_DIAGONAL_INCHES = Decimal("9.00")
+MAX_QUALIFIED_DISPLAY_DIAGONAL_INCHES = Decimal("12.00")
 
 
 class TimeStampedModel(models.Model):
@@ -76,6 +80,15 @@ class HardwareQualification(TimeStampedModel):
     firmware_version = models.CharField(max_length=100)
     android_version = models.CharField(max_length=32)
     security_patch_level = models.CharField(max_length=32, blank=True)
+    measured_display_diagonal_inches = models.DecimalField(
+        max_digits=4,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text=(
+            "Physical corner-to-corner display diagonal in inches, excluding bezel."
+        ),
+    )
     tested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
     test_date = models.DateField()
     evidence_reference = models.CharField(
@@ -129,6 +142,7 @@ class HardwareQualification(TimeStampedModel):
         "firmware_version",
         "android_version",
         "security_patch_level",
+        "measured_display_diagonal_inches",
         "tested_by_id",
         "test_date",
         "evidence_reference",
@@ -154,7 +168,26 @@ class HardwareQualification(TimeStampedModel):
                     )
                 ),
                 name="signage_hq_battery_policy_approved",
-            )
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(approved_for_pilot=False)
+                    | (
+                        Q(measured_display_diagonal_inches__isnull=False)
+                        & Q(
+                            measured_display_diagonal_inches__gte=(
+                                MIN_QUALIFIED_DISPLAY_DIAGONAL_INCHES
+                            )
+                        )
+                        & Q(
+                            measured_display_diagonal_inches__lte=(
+                                MAX_QUALIFIED_DISPLAY_DIAGONAL_INCHES
+                            )
+                        )
+                    )
+                ),
+                name="signage_hq_approved_display_size",
+            ),
         ]
 
     def clean(self):
@@ -178,6 +211,27 @@ class HardwareQualification(TimeStampedModel):
                     )
         if not self.approved_for_pilot:
             return
+        if self.measured_display_diagonal_inches is None:
+            raise ValidationError(
+                {
+                    "measured_display_diagonal_inches": (
+                        "Approval requires a measured display diagonal."
+                    )
+                }
+            )
+        if not (
+            MIN_QUALIFIED_DISPLAY_DIAGONAL_INCHES
+            <= self.measured_display_diagonal_inches
+            <= MAX_QUALIFIED_DISPLAY_DIAGONAL_INCHES
+        ):
+            raise ValidationError(
+                {
+                    "measured_display_diagonal_inches": (
+                        "Approval requires a display diagonal from 9.00 to 12.00 "
+                        "inches."
+                    )
+                }
+            )
         missing = [
             self._meta.get_field(field_name).verbose_name
             for field_name in self.REQUIRED_PASS_FIELDS

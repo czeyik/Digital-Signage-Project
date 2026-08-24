@@ -3,6 +3,7 @@ import gzip
 import json
 import uuid
 from datetime import timedelta
+from decimal import Decimal
 from io import StringIO
 
 import pytest
@@ -169,6 +170,7 @@ def test_production_sync_requires_a_current_approved_hardware_qualification(
         tested_by=owner,
         test_date=timezone.localdate(),
         evidence_reference="restricted/hardware/qualified-canary-tablet",
+        measured_display_diagonal_inches=Decimal("10.00"),
         approved_for_pilot=True,
         **{field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS},
     )

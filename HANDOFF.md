@@ -42,7 +42,7 @@ Malaysia pilot on the existing low-cost AWS design. Keep the current Android
   The selected source had zero playback events, so its unfiltered CSV was
   header-only; the owner accepted this as export-path evidence only. Never
   fabricate playback rows or reuse that operation/state/resources.
-- Production APK signing is complete: `com.duducar.signage` 1.0.0 / code 1,
+- The retained signed canary APK is `com.duducar.signage` 1.0.1 / code 2,
   signed with the new RSA-4096 company key. APK, R8 mapping, checksums, and
   non-secret evidence are in the encrypted company vault; two independent
   encrypted key backups are confirmed. Never commit, print, or copy the key.

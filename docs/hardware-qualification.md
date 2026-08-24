@@ -1,14 +1,22 @@
 # Exact Android Display Qualification
 
 Qualify the exact model **and firmware** before purchase or production
-enrollment. Record model, measured display diagonal, firmware/build, Android
-version/security patch, date, tester, APK version, photos/logs/video/notes, and
-an evidence location. An owner creates the `HardwareQualification` record in
+enrollment. Record model, a physical corner-to-corner display diagonal to two
+decimal places (excluding the bezel), firmware/build, Android version/security
+patch, date, tester, APK version, photos/logs/video/notes, and an evidence
+location. Android-reported DPI or diagonal estimates are not physical evidence.
+An owner creates the `HardwareQualification` record in
 `/admin/`; it may be
 `approved_for_pilot` only when every current required field is true and evidence
-is complete. Emulators, phones, and a different firmware never qualify it.
+is complete, including a recorded 9.00–12.00-inch measurement. Emulators,
+phones, and a different firmware never qualify it.
 The approval evidence is immutable: revoke it and create a new record rather
 than editing a previously approved physical build.
+
+A display-policy migration revokes an approval that lacks a compliant physical
+measurement. Before deploying that migration, inventory affected active devices
+and obtain maintenance approval: they enter maintenance on their next sync. A
+revoked record cannot be amended or re-approved.
 
 During production enrollment, the player submits its `hardware_model`,
 `firmware_version`, and `security_patch_level` in the integrity-bound challenge.

@@ -1,4 +1,5 @@
 from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 from django.core.exceptions import ValidationError
@@ -43,6 +44,7 @@ def enrollment_fixture():
         tested_by=owner,
         test_date=timezone.localdate(),
         evidence_reference="restricted/hardware/canary-tablet",
+        measured_display_diagonal_inches=Decimal("10.00"),
         approved_for_pilot=True,
     )
     for field_name in HardwareQualification.REQUIRED_PASS_FIELDS:

@@ -118,9 +118,9 @@ jobs:
               ./gradlew lintProductionRelease :app:assembleProductionRelease \
                 -PproductionApiBaseUrl=https://api.marketing.duducaradmin.com/api/v1/ \
                 -PplayIntegrityProjectNumber=123456789012 \
-                -PpreviousProductionVersionCode=0 \
-                -PproductionVersionCode=1 \
-                -PproductionVersionName=1.0.0 \
+                -PpreviousProductionVersionCode=1 \
+                -PproductionVersionCode=2 \
+                -PproductionVersionName=1.0.1 \
                 --no-daemon
               "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs \
                 app/build/outputs/apk/production/release/app-production-release.apk
