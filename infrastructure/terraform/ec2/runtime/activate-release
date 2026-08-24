@@ -86,10 +86,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-systemctl start duducar-credential-broker.service
 if [ "$activation_kind" = existing ]; then
-  /usr/local/sbin/duducar-backup-verify check
-  /usr/local/sbin/duducar-host-health
+  # Preflight assumes only the scoped application role, leaving the live stack
+  # untouched if a credential broker problem is found before traffic shutdown.
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health
 elif find /srv/duducar/postgres -mindepth 1 -print -quit | grep -q .; then
   echo "Initial-empty activation requires an empty PostgreSQL data directory." >&2
   exit 1
