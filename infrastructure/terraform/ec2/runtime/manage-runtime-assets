@@ -128,6 +128,21 @@ validate_manifest() {
   }
 }
 
+verify_installed_units() {
+  # Unit verification needs the absolute ExecStart paths. On a first install,
+  # those paths do not exist until the atomic asset copy below completes.
+  systemd-analyze verify \
+    "$(asset_target duducar.service)" \
+    "$(asset_target duducar-credential-broker.service)" \
+    "$(asset_target duducar-command@.service)" \
+    "$(asset_target duducar-alert@.service)" \
+    "$(asset_target duducar-health.timer)" \
+    "$(asset_target duducar-playlists.timer)" \
+    "$(asset_target duducar-media-reconcile.timer)" \
+    "$(asset_target duducar-retention.timer)" \
+    "$(asset_target duducar-backup.timer)"
+}
+
 validate_stage() {
   validate_manifest
   manifest=$stage/MANIFEST
@@ -148,12 +163,6 @@ validate_stage() {
     "$stage/duducar-backup-verify" \
     "$stage/duducar-credential-broker"
   rm -rf -- "$python_cache"
-  systemd-analyze verify \
-    "$stage/duducar.service" \
-    "$stage/duducar-credential-broker.service" \
-    "$stage/duducar-command@.service" \
-    "$stage/duducar-alert@.service" \
-    "$stage"/*.timer
   # The exact digest is an input allowed by Terraform's document. Caching it is
   # the only validate-mode mutation and makes first-host validation possible.
   docker pull "$caddy_image" >/dev/null
@@ -364,6 +373,7 @@ rollback_needed=1
 while read -r asset; do
   install_file_atomically "$stage/$asset" "$(asset_target "$asset")" "$(asset_mode "$asset")"
 done < <(asset_names)
+verify_installed_units
 systemctl daemon-reload
 targets_match_stage
 rollback_needed=0
