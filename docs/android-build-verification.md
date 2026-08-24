@@ -30,6 +30,18 @@ provided:
   --no-daemon
 ```
 
+For an isolated local qualification backend, development debug may instead use
+`http://localhost:<port>/api/v1/` only through `adb reverse`. Its development
+manifest permits cleartext for `localhost` alone; it rejects non-loopback
+cleartext or malformed endpoint URLs and never changes the production manifest.
+Do not use this path over Wi-Fi, with a production hostname, or with production
+data or credentials.
+The development app uses its single-use development enrollment code directly;
+production still requires its verified Play Integrity challenge and token.
+The checked-in local Compose backend is explicitly development-only and binds
+to `127.0.0.1:8000`; start it under a fresh Compose project name for each
+qualification run.
+
 The checked JVM tests cover enrollment, manifest activation/restart,
 battery-powered playback with no external-power gate, planned-shutdown state,
 storage, queue loss, PIN verification, PIN throttling, the bounded
@@ -51,5 +63,5 @@ CI additionally generates a disposable test-only keystore, builds and lints the
 configured minified `productionRelease`, and verifies its APK signature. This
 exercises the release path without exposing or replacing the real company
 signing key. It also proves that unsigned production builds and development
-builds aimed at either canonical or trailing-dot production hostnames fail
-closed.
+builds aimed at either canonical or trailing-dot production hostnames or a
+non-loopback cleartext, malformed, or non-HTTP(S) endpoint fail closed.

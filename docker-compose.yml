@@ -18,12 +18,14 @@ services:
     command: python manage.py runserver 0.0.0.0:8000
     environment:
       DJANGO_DEBUG: "true"
+      DEPLOYMENT_ENV: development
+      REQUIRED_APP_VERSION: 0.0.0-development
       DJANGO_SECRET_KEY: local-development-secret-change-me
       DATABASE_URL: postgresql://signage:local-development-only@db:5432/signage
       DB_SSLMODE: disable
       DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./backend:/app
     depends_on:

@@ -95,6 +95,8 @@ class PlayerPoliciesTest {
         assertFalse(EnrollmentPolicy.mayEnroll(isProduction = true, isDeviceOwner = false))
         assertTrue(EnrollmentPolicy.mayEnroll(isProduction = true, isDeviceOwner = true))
         assertTrue(EnrollmentPolicy.mayEnroll(isProduction = false, isDeviceOwner = false))
+        assertTrue(EnrollmentPolicy.requiresIntegrity(isProduction = true))
+        assertFalse(EnrollmentPolicy.requiresIntegrity(isProduction = false))
     }
 
     @Test

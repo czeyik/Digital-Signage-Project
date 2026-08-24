@@ -167,6 +167,31 @@ def test_production_enrollment_requires_verified_single_use_challenge(
     DEPLOYMENT_ENV="production",
     PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
 )
+def test_production_enrollment_rejects_the_development_code_only_flow(client):
+    device, raw_code = enrollment_fixture()
+
+    response = client.post(
+        reverse("device-enroll"),
+        {
+            "code": raw_code,
+            "android_id": "development-flow-attempt",
+            "android_version": "12",
+            "app_version": "0.1.0-development",
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 400
+    device.refresh_from_db()
+    assert device.status == Device.Status.PENDING
+    assert EnrollmentCode.objects.get(device=device).used_at is None
+
+
+@pytest.mark.django_db
+@override_settings(
+    DEPLOYMENT_ENV="production",
+    PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
+)
 def test_device_disabled_after_challenge_cannot_finish_enrollment(client, monkeypatch):
     device, raw_code = enrollment_fixture()
     challenge_response = client.post(
