@@ -240,6 +240,20 @@ resource "aws_iam_role_policy" "ec2_target" {
         Effect   = "Allow"
         Action   = ["sns:Publish"]
         Resource = [aws_sns_topic.operations.arn]
+      },
+      {
+        # An encrypted SNS topic checks the publisher's KMS permissions as
+        # well as sns:Publish. Limit this to the one production CMK.
+        Sid      = "UseOperationsSnsKey"
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+        Resource = [aws_kms_key.production.arn]
+        Condition = {
+          StringEquals = {
+            "kms:ViaService"                         = "sns.${var.aws_region}.amazonaws.com"
+            "kms:EncryptionContext:aws:sns:topicArn" = local.operations_sns_topic_arn
+          }
+        }
       }
     ]
   })
@@ -1043,6 +1057,21 @@ resource "aws_kms_key_policy" "media_cloudfront" {
             }
             ArnEquals = {
               "aws:SourceArn" = local.ec2_alarm_arns
+            }
+          }
+        },
+        {
+          Sid    = "AllowOperationsSnsEncryption"
+          Effect = "Allow"
+          Principal = {
+            Service = "sns.amazonaws.com"
+          }
+          Action   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+          Resource = "*"
+          Condition = {
+            StringEquals = {
+              "aws:SourceAccount"                      = data.aws_caller_identity.current.account_id
+              "kms:EncryptionContext:aws:sns:topicArn" = local.operations_sns_topic_arn
             }
           }
         }
