@@ -72,14 +72,32 @@ broad authorization never permits an unexpected plan.
    `Confirmation`, `ActivationKind=existing`, and the exact commit, operation,
    images, and app version. Require `Success` and review its installed-manifest,
    release-file, and secret-schema checks. `initial-empty` is allowed only for a
-   genuinely empty PostgreSQL directory.
+   genuinely empty PostgreSQL directory. `failed-existing` is an exceptional
+   recovery type only after retained SSM evidence has been independently
+   reviewed to show that a prior activation failed before deploy and left every
+   DUDU unit/container stopped. Its
+   `RecoveryFromOperationId` and `FailedActivationCommandId` must record that
+   operator-supplied audit correlation; the command ID is not host-verifiable
+   proof. Validation repeats the remote-backup, disk, memory, and snapshot gates while
+   omitting only the impossible public HTTPS probe; it also sends and clears an
+   operation-scoped Operations SNS alert to prove alert publication. It changes
+   no service or container state.
+   Then use `Mode=arm-failed-existing` with the exact phrase
+   `ARM <new-operation-id> FROM <failed-operation-id>`; it repeats those gates
+   and writes a root-only authorization valid for 15 minutes, without starting
+   anything.
 5. Only after a fresh approval type exactly `ACTIVATE <operation-id>` and send a
    separate activation command with `Mode=activate` and that exact
    `Confirmation`; every other input and the document version/hash must be
-   unchanged. This is the sole deploy path: it verifies remote backup, completed
-   DLM snapshot and host health, stops timers/systemd, starts the scoped broker,
-   deploys with public Caddy absent, runs migrate → grant-runtime → migration-
-   check, then starts systemd/timers and asserts readiness, running image
+   unchanged. A reviewed `failed-existing` recovery instead requires the
+   distinct exact phrase `RECOVER <new-operation-id> FROM <failed-operation-id>`
+   after the separate arm step; it atomically consumes that authorization and
+   repeats its stopped-state and non-public preflight immediately before it acts. This is
+   the sole deploy path: it verifies remote backup, completed DLM snapshot and
+   host health,
+   stops timers/systemd, starts the scoped broker, deploys with public Caddy
+   absent, runs migrate → grant-runtime → migration-check, then starts
+   systemd/timers and asserts readiness, running image
    digests, effective app version, active units, and a new verified remote
    backup. Record output and command ID. A failure after shutdown keeps traffic
    stopped; do not improvise a manual deploy or reverse a migration. Use a

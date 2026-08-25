@@ -18,7 +18,7 @@ resource "aws_ssm_document" "ec2_release_activation" {
       Mode = {
         type          = "String"
         default       = "validate"
-        allowedValues = ["validate", "activate"]
+        allowedValues = ["validate", "arm-failed-existing", "activate"]
       }
       ExpectedCommit = {
         type           = "String"
@@ -31,14 +31,26 @@ resource "aws_ssm_document" "ec2_release_activation" {
       Confirmation = {
         type           = "String"
         default        = ""
-        description    = "Leave empty for validation. Activation requires ACTIVATE followed by the same OperationId."
-        allowedPattern = "^(|ACTIVATE [0-9a-f]{32})$"
+        description    = "Leave empty for validation. existing and initial-empty require ACTIVATE; failed-existing requires ARM then RECOVER with its new and prior operation IDs."
+        allowedPattern = "^(|ACTIVATE [0-9a-f]{32}|ARM [0-9a-f]{32} FROM [0-9a-f]{32}|RECOVER [0-9a-f]{32} FROM [0-9a-f]{32})$"
       }
       ActivationKind = {
         type          = "String"
         default       = "existing"
-        description   = "Existing requires fresh remote logical-backup, snapshot, and host-health checks. initial-empty refuses any PostgreSQL data."
-        allowedValues = ["existing", "initial-empty"]
+        description   = "Existing requires fresh remote logical-backup, snapshot, and host-health checks. failed-existing is a distinct recovery path for a fully stopped prior fail-closed attempt; it rechecks non-public host gates before restore and public HTTPS after it. initial-empty refuses any PostgreSQL data."
+        allowedValues = ["existing", "failed-existing", "initial-empty"]
+      }
+      RecoveryFromOperationId = {
+        type           = "String"
+        default        = ""
+        description    = "For failed-existing only: the 32-hex operation ID from retained prior-failure evidence."
+        allowedPattern = "^(|[0-9a-f]{32})$"
+      }
+      FailedActivationCommandId = {
+        type           = "String"
+        default        = ""
+        description    = "For failed-existing only: the SSM command UUID from retained prior-failure evidence; it is an audit correlation value."
+        allowedPattern = "^(|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
       }
       BackendImage = {
         type          = "String"
@@ -75,7 +87,7 @@ resource "aws_ssm_document" "ec2_release_activation" {
             "chmod 0500 \"$stage_dir/manage-runtime-assets\" \"$stage_dir/activate-release\"",
             "printf '%s  %s\\n' '${local.ec2_runtime_manager_sha256}' \"$stage_dir/manage-runtime-assets\" '${local.ec2_release_activation_sha256}' \"$stage_dir/activate-release\" | sha256sum -c -",
             "bash -n \"$stage_dir/manage-runtime-assets\" \"$stage_dir/activate-release\"",
-            "\"$stage_dir/activate-release\" '{{ Mode }}' '{{ ExpectedCommit }}' '{{ OperationId }}' '{{ Confirmation }}' '{{ ActivationKind }}' '{{ BackendImage }}' '{{ PostgresImage }}' '{{ CaddyImage }}' '{{ RequiredAppVersion }}' \"$stage_dir\" \"$stage_dir/manage-runtime-assets\"",
+            "\"$stage_dir/activate-release\" '{{ Mode }}' '{{ ExpectedCommit }}' '{{ OperationId }}' '{{ Confirmation }}' '{{ ActivationKind }}' '{{ BackendImage }}' '{{ PostgresImage }}' '{{ CaddyImage }}' '{{ RequiredAppVersion }}' '{{ RecoveryFromOperationId }}' '{{ FailedActivationCommandId }}' \"$stage_dir\" \"$stage_dir/manage-runtime-assets\"",
           ]
         }
       }
