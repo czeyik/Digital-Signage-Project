@@ -30,6 +30,7 @@ locals {
     "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-dlm-snapshot-create-failed",
     "arn:${data.aws_partition.current.partition}:cloudwatch:${var.aws_region}:${data.aws_caller_identity.current.account_id}:alarm:${local.name}-dlm-snapshot-stale"
   ]
+  operations_sns_topic_arn = "arn:${data.aws_partition.current.partition}:sns:${var.aws_region}:${data.aws_caller_identity.current.account_id}:${local.name}-operations"
   shared_environment = [
     { name = "DJANGO_DEBUG", value = "false" },
     { name = "DEPLOYMENT_ENV", value = "production" },

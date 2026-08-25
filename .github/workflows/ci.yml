@@ -164,6 +164,7 @@ jobs:
           terraform validate
           terraform test
           bash ./test-user-data-size.sh
+          bash ./test-sns-alert-kms-policy.sh
       - name: Validate isolated recovery smoke and helper guardrails
         working-directory: infrastructure/recovery-smoke
         run: |
