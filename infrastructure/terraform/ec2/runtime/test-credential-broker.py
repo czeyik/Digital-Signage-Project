@@ -23,6 +23,7 @@ loader.exec_module(broker)
 
 assert broker.BIND_ADDRESS == "169.254.170.2"
 assert broker.BIND_PORT == 51679
+assert broker.TOKEN_PATH == "/run/duducar/broker-secrets/aws-credentials-token"
 
 token = "a" * 64
 expiry = (datetime.now(timezone.utc) + timedelta(minutes=59)).isoformat()
@@ -47,7 +48,7 @@ with tempfile.TemporaryDirectory() as directory:
 
     def safe_token_stat(descriptor):
         value = real_fstat(descriptor)
-        return SimpleNamespace(st_mode=value.st_mode, st_uid=10001)
+        return SimpleNamespace(st_mode=value.st_mode, st_uid=0, st_gid=0)
 
     completed = SimpleNamespace(stdout=aws_response)
     environment = {

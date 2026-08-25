@@ -56,6 +56,8 @@ done
 install -d -o root -g root -m 0700 "$runtime_dir"
 backend_secrets_dir="$runtime_dir/backend-secrets"
 install -d -o 10001 -g 10001 -m 0500 "$backend_secrets_dir"
+broker_secrets_dir="$runtime_dir/broker-secrets"
+install -d -o root -g root -m 0500 "$broker_secrets_dir"
 owner_secrets_dir="$runtime_dir/database-owner"
 install -d -o 10001 -g 10001 -m 0500 "$owner_secrets_dir"
 postgres_runtime_secrets_dir="$runtime_dir/postgres-secrets"
@@ -136,6 +138,8 @@ if test -e "$existing_credential_token" || test -L "$existing_credential_token";
 else
   openssl rand -hex 32 > "$staging_dir/aws-credentials-token"
 fi
+install -o root -g root -m 0400 \
+  "$staging_dir/aws-credentials-token" "$staging_dir/broker-credentials-token"
 
 jq -cer '
   .PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON
@@ -260,6 +264,7 @@ for secret_name in \
   chmod 0400 "$staging_dir/$secret_name"
   mv -f "$staging_dir/$secret_name" "$backend_secrets_dir/$secret_name"
 done
+mv -f "$staging_dir/broker-credentials-token" "$broker_secrets_dir/aws-credentials-token"
 
 chown root:root "$application_tmp" "$postgres_tmp"
 chmod 0600 "$application_tmp" "$postgres_tmp"
