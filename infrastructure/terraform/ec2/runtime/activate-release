@@ -89,6 +89,11 @@ trap cleanup EXIT
 if [ "$activation_kind" = existing ]; then
   # Preflight assumes only the scoped application role, leaving the live stack
   # untouched if a credential broker problem is found before traffic shutdown.
+  # render-duducar-runtime-env above verified this root-owned configuration;
+  # export its backup bucket for the verifier's direct preflight invocation.
+  set -a
+  source /etc/duducar/host.env
+  set +a
   DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check
   DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health
 elif find /srv/duducar/postgres -mindepth 1 -print -quit | grep -q .; then
