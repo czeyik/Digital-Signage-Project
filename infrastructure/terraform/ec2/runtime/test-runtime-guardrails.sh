@@ -140,6 +140,10 @@ assert_before '/usr/local/sbin/duducar-stack deploy' '/usr/local/sbin/duducar-co
 assert_before '/usr/local/sbin/duducar-command migrate' '/usr/local/sbin/duducar-command grant-runtime' "$activation"
 assert_before '/usr/local/sbin/duducar-command grant-runtime' 'systemctl start duducar.service' "$activation"
 assert_before 'systemctl start duducar.service' '/usr/local/sbin/duducar-stack assert-release' "$activation"
+assert_before 'set -a' 'source /etc/duducar/host.env' "$activation"
+assert_before 'source /etc/duducar/host.env' 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' "$activation"
+assert_before 'source /etc/duducar/host.env' 'set +a' "$activation"
+assert_before 'set +a' 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' "$activation"
 assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' 'systemctl start duducar-credential-broker.service' "$activation"
 assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health' 'systemctl start duducar-credential-broker.service' "$activation"
 deploy_body=$(sed -n '/^deploy_stack()/,/^}/p' "$stack")
