@@ -13,15 +13,17 @@ backend_image=${6:-}
 postgres_image=${7:-}
 caddy_image=${8:-}
 required_app_version=${9:-}
-manifest_dir=${10:-}
-runtime_manager=${11:-}
+recovery_from_operation_id=${10:-}
+failed_activation_command_id=${11:-}
+manifest_dir=${12:-}
+runtime_manager=${13:-}
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Release activation must run as root." >&2
   exit 2
 fi
-case "$mode" in validate|activate) ;; *) echo "Mode must be validate or activate." >&2; exit 2 ;; esac
-case "$activation_kind" in existing|initial-empty) ;; *) echo "ActivationKind must be existing or initial-empty." >&2; exit 2 ;; esac
+case "$mode" in validate|arm-failed-existing|activate) ;; *) echo "Mode must be validate, arm-failed-existing, or activate." >&2; exit 2 ;; esac
+case "$activation_kind" in existing|failed-existing|initial-empty) ;; *) echo "ActivationKind must be existing, failed-existing, or initial-empty." >&2; exit 2 ;; esac
 [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
 [[ "$operation_id" =~ ^[0-9a-f]{32}$ ]]
 for image in "$backend_image" "$postgres_image" "$caddy_image"; do
@@ -31,6 +33,27 @@ for image in "$backend_image" "$postgres_image" "$caddy_image"; do
   }
 done
 [[ "$required_app_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]]
+if [ "$activation_kind" = failed-existing ]; then
+  [[ "$recovery_from_operation_id" =~ ^[0-9a-f]{32}$ ]] || {
+    echo "Failed-existing recovery requires the prior operation ID." >&2
+    exit 2
+  }
+  [[ "$failed_activation_command_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || {
+    echo "Failed-existing recovery requires the prior SSM command ID." >&2
+    exit 2
+  }
+elif [ -n "$recovery_from_operation_id$failed_activation_command_id" ]; then
+  echo "Recovery evidence is accepted only for failed-existing activation." >&2
+  exit 2
+fi
+if [ "$activation_kind" = failed-existing ] && [ "$recovery_from_operation_id" = "$operation_id" ]; then
+  echo "Failed-existing recovery must use a different prior operation ID." >&2
+  exit 2
+fi
+recovery_state_dir=/var/lib/duducar-recovery
+recovery_state_max_age=900
+recovery_state_file="$recovery_state_dir/$operation_id"
+recovery_claim_dir="$recovery_state_dir/.claim-$operation_id"
 
 release_config=/etc/duducar/release.env
 if ! test -f "$release_config" || test -L "$release_config" || \
@@ -57,15 +80,6 @@ assignment_value() {
 "$runtime_manager" assert "$commit" "$operation_id" "$manifest_dir" "$caddy_image"
 /usr/local/sbin/render-duducar-runtime-env
 
-if [ "$mode" = validate ]; then
-  echo "Release activation validation passed; no service or container state changed."
-  exit 0
-fi
-[ "$confirmation" = "ACTIVATE $operation_id" ] || {
-  echo "Activation requires the exact operation-bound confirmation phrase." >&2
-  exit 2
-}
-
 timers=(
   duducar-health.timer
   duducar-playlists.timer
@@ -73,12 +87,169 @@ timers=(
   duducar-retention.timer
   duducar-backup.timer
 )
+
+source_host_config() {
+  set -a
+  source /etc/duducar/host.env
+  set +a
+}
+
+existing_preflight() {
+  # Preflight assumes only the scoped application role, leaving the live stack
+  # untouched if a credential broker problem is found before traffic shutdown.
+  # render-duducar-runtime-env above verified this root-owned configuration;
+  # export its backup bucket for the verifier's direct preflight invocation.
+  source_host_config
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health
+}
+
+write_recovery_state() {
+  install -d -o root -g root -m 0700 "$recovery_state_dir"
+  if [ -e "$recovery_state_file" ] || [ -L "$recovery_state_file" ] || [ -e "$recovery_claim_dir" ]; then
+    echo "A recovery authorization already exists for this operation." >&2
+    return 1
+  fi
+  recovery_state_tmp=$(mktemp "$recovery_state_dir/.recovery.XXXXXX")
+  printf 'commit=%s\noperation_id=%s\nrecovery_from_operation_id=%s\nfailed_activation_command_id=%s\narmed_at=%s\n' \
+    "$commit" "$operation_id" "$recovery_from_operation_id" "$failed_activation_command_id" "$(date +%s)" \
+    > "$recovery_state_tmp"
+  chown root:root "$recovery_state_tmp"
+  chmod 0400 "$recovery_state_tmp"
+  mv -f -- "$recovery_state_tmp" "$recovery_state_file"
+}
+
+assert_recovery_state() {
+  if ! test -f "$recovery_state_file" || test -L "$recovery_state_file" || \
+    [ "$(stat -c '%U:%G:%a' "$recovery_state_file")" != root:root:400 ]; then
+    echo "Failed-existing recovery requires a root-only, armed recovery authorization." >&2
+    return 1
+  fi
+  mapfile -t recovery_state_lines < "$recovery_state_file"
+  [ "${#recovery_state_lines[@]}" -eq 5 ] && \
+    [ "${recovery_state_lines[0]}" = "commit=$commit" ] && \
+    [ "${recovery_state_lines[1]}" = "operation_id=$operation_id" ] && \
+    [ "${recovery_state_lines[2]}" = "recovery_from_operation_id=$recovery_from_operation_id" ] && \
+    [ "${recovery_state_lines[3]}" = "failed_activation_command_id=$failed_activation_command_id" ] || {
+      echo "Recovery authorization does not match this reviewed operation." >&2
+      return 1
+    }
+  armed_at=${recovery_state_lines[4]#armed_at=}
+  [[ "$armed_at" =~ ^[0-9]{10}$ ]] || {
+    echo "Recovery authorization has an invalid timestamp." >&2
+    return 1
+  }
+  now=$(date +%s)
+  if [ "$armed_at" -gt "$now" ] || [ $((now - armed_at)) -gt "$recovery_state_max_age" ]; then
+    echo "Recovery authorization has expired; arm a new reviewed operation." >&2
+    return 1
+  fi
+}
+
+consume_recovery_state() {
+  if ! mkdir -m 0700 "$recovery_claim_dir"; then
+    echo "Failed-existing recovery authorization has already been claimed." >&2
+    return 1
+  fi
+  assert_recovery_state
+  rm -f -- "$recovery_state_file"
+}
+
+verify_recovery_alert_delivery() {
+  recovery_alert="duducar-recovery-sns-${operation_id}-${mode}"
+  /usr/local/sbin/duducar-alert --problem "$recovery_alert" \
+    "Recovery activation $operation_id is validating Operations SNS delivery."
+  /usr/local/sbin/duducar-alert --clear "$recovery_alert" \
+    "Recovery activation $operation_id verified Operations SNS delivery."
+}
+
+failed_existing_preflight() {
+  # This narrow recovery path is only safe while the prior fail-closed attempt
+  # has left every DUDU lifecycle unit and public container stopped.
+  for unit in duducar-credential-broker.service duducar.service "${timers[@]}"; do
+    [ "$(systemctl is-active "$unit" || true)" = inactive ] || {
+      echo "Failed-existing recovery requires $unit to be inactive." >&2
+      return 1
+    }
+    enabled_state=$(systemctl is-enabled "$unit" || true)
+    if [ "$unit" = duducar-credential-broker.service ]; then
+      case "$enabled_state" in enabled|disabled) ;; *)
+        echo "Failed-existing recovery requires $unit to be enabled or disabled, not $enabled_state." >&2
+        return 1
+        ;;
+      esac
+    elif [ "$enabled_state" != enabled ]; then
+      echo "Failed-existing recovery requires $unit to remain enabled, not $enabled_state." >&2
+      return 1
+    fi
+  done
+  running_duducar_containers=$(docker ps --format '{{.Names}}')
+  if grep -Eq '^duducar-' <<< "$running_duducar_containers"; then
+    echo "Failed-existing recovery requires every DUDU container to be stopped." >&2
+    return 1
+  fi
+  public_listeners=$(ss -ltnH '( sport = :80 or sport = :443 )')
+  if [ -n "$public_listeners" ]; then
+    echo "Failed-existing recovery requires ports 80 and 443 to be unbound." >&2
+    return 1
+  fi
+
+  source_host_config
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check
+  # Public HTTPS is necessarily unavailable while the fail-closed stack is
+  # stopped. The unskipped check below is mandatory after systemd restores it.
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health --skip-public-https
+  verify_recovery_alert_delivery
+  printf 'Failed-existing recovery is correlated with operation %s and SSM command %s.\n' \
+    "$recovery_from_operation_id" "$failed_activation_command_id"
+}
+
+if [ "$mode" = validate ]; then
+  [ -z "$confirmation" ] || {
+    echo "Validation requires an empty confirmation." >&2
+    exit 2
+  }
+  if [ "$activation_kind" = failed-existing ]; then
+    failed_existing_preflight
+  fi
+  echo "Release activation validation passed; no service or container state changed."
+  exit 0
+fi
+
+if [ "$mode" = arm-failed-existing ]; then
+  [ "$activation_kind" = failed-existing ] || {
+    echo "Only failed-existing activation may arm a recovery authorization." >&2
+    exit 2
+  }
+  [ "$confirmation" = "ARM $operation_id FROM $recovery_from_operation_id" ] || {
+    echo "Recovery arming requires the exact operation-bound confirmation phrase." >&2
+    exit 2
+  }
+  failed_existing_preflight
+  write_recovery_state
+  echo "Failed-existing recovery authorization is armed; no service or container state changed."
+  exit 0
+fi
+
+expected_confirmation="ACTIVATE $operation_id"
+if [ "$activation_kind" = failed-existing ]; then
+  expected_confirmation="RECOVER $operation_id FROM $recovery_from_operation_id"
+fi
+[ "$confirmation" = "$expected_confirmation" ] || {
+  echo "Activation requires the exact operation-bound confirmation phrase for its activation kind." >&2
+  exit 2
+}
+if [ "$activation_kind" = failed-existing ]; then
+  consume_recovery_state
+fi
+
 traffic_changed=0
 cleanup() {
   status=$?
   set +e
   if [ "$status" -ne 0 ] && [ "$traffic_changed" -eq 1 ]; then
-    systemctl stop "${timers[@]}" duducar.service
+    systemctl stop "${timers[@]}" duducar.service duducar-credential-broker.service
+    /usr/local/sbin/duducar-stack stop || true
     /usr/local/sbin/duducar-alert duducar-activation \
       "Release activation $operation_id failed after traffic shutdown; the stack remains stopped." || true
   fi
@@ -86,23 +257,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [ "$activation_kind" = existing ]; then
-  # Preflight assumes only the scoped application role, leaving the live stack
-  # untouched if a credential broker problem is found before traffic shutdown.
-  # render-duducar-runtime-env above verified this root-owned configuration;
-  # export its backup bucket for the verifier's direct preflight invocation.
-  set -a
-  source /etc/duducar/host.env
-  set +a
-  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check
-  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health
-elif find /srv/duducar/postgres -mindepth 1 -print -quit | grep -q .; then
-  echo "Initial-empty activation requires an empty PostgreSQL data directory." >&2
-  exit 1
-fi
+case "$activation_kind" in
+  existing)
+    existing_preflight
+    ;;
+  failed-existing)
+    failed_existing_preflight
+    ;;
+  initial-empty)
+    if find /srv/duducar/postgres -mindepth 1 -print -quit | grep -q .; then
+      echo "Initial-empty activation requires an empty PostgreSQL data directory." >&2
+      exit 1
+    fi
+    ;;
+esac
 
-systemctl stop "${timers[@]}" duducar.service duducar-credential-broker.service
 traffic_changed=1
+systemctl stop "${timers[@]}" duducar.service duducar-credential-broker.service
 /usr/local/sbin/render-duducar-runtime-env
 systemctl start duducar-credential-broker.service
 /usr/local/sbin/duducar-stack deploy
@@ -116,6 +287,7 @@ systemctl start duducar.service "${timers[@]}"
 systemctl is-active --quiet duducar-credential-broker.service duducar.service "${timers[@]}"
 systemctl is-enabled --quiet duducar-credential-broker.service duducar.service "${timers[@]}"
 /usr/local/sbin/duducar-command backup
+/usr/local/sbin/duducar-host-health
 /usr/local/sbin/duducar-alert --clear duducar-activation \
   "Release activation $operation_id completed and its remote backup was verified."
 traffic_changed=0

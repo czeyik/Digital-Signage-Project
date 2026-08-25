@@ -8,6 +8,7 @@ renderer="$runtime_dir/render-runtime-env"
 broker="$runtime_dir/duducar-credential-broker"
 backup_verifier="$runtime_dir/duducar-backup-verify"
 activation="$runtime_dir/activate-release"
+host_health="$runtime_dir/duducar-host-health"
 
 require_literal() {
   literal=$1
@@ -34,10 +35,25 @@ bash -n \
   "$runtime_dir/postgres-init-roles.sh" \
   "$runtime_dir/manage-runtime-assets" \
   "$runtime_dir/manage-release-config" \
-  "$activation"
+  "$activation" \
+  "$host_health"
 python3 "$runtime_dir/test-credential-broker.py"
 python3 "$runtime_dir/test-backup-verifier.py"
 bash "$runtime_dir/test-duducar-stack.sh"
+
+invalid_host_health_output=$(bash "$host_health" --not-a-valid-option 2>&1 || true)
+if [[ "$invalid_host_health_output" != *'Usage: duducar-host-health [--skip-public-https]'* ]]; then
+  echo "Host health must reject unknown options before reading host configuration." >&2
+  exit 1
+fi
+recovery_claim_test=$(mktemp -d /tmp/duducar-recovery-claim.XXXXXX)
+recovery_claim="$recovery_claim_test/.claim"
+mkdir -m 0700 "$recovery_claim"
+if mkdir -m 0700 "$recovery_claim" >/dev/null 2>&1; then
+  echo "Recovery authorization claims must be exclusive." >&2
+  exit 1
+fi
+rmdir "$recovery_claim" "$recovery_claim_test"
 
 require_literal 'http_put_response_hop_limit = 1' "$terraform_dir/ec2_target.tf"
 require_literal 'resource "aws_iam_role" "ec2_target_application"' "$terraform_dir/ec2_target.tf"
@@ -123,6 +139,20 @@ require_literal '"sts",' "$broker"
 require_literal 'ProxyHandler({})' "$backup_verifier"
 reject_literal 'urllib.request.urlopen' "$backup_verifier"
 require_literal 'exit "$status"' "$runtime_dir/duducar-host-health"
+require_literal '--skip-public-https' "$host_health"
+require_literal 'failed-existing' "$activation"
+require_literal 'RECOVER $operation_id FROM $recovery_from_operation_id' "$activation"
+require_literal 'ARM $operation_id FROM $recovery_from_operation_id' "$activation"
+require_literal 'failed_activation_command_id' "$activation"
+require_literal 'recovery_state_max_age=900' "$activation"
+require_literal 'consume_recovery_state' "$activation"
+require_literal 'mkdir -m 0700 "$recovery_claim_dir"' "$activation"
+require_literal 'duducar-host-health --skip-public-https' "$activation"
+require_literal 'systemctl is-enabled "$unit"' "$activation"
+require_literal "ss -ltnH '( sport = :80 or sport = :443 )'" "$activation"
+require_literal '/usr/local/sbin/duducar-stack stop || true' "$activation"
+require_literal 'verify_recovery_alert_delivery' "$activation"
+require_literal 'duducar-recovery-sns-${operation_id}-${mode}' "$activation"
 
 for asset in \
   duducar-stack \
@@ -135,6 +165,8 @@ for asset in \
   require_literal "\"$asset\"" "$terraform_dir/runtime_assets.tf"
 done
 require_literal 'resource "aws_ssm_document" "ec2_release_activation"' "$terraform_dir/release_activation.tf"
+require_literal 'RecoveryFromOperationId' "$terraform_dir/release_activation.tf"
+require_literal 'FailedActivationCommandId' "$terraform_dir/release_activation.tf"
 require_literal 'PostgresImage' "$terraform_dir/release_config_assets.tf"
 require_literal 'CaddyImage' "$terraform_dir/release_config_assets.tf"
 
@@ -159,6 +191,16 @@ assert_before 'source /etc/duducar/host.env' 'set +a' "$activation"
 assert_before 'set +a' 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' "$activation"
 assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' 'systemctl start duducar-credential-broker.service' "$activation"
 assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health' 'systemctl start duducar-credential-broker.service' "$activation"
+post_backup=$(sed -n '/\/usr\/local\/sbin\/duducar-command backup/,$p' "$activation")
+if ! grep -Fq '/usr/local/sbin/duducar-host-health' <<< "$post_backup"; then
+  echo "Activation must verify public host health after its post-cutover backup." >&2
+  exit 1
+fi
+shutdown=$(sed -n '/^traffic_changed=1$/,+1p' "$activation")
+if [[ "$shutdown" != *'systemctl stop "${timers[@]}" duducar.service duducar-credential-broker.service'* ]]; then
+  echo "Activation must arm fail-closed cleanup before it stops production traffic." >&2
+  exit 1
+fi
 deploy_body=$(sed -n '/^deploy_stack()/,/^}/p' "$stack")
 if grep -Fq 'create_caddy' <<< "$deploy_body"; then
   echo "Deployment must keep Caddy absent until systemd activation." >&2

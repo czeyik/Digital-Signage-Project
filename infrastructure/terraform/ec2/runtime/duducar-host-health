@@ -1,6 +1,16 @@
 #!/bin/bash
 set -euo pipefail
 
+skip_public_https=false
+case "${1:-}" in
+  '') ;;
+  --skip-public-https) skip_public_https=true ;;
+  *)
+    echo "Usage: duducar-host-health [--skip-public-https]" >&2
+    exit 2
+    ;;
+esac
+
 host_config=/etc/duducar/host.env
 set -a
 source "$host_config"
@@ -86,6 +96,8 @@ probe_public_https() {
   fi
 }
 
-probe_public_https dashboard-public-https marketing.duducaradmin.com
-probe_public_https api-public-https api.marketing.duducaradmin.com
+if [ "$skip_public_https" = false ]; then
+  probe_public_https dashboard-public-https marketing.duducaradmin.com
+  probe_public_https api-public-https api.marketing.duducaradmin.com
+fi
 exit "$status"

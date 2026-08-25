@@ -358,6 +358,17 @@ separate `Mode=activate` command with that exact `Confirmation`. Use the default
 `ActivationKind=existing`; it requires a current remote logical backup, a
 completed current DLM snapshot, and passing host/public checks before shutdown.
 `initial-empty` is permitted only for a genuinely empty PostgreSQL directory.
+`failed-existing` is an exceptional recovery type, allowed only after retained
+SSM evidence is independently reviewed to show a prior pre-deploy failure and
+a fully stopped DUDU state. Its prior-operation and SSM-command fields are
+operator-supplied audit correlation, not host-verifiable proof. It first
+requires a fresh exact `ARM <operation-id> FROM <failed-operation-id>`
+confirmation to write a root-only authorization valid for 15 minutes. A
+separate fresh exact `RECOVER <operation-id> FROM <failed-operation-id>`
+confirmation atomically consumes that authorization. The path rechecks the backup, disk,
+memory, and snapshot gates without the impossible pre-start public probe,
+verifies Operations SNS publication, and requires public HTTPS again after
+start.
 The document then stops timers/systemd, starts the scoped credential broker,
 runs `duducar-stack deploy` with public Caddy absent, runs `migrate`,
 `grant-runtime`, and `migration-check` in that order, starts systemd and timers,
