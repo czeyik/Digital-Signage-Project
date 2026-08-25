@@ -7,7 +7,7 @@ main="$terraform_dir/main.tf"
 ec2_target="$terraform_dir/ec2_target.tf"
 
 require() {
-  rg -F --quiet "$1" "$2" || {
+  grep -Fq -- "$1" "$2" || {
     echo "Missing required SNS alert KMS policy: $1" >&2
     exit 1
   }
@@ -23,7 +23,7 @@ require 'Service = "sns.amazonaws.com"' "$ec2_target"
 require '"aws:SourceAccount"                      = data.aws_caller_identity.current.account_id' "$ec2_target"
 require '"kms:EncryptionContext:aws:sns:topicArn" = local.operations_sns_topic_arn' "$ec2_target"
 
-context_count=$(rg -F '"kms:EncryptionContext:aws:sns:topicArn" = local.operations_sns_topic_arn' "$ec2_target" | wc -l)
+context_count=$(grep -F '"kms:EncryptionContext:aws:sns:topicArn" = local.operations_sns_topic_arn' "$ec2_target" | wc -l)
 [ "$context_count" -ge 2 ] || {
   echo "The EC2 publisher and SNS service must both be scoped to the Operations topic." >&2
   exit 1
