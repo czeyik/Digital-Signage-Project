@@ -1,131 +1,112 @@
-# DUDU Car — Production Release Handoff
+# DUDU Car — Production Recovery and Canary Handoff
 
-**Updated:** 2026-08-24, Asia/Kuala_Lumpur
+**Updated:** 2026-08-25 (Asia/Kuala_Lumpur)
+**Overall state:** Production is intentionally fail-closed and stopped. Recovery is fully validated but not yet armed or executed. The remaining work is a controlled recovery followed by one-tablet canary enrollment.
 
-## Objective
+## Read first
 
-Reach the first one-device Malaysia production canary without weakening the
-Android 12+, private-media, SSM-only, backup/recovery, or USD 30/month
-controls.
+- Read `AGENTS.md` and the repository's production/runbook documentation before changing anything.
+- The canonical merged source is `origin/main` at `196655d91aa3466c9697a6cc4a8f887225e32edf` (PR #66).
+- The primary workspace was left on an obsolete branch whose upstream is gone. Do **not** reset or overwrite it. Create/use a clean worktree from `origin/main` for code or infrastructure work.
+- This handoff file is intentionally uncommitted in the primary workspace so it can be passed directly to the next agent.
 
-## Latest release-build update (2026-08-24)
+## Completed and merged
 
-- Investigated an Android packaging failure while unlocking the
-  `duducar-production` PKCS#12 private key. The project signing configuration
-  supports PKCS#12; no source or build-config change was needed.
-- A subsequent production release build completed successfully. No signing
-  password, key material, or other secret was recorded or changed.
-- The signed artifact was moved out of `/tmp` to
-  `/home/czeyik/dudu-signage-1.0.0-9d71fe1.apk` (do not commit it).
-- SHA-256:
-  `4424e4d26cc9a1bdcb15cc8630f589ee513658059cdc91456dde4c55e3707c57`.
-- Before activation, verify the APK certificate/version against the release
-  runbook and complete the remaining required gates below.
-
-## Canonical procedures
-
-Read `AGENTS.md`, `OVERVIEW.md`, `docs/architecture.md`,
-`docs/production-deployment-runbook.md`, `docs/hardware-qualification.md`,
-`docs/android-release-signing.md`, and `docs/backup-restore.md`. The production
-runbook is the release authority; this file is only the current-state summary.
-
-## Release candidate
-
-- Source: `origin/main` at
-  `9d71fe16c6a0a03cb1fb697ed21658df3de1a4f9` (merged PR #48).
-- CI: backend, PostgreSQL, Android, Terraform, and ARM64 container build/scan
-  jobs passed for that merge.
-- Repository governance: `main` has no GitHub branch protection or ruleset.
-  CI passed, but GitHub did not enforce it.
-- Start release work from a fresh, clean checkout of that exact commit. Do not
-  use a dirty workspace, obsolete temporary worktree, or deleted feature branch.
-
-## Current production state (read-only verified 2026-08-21)
-
-| Area | Current state |
+| PR | Result |
 | --- | --- |
-| Live release | The pre-hardening release remains live; PR #48 is not deployed. |
-| Images | No ARM64 image from `9d71fe1` has been pushed to ECR. Production still selects the pre-hardening 2026-08-10 backend digest `sha256:b9a3dc42c985fd28485bc0cc679e8f6c19706e70c14927485728e0caab60d2be`. |
-| Infrastructure | The PR #48 Terraform/runtime/worker hardening is unapplied. The host keeps IMDS hop limit 2; the current source requires 1. |
-| SSM | AWS has only old v1 runtime-assets and release-config documents. No release-activation document exists. |
-| Database | Production migrations `0009`–`0012` have not run. |
-| Worker | The old worker task definition and credential path remain deployed. No worker task is currently running. |
-| Backup and alarms | DLM and historical logical backup evidence exist, but fresh release-time backup/snapshot evidence is required. The new DLM failure/freshness alarms are absent. |
-| Device canary | No exact Android 12+ qualification or real signed-APK `MEETS_DEVICE_INTEGRITY` evidence is recorded. |
+| #57 | Merged — production/canary qualification work. |
+| #58 | Merged — supporting qualification/release work. |
+| #59 | Merged — physical approval checks no longer block production enrollment. |
+| #65 | Merged — narrow, fail-closed recovery for a stopped activation, with replay protection. |
+| #66 | Merged — least-privilege KMS permissions for encrypted SNS host alerts. |
 
-The application-secret values were not read. `WORKER_DB_PASSWORD` and
-`PLAY_INTEGRITY_APP_CERTIFICATE_SHA256` are required but unverified; never put
-their values in this file, source control, logs, or chat.
+PR #66 was applied successfully to production. Terraform changed only the EC2 target-role policy and the existing KMS key policy (`0 added, 2 changed, 0 destroyed`). Its Terraform checks, portable SNS policy check, and CI checks passed.
 
-The old SSM operation `08ccbebf3c7672087b96875e76884479` targets superseded
-release documents. Never resume it; use current documents and a fresh operation
-ID.
+## Production recovery state
 
-## Recorded release authority
+- AWS account/region: `173454940059` / `ap-southeast-5`
+- Production instance: `i-0f814d6d80f175319`
+- Encrypted operations topic: `duducar-signage-production-operations`
+- KMS key: `arn:aws:kms:ap-southeast-5:173454940059:key/90e704a2-0898-42df-b110-436f78e06fd2`
+- IAM simulation proved the host role can use the key only through SNS for that exact topic; the key policy authorizes the SNS service principal with the same account/topic restriction.
+- The reviewed recovery runtime and activation documents were installed and validated. Post-KMS validation command `93626e7a-112e-442a-9210-6b54a913c4e5` succeeded at `2026-08-25T12:15:04Z` (20:15 MYT), including the encrypted SNS problem-and-clear preflight.
+- The most recent read-only host check, command `74d6e1b7-6972-46ef-96c8-2109f3c9b2a4`, completed at `2026-08-25T13:34:47.888Z` (21:34 MYT): `duducar.service` and `duducar-credential-broker.service` were inactive, no containers were running, and there were no listeners. This is the intentional fail-closed state; production is not serving traffic.
 
-- Cze Yik authorized immediate execution and is the release operator and sole
-  rollback decision-maker. No separate maintenance window or backup contact is
-  recorded.
-- Approved project target: USD 30/month, excluding tablet mobile data.
-- Approved one-off deployment/recovery limit: USD 10.
-- This authorization does not waive artifact, secret, infrastructure, migration,
-  recovery, notification, hardware, integrity, or separate final-activation
-  confirmation gates.
+The original failed activation was operation `83837d450b89933797aa84665c9ef3b0` (SSM command `c39ef5fa-f918-42e7-b6aa-b16defb30923`). It stopped traffic before deployment/migration/start; no application data migration or service start occurred.
 
-## Historical evidence that needs current-release verification
+## Immediate blocker: fresh two-step recovery authorization
 
-- The available P60 Pro is ineligible for production: Android 10/API 29 with
-  the 2021-03-05 platform patch. Do not install the app on it or flash
-  unofficial firmware.
-- Existing v1.0.0 APK signing evidence, checksums, mapping, and key backups are
-  in the encrypted company vault. Build, sign, and verify an artifact matching
-  the final release source and `required_app_version` before enrollment.
-- A past isolated recovery drill passed and was destroyed. Its header-only CSV
-  was valid because the selected source had zero playback events. Treat it as
-  historical evidence; rerun and record the current-release recovery gate before
-  canary. Never fabricate playback records.
+Recovery is prepared as operation `450eb21325001afc817a8c33b13a4f3d`, correlated to the failed operation above.
 
-## Required before activation
+Do **not** reuse the earlier `ACTIVATE` messages or old activation codes. Before taking any traffic-affecting action, obtain this exact new user confirmation:
 
-1. Build, scan, push, and record a Linux/ARM64 backend image from `9d71fe1`.
-   Record exact digest-pinned backend, PostgreSQL, and Caddy image selections.
-2. Securely add or verify `WORKER_DB_PASSWORD` and
-   `PLAY_INTEGRITY_APP_CERTIFICATE_SHA256`; never expose their values.
-3. Build and verify the final signed APK. Record its version, checksum,
-   certificate fingerprint, and matching `required_app_version` outside Git.
-4. Run fresh AWS/owner preflight, make a fresh logical backup and completed DLM
-   snapshot, then create and review a fresh saved Terraform plan.
-5. Apply only the reviewed plan. It must install the hardened infrastructure,
-   runtime/config/activation SSM documents, worker controls, and DLM alarms.
-6. Through SSM only, validate then install the current runtime-bundle and
-   release-config documents, then validate activation. Activation requires a
-   separate explicit `ACTIVATE <operation-id>` confirmation.
-7. Before enrollment, complete exact-device Android 12+ qualification, real
-   signed-APK `MEETS_DEVICE_INTEGRITY`, notification-delivery testing, recovery
-   evidence, and the one-device canary checklist.
+```text
+ARM 450eb21325001afc817a8c33b13a4f3d FROM 83837d450b89933797aa84665c9ef3b0
+```
 
-## Known source limitation
+`ARM` only arms the reviewed recovery; it does not restore traffic. After it succeeds, report the result and separately request this new confirmation immediately before the traffic transition:
 
-After the hardening release is applied, the media worker is reduced-privilege
-relative to the web tier but is not fully egress- or per-asset-isolated: it
-retains access to shared media prefixes and arbitrary HTTPS egress for required
-AWS and ClamAV services. Do not claim full containment. The endpoint/proxy and
-capability redesign is a separate cost and architecture decision; see
-`infrastructure/README.md`.
+```text
+RECOVER 450eb21325001afc817a8c33b13a4f3d FROM 83837d450b89933797aa84665c9ef3b0
+```
 
-## Safety boundaries
+The user's current authorized maintenance window is 2026-08-25 16:00 MYT through 2026-08-26 16:00 MYT. Confirm the current time remains inside that window before executing recovery.
 
-- No raw Terraform, SSH, hand-edited runtime files, stale plan, manual
-  migration/deploy, or device enrollment.
-- After a migration starts, do not reverse it or deploy a pre-policy image;
-  stop traffic and use a reviewed forward fix or approved recovery path.
-- Never reuse old SSM operation IDs, recovery resources, credentials, signing
-  material, or browser/DNS trust for testing.
-- Never expose secrets, signing material, PINs, tokens, PII, or private media
-  URLs in source control, handoff notes, shell history, logs, or chat.
+### Recovery safety boundaries
 
-## Next safe action
+- Use the reviewed SSM recovery document only. Do not use SSH or manually start services, containers, timers, migrations, or traffic.
+- Do not make raw Terraform changes to work around recovery.
+- Never retrieve, print, or copy application secret values.
+- Preserve fail-closed behavior if any reviewed gate fails; report the precise failed gate instead of bypassing it.
 
-From a clean checkout of `9d71fe1`, prepare the immutable release artifact and
-protected inputs, then run the read-only production preflight. Do not change
-production until the resulting plan and SSM validation evidence are reviewed.
+## After a successful recovery
+
+Verify, with fresh read-only checks:
+
+1. External DNS, TLS, and application health are live and ready.
+2. The intended release is running; systemd services/timers, credential broker, containers, and listeners are healthy.
+3. Backup verification remains successful and no error alert remains open.
+4. The controlled recovery ran once only and did not replay an old operation.
+
+Expected immutable production images:
+
+- Backend: `173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-backend@sha256:2c67ecc60a47841793f6c2b7f8f3e62ba51161690d9b5db30de8bebfe0aa66d6`
+- Postgres: `173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-backend@sha256:b7d92c20f54f0d16243a64db68a04765a2f9da47d88c32c14755b396651ccdae`
+- Caddy: `173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-backend@sha256:e7017ad14a0e5643795d479cab97e468472f23d8987015a0b5069c62703dd81e`
+
+## One-device canary status
+
+The approved Android artifact is available locally:
+
+- APK: `/home/czeyik/dudu-signage-1.0.1-859d564.apk`
+- SHA-256: `3319b7b8168296d915b407b9c084d8f3278237745612b25d0592cee1bd3b064b`
+- Package/version: `com.duducar.signage`, `1.0.1` (versionCode `2`)
+- Signature verification and package metadata checks passed.
+
+The expected tablet is NDL-L09 / HNNDL-Q, Android 16/API 36, firmware `NDL-L09 10.0.0.160(C636E2R2P1)`, security patch `2026-07-01`. The owner attested a 10.95-inch physical display measurement excluding the bezel on 2026-08-24.
+
+Do not assume the tablet is currently connected, still factory-reset, or ADB-authorized. Ask the owner to connect USB and freshly authorize ADB, then collect and compare the actual identifiers before installing or assigning device owner. Device-owner setup must only occur while the device is at factory setup/reset state.
+
+### Qualification discrepancy to resolve before enrollment-code issuance
+
+PR #59 correctly decoupled the 19 physical/pilot approval checks from enrollment. However, the currently merged `HardwareQualification.is_enrollment_eligible` still requires a nonempty `evidence_reference` in addition to model, firmware, security-patch, and 9–12 inch diagonal checks. The owner explicitly said an evidence reference is not needed because they own the tablet.
+
+Do not invent an evidence reference or silently bypass the field. Inspect the production qualification record/admin workflow and resolve this product/code mismatch with the owner before creating an enrollment code. `approved_for_pilot` still requires all physical fields, but it is no longer needed for enrollment.
+
+## Remaining safe sequence
+
+1. Obtain exact `ARM` confirmation, execute the reviewed arm action, and report its result.
+2. Obtain a separate exact `RECOVER` confirmation, execute the reviewed recovery, and complete the post-recovery checks above.
+3. Resolve the `evidence_reference` qualification mismatch without fabricating evidence.
+4. With fresh USB/ADB authorization on the factory-reset tablet, validate identifiers, install the verified APK, set the approved device owner, and verify exact-alarm permission/owner state.
+5. Use the production admin workflow to assign the qualified device and issue a short-lived enrollment code.
+6. Enroll exactly one tablet and run the canary gates: enrollment, Play Integrity result, API/sync, asset hash/playback, fallback, and observed production health/alerts.
+
+## Useful local paths and environment
+
+- Primary workspace: `/home/czeyik/Documents/Digital Signage Project/Digital-Signage-Project`
+- Terraform variables: `infrastructure/terraform/terraform.tfvars`
+- AWS environment convention: `AWS_PROFILE=dudu-production` and `AWS_SDK_LOAD_CONFIG=1`
+- ADB convention: `/home/czeyik/Android/Sdk/platform-tools/adb`, `ADB_SERVER_PORT=5038`, `ADB_VENDOR_KEYS=/home/czeyik/.android`
+
+Do not expose environment-file, keystore, or application-secret contents in logs, chat, commits, or handoff updates.
