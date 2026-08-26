@@ -1,8 +1,8 @@
 [Unit]
-Description=Evaluate DUDU device health every 30 minutes
+Description=Evaluate DUDU device and location health every minute
 
 [Timer]
-OnCalendar=*-*-* *:00,30:00
+OnCalendar=*-*-* *:*:00
 Persistent=true
 AccuracySec=1min
 Unit=duducar-command@health.service

@@ -36,6 +36,8 @@ locals {
     { name = "DEPLOYMENT_ENV", value = "production" },
     { name = "DJANGO_ALLOWED_HOSTS", value = "${var.dashboard_hostname},${var.api_hostname}" },
     { name = "DJANGO_CSRF_TRUSTED_ORIGINS", value = "https://${var.dashboard_hostname}" },
+    { name = "LOCATION_MAP_REGION", value = var.aws_region },
+    { name = "LOCATION_MAP_STYLE_URL", value = "https://maps.geo.${var.aws_region}.amazonaws.com/v2/styles/Standard/descriptor" },
     { name = "DJANGO_SECURE_SSL_REDIRECT", value = "true" },
     { name = "DJANGO_TRUST_X_FORWARDED_PROTO", value = "true" },
     { name = "DJANGO_USE_X_FORWARDED_HOST", value = "false" },
@@ -91,7 +93,8 @@ locals {
       { name = "DJANGO_SECRET_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:DJANGO_SECRET_KEY::" },
       { name = "EMAIL_HOST_USER", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_USER::" },
       { name = "EMAIL_HOST_PASSWORD", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_PASSWORD::" },
-      { name = "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", valueFrom = "${aws_secretsmanager_secret.application.arn}:PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON::" }
+      { name = "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", valueFrom = "${aws_secretsmanager_secret.application.arn}:PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON::" },
+      { name = "LOCATION_MAP_API_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:LOCATION_MAP_API_KEY::" }
     ],
     var.enable_legacy_rds ? [
       { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.production[0].master_user_secret[0].secret_arn}:password::" }
@@ -1054,7 +1057,7 @@ resource "aws_iam_role_policy" "events" {
 
 locals {
   scheduled_tasks = local.legacy_ecs_runtime_enabled && local.legacy_ecs_task_definitions_enabled ? {
-    fleet-health    = { expression = "rate(30 minutes)", command = ["python", "manage.py", "evaluate_device_health"] },
+    fleet-health    = { expression = "rate(1 minute)", command = ["python", "manage.py", "evaluate_device_health"] },
     playlists       = { expression = "rate(6 hours)", command = ["python", "manage.py", "evaluate_playlists"] },
     media-reconcile = { expression = "rate(15 minutes)", command = ["python", "manage.py", "reconcile_media_processing"] },
     retention       = { expression = "cron(30 17 * * ? *)", command = ["python", "manage.py", "apply_retention"] },

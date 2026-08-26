@@ -38,6 +38,8 @@ required_host_values=(
   PILOT_BACKUP_S3_BUCKET
   DJANGO_ALLOWED_HOSTS
   DJANGO_CSRF_TRUSTED_ORIGINS
+  LOCATION_MAP_REGION
+  LOCATION_MAP_STYLE_URL
   ECS_MEDIA_CLUSTER
   ECS_MEDIA_TASK_DEFINITION
   ECS_MEDIA_SUBNET_IDS
@@ -125,6 +127,7 @@ if ! [[ "$play_integrity_app_certificates" =~ ^[0-9a-f]{64}(,[0-9a-f]{64})*$ ]];
   echo "PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 must contain canonical comma-separated SHA-256 fingerprints." >&2
   exit 1
 fi
+extract_secret_string LOCATION_MAP_API_KEY "$staging_dir/location-map-api-key"
 existing_credential_token="$backend_secrets_dir/aws-credentials-token"
 if test -e "$existing_credential_token" || test -L "$existing_credential_token"; then
   if ! test -f "$existing_credential_token" || test -L "$existing_credential_token" || \
@@ -156,6 +159,9 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit DEPLOYMENT_COMPONENT web
   emit DJANGO_ALLOWED_HOSTS "$DJANGO_ALLOWED_HOSTS"
   emit DJANGO_CSRF_TRUSTED_ORIGINS "$DJANGO_CSRF_TRUSTED_ORIGINS"
+  emit LOCATION_MAP_REGION "$LOCATION_MAP_REGION"
+  emit LOCATION_MAP_STYLE_URL "$LOCATION_MAP_STYLE_URL"
+  emit LOCATION_MAP_API_KEY "$(<"$staging_dir/location-map-api-key")"
   emit DJANGO_SECURE_SSL_REDIRECT true
   emit DJANGO_TRUST_X_FORWARDED_PROTO true
   emit DJANGO_USE_X_FORWARDED_HOST false

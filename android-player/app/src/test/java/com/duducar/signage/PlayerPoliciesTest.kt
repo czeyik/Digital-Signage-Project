@@ -13,6 +13,27 @@ import javax.crypto.spec.PBEKeySpec
 
 class PlayerPoliciesTest {
     @Test
+    fun locationPolicyAcceptsOnlyFreshPreciseNonMockGpsOrNetworkFixes() {
+        assertTrue(LocationPolicy.acceptsFix("gps", 100f, 0, false))
+        assertTrue(LocationPolicy.acceptsFix("network", 50f, 120_000, false))
+        assertFalse(LocationPolicy.acceptsFix("gps", 100.1f, 0, false))
+        assertFalse(LocationPolicy.acceptsFix("passive", 10f, 0, false))
+        assertFalse(LocationPolicy.acceptsFix("gps", 10f, 120_001, false))
+        assertFalse(LocationPolicy.acceptsFix("gps", 10f, 0, true))
+    }
+
+    @Test
+    fun locationPolicyDerivesFleetFreshnessStates() {
+        assertEquals("initializing", LocationPolicy.stateFor(null))
+        assertEquals("fresh", LocationPolicy.stateFor(179_999))
+        assertEquals("stale", LocationPolicy.stateFor(180_000))
+        assertEquals("unavailable", LocationPolicy.stateFor(600_000))
+        assertEquals("initializing", LocationPolicy.stateForNoFix(179_999))
+        assertEquals("stale", LocationPolicy.stateForNoFix(180_000))
+        assertEquals("unavailable", LocationPolicy.stateForNoFix(600_000))
+    }
+
+    @Test
     fun appUpdatePolicyRejectsMalformedOrNonIncreasingArtifacts() {
         val currentVersion = BuildConfig.VERSION_CODE
         assertNotNull(

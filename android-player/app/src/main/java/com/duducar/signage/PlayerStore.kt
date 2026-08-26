@@ -9,7 +9,7 @@ import org.json.JSONObject
 import java.time.Instant
 
 class PlayerStore(private val context: Context) :
-    SQLiteOpenHelper(context, "player.db", null, 4) {
+    SQLiteOpenHelper(context, "player.db", null, 5) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -32,6 +32,7 @@ class PlayerStore(private val context: Context) :
         )
         createOperationalTable(db)
         createRejectedUploadTable(db)
+        createLocationTable(db)
         createQueueIndexes(db)
     }
 
@@ -62,6 +63,19 @@ class PlayerStore(private val context: Context) :
         )
     }
 
+    private fun createLocationTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """
+            CREATE TABLE IF NOT EXISTS location_points (
+                id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL,
+                recorded_at INTEGER NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """.trimIndent(),
+        )
+    }
+
     private fun createQueueIndexes(db: SQLiteDatabase) {
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS pending_batches_created_idx ON pending_batches(created_at)",
@@ -72,6 +86,14 @@ class PlayerStore(private val context: Context) :
         )
         db.execSQL(
             "CREATE INDEX IF NOT EXISTS rejected_uploads_rejected_idx ON rejected_uploads(rejected_at)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS location_points_recorded_idx " +
+                "ON location_points(recorded_at)",
+        )
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS location_points_created_idx " +
+                "ON location_points(created_at)",
         )
     }
 
@@ -86,6 +108,7 @@ class PlayerStore(private val context: Context) :
             )
         }
         if (oldVersion < 4) createRejectedUploadTable(db)
+        if (oldVersion < 5) createLocationTable(db)
         createQueueIndexes(db)
     }
 
@@ -553,6 +576,178 @@ class PlayerStore(private val context: Context) :
             statusCode = statusCode,
         )
 
+    /**
+     * Persist a location point before any network work. The queue is capped by
+     * row count so a disconnected tablet cannot consume unbounded storage.
+     */
+    fun enqueueLocationPoint(
+        point: JSONObject,
+        recordedAtEpochMs: Long,
+        recordedAt: String,
+    ): LocationQueueLoss? {
+        val payload = point.toString()
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            database.insertWithOnConflict(
+                "location_points",
+                null,
+                ContentValues().apply {
+                    put("id", point.getString("id"))
+                    put("payload", payload)
+                    put("recorded_at", recordedAtEpochMs)
+                    put("created_at", System.currentTimeMillis())
+                },
+                SQLiteDatabase.CONFLICT_IGNORE,
+            )
+            val count = locationPointCount(database)
+            val removeCount = (count - LocationPolicy.QUEUE_CAPACITY).coerceAtLeast(0)
+            if (removeCount == 0) {
+                database.setTransactionSuccessful()
+                return null
+            }
+            val removals = mutableListOf<Pair<String, Long>>()
+            database.query(
+                "location_points",
+                arrayOf("id", "length(CAST(payload AS BLOB))"),
+                null,
+                null,
+                null,
+                null,
+                "created_at ASC, rowid ASC",
+                removeCount.toString(),
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    removals += cursor.getString(0) to cursor.getLong(1)
+                }
+            }
+            var removedBytes = 0L
+            removals.forEach { (id, bytes) ->
+                removedBytes += bytes
+                database.delete("location_points", "id = ?", arrayOf(id))
+            }
+            val details = JSONObject()
+                .put("removed_points", removals.size)
+                .put("estimated_removed_bytes", removedBytes)
+                .put("retained_points", locationPointCount(database))
+            enqueueOperationalEvent(
+                database,
+                JSONObject()
+                    .put("kind", "location_queue_loss")
+                    .put("recorded_at", recordedAt)
+                    .put("details", details),
+            )
+            database.setTransactionSuccessful()
+            return LocationQueueLoss(removals.size, removedBytes)
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    fun pendingLocationBatch(
+        limit: Int = 500,
+        currentPointId: String? = state(LOCATION_CURRENT_POINT_ID),
+    ): List<Pair<String, JSONObject>> {
+        val safeLimit = limit.coerceIn(1, 500)
+        val rows = mutableListOf<Pair<String, JSONObject>>()
+        val cursor = if (currentPointId.isNullOrBlank()) {
+            readableDatabase.rawQuery(
+                "SELECT id, payload FROM location_points " +
+                    "ORDER BY created_at ASC, rowid ASC LIMIT ?",
+                arrayOf(safeLimit.toString()),
+            )
+        } else {
+            readableDatabase.rawQuery(
+                "SELECT id, payload FROM location_points " +
+                    "ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, " +
+                    "created_at ASC, rowid ASC LIMIT ?",
+                arrayOf(currentPointId, safeLimit.toString()),
+            )
+        }
+        cursor.use {
+            while (cursor.moveToNext()) {
+                val id = cursor.getString(0)
+                runCatching { JSONObject(cursor.getString(1)) }
+                    .onSuccess { rows += id to it }
+            }
+        }
+        return rows
+    }
+
+    fun hasPendingLocationPoints(): Boolean =
+        locationPointCount(readableDatabase) > 0
+
+    fun locationPointCount(): Int = locationPointCount(readableDatabase)
+
+    private fun locationPointCount(database: SQLiteDatabase): Int =
+        database.rawQuery("SELECT COUNT(*) FROM location_points", null).use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) else 0
+        }
+
+    fun acknowledgeLocationPoints(ids: Collection<String>) {
+        if (ids.isEmpty()) return
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            ids.forEach { id -> database.delete("location_points", "id = ?", arrayOf(id)) }
+            val current = state(database, LOCATION_CURRENT_POINT_ID)
+            if (current != null && ids.contains(current)) {
+                putState(database, LOCATION_CURRENT_POINT_ID, "")
+            }
+            database.setTransactionSuccessful()
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    fun discardLocationPointAsPoison(
+        id: String,
+        reason: String,
+        statusCode: Int,
+        recordedAt: String,
+    ): Boolean {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val payload = payloadFor(database, "location_points", id) ?: return false
+            archiveRejectedUpload(database, "location_point", id, payload, statusCode)
+            database.delete("location_points", "id = ?", arrayOf(id))
+            enqueueOperationalEvent(
+                database,
+                JSONObject()
+                    .put("kind", "location_point_rejected")
+                    .put("recorded_at", recordedAt)
+                    .put(
+                        "details",
+                        JSONObject().put("point_id", id).put("reason", reason),
+                    ),
+            )
+            database.setTransactionSuccessful()
+            return true
+        } finally {
+            database.endTransaction()
+        }
+    }
+
+    fun setLocationCurrentPointId(id: String?) {
+        putState(LOCATION_CURRENT_POINT_ID, id.orEmpty())
+    }
+
+    fun setLocationCollectionState(state: JSONObject) {
+        putState(LOCATION_COLLECTION_STATE, state.toString())
+    }
+
+    fun pendingLocationCollectionState(): JSONObject? =
+        state(LOCATION_COLLECTION_STATE)
+            ?.takeIf { it.isNotBlank() }
+            ?.let { runCatching { JSONObject(it) }.getOrNull() }
+
+    fun acknowledgeLocationCollectionState(sent: JSONObject) {
+        val database = writableDatabase
+        val current = state(database, LOCATION_COLLECTION_STATE)
+        if (current == sent.toString()) putState(database, LOCATION_COLLECTION_STATE, "")
+    }
+
     private fun oldestPending(
         table: String,
         discardInvalid: (String) -> Boolean,
@@ -755,6 +950,8 @@ class PlayerStore(private val context: Context) :
             "unanchored_planned_shutdown_event_ids"
         const val EXIT_HISTORY_CURSOR = "exit_history_cursor"
         const val EXIT_HISTORY_INSTALLATION_ID = "exit_history_installation_id"
+        const val LOCATION_CURRENT_POINT_ID = "location_current_point_id"
+        const val LOCATION_COLLECTION_STATE = "location_collection_state"
         const val MAX_REJECTED_UPLOADS = 100
         const val LOCAL_CORRUPTION_STATUS = 0
     }

@@ -20,6 +20,7 @@ from signage.models import (
     DeviceAssignment,
     DeviceCredential,
     DeviceHeartbeat,
+    DeviceLocationPoint,
     DeviceOperationalEvent,
     Driver,
     HardwareQualification,
@@ -68,6 +69,17 @@ def post_operational_event(client, access, payload):
         payload,
         content_type="application/json",
         HTTP_AUTHORIZATION=f"Bearer {access}",
+    )
+
+
+def post_location_batch(client, access, payload):
+    body = gzip.compress(json.dumps(payload).encode("utf-8"), mtime=0)
+    return client.post(
+        reverse("device-location-batch"),
+        body,
+        content_type="application/json",
+        HTTP_AUTHORIZATION=f"Bearer {access}",
+        HTTP_CONTENT_ENCODING="gzip",
     )
 
 
@@ -139,6 +151,135 @@ def provisioned_device():
     playlist.published_at = timezone.now()
     playlist.save(update_fields=["status", "published_at"])
     return device, playlist, item, access
+
+
+@pytest.mark.django_db
+def test_location_batch_binds_historical_assignment_and_is_idempotent(
+    client, provisioned_device
+):
+    device, _, _, access = provisioned_device
+    recorded_at = (timezone.now() - timedelta(seconds=30)).replace(microsecond=0)
+    point = {
+        "id": str(uuid.uuid4()),
+        "recorded_at": recorded_at.isoformat(),
+        "device_recorded_at": recorded_at.isoformat(),
+        "latitude": 3.139,
+        "longitude": 101.6869,
+        "accuracy_m": 18.5,
+        "provider": "gps",
+        "source": "location_manager",
+    }
+    payload = {
+        "current": {
+            "state": "fresh",
+            "reported_at": timezone.now().isoformat(),
+        },
+        "points": [point],
+    }
+    response = post_location_batch(client, access, payload)
+    assert response.status_code == 201 or response.status_code == 200
+    assert response.json()["acknowledged_ids"] == [point["id"]]
+    stored = DeviceLocationPoint.objects.get(pk=point["id"])
+    assert stored.assignment.vehicle.registration == "WXY1234"
+    assert stored.assignment.driver.internal_id == "D001"
+    device.refresh_from_db()
+    assert device.location_state == "fresh"
+    assert device.last_location_reported_at is not None
+
+    replay = post_location_batch(client, access, payload)
+    assert replay.status_code == 200
+    assert replay.json()["acknowledged_ids"] == [point["id"]]
+    assert DeviceLocationPoint.objects.filter(pk=point["id"]).count() == 1
+
+
+@pytest.mark.django_db
+def test_location_batch_returns_permanent_rejection_reason_for_unsafe_fix(
+    client, provisioned_device
+):
+    _, _, _, access = provisioned_device
+    point_id = str(uuid.uuid4())
+    now = timezone.now().replace(microsecond=0)
+    response = post_location_batch(
+        client,
+        access,
+        {
+            "points": [
+                {
+                    "id": point_id,
+                    "recorded_at": now.isoformat(),
+                    "device_recorded_at": now.isoformat(),
+                    "latitude": 3.139,
+                    "longitude": 101.6869,
+                    "accuracy_m": 100.1,
+                    "provider": "gps",
+                    "source": "location_manager",
+                }
+            ]
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["rejected"] == [
+        {"id": point_id, "reason": "invalid_point"}
+    ]
+    assert not DeviceLocationPoint.objects.filter(pk=point_id).exists()
+
+
+@pytest.mark.django_db
+def test_location_batch_planned_gap_suppresses_alert_until_reacquisition(
+    client, provisioned_device
+):
+    device, _, _, access = provisioned_device
+    response = post_location_batch(
+        client,
+        access,
+        {
+            "current": {
+                "state": "planned_gap",
+                "reported_at": timezone.now().isoformat(),
+                "planned_gap_until": (
+                    timezone.now() + timedelta(minutes=2)
+                ).isoformat(),
+            },
+            "points": [],
+        },
+    )
+    assert response.status_code == 200
+    assert device.alerts.filter(code__startswith="location_").count() == 0
+    device.refresh_from_db()
+    assert device.location_state == "planned_gap"
+    assert device.location_planned_gap_until is not None
+
+
+@pytest.mark.django_db
+def test_location_batch_does_not_roll_cached_state_backwards(
+    client, provisioned_device
+):
+    device, _, _, access = provisioned_device
+    newest = timezone.now().replace(microsecond=0)
+    assert post_location_batch(
+        client,
+        access,
+        {
+            "current": {
+                "state": "fresh",
+                "reported_at": newest.isoformat(),
+            }
+        },
+    ).status_code == 200
+    older = post_location_batch(
+        client,
+        access,
+        {
+            "current": {
+                "state": "unavailable",
+                "reported_at": (newest - timedelta(minutes=1)).isoformat(),
+            }
+        },
+    )
+    assert older.status_code == 200
+    device.refresh_from_db()
+    assert device.location_state == "fresh"
+    assert not device.alerts.filter(code="location_unavailable").exists()
 
 
 @pytest.mark.django_db

@@ -273,6 +273,14 @@ APP_UPDATE_STORAGE_NAME = os.getenv("APP_UPDATE_STORAGE_NAME", "").strip()
 APP_UPDATE_SHA256 = os.getenv("APP_UPDATE_SHA256", "").strip().lower()
 APP_UPDATE_SIZE_BYTES = int(os.getenv("APP_UPDATE_SIZE_BYTES", "0"))
 APP_UPDATE_ROLLOUT_PERCENT = int(os.getenv("APP_UPDATE_ROLLOUT_PERCENT", "0"))
+LOCATION_MAP_REGION = os.getenv("LOCATION_MAP_REGION", "ap-southeast-5").strip()
+LOCATION_MAP_NAME = os.getenv("LOCATION_MAP_NAME", "duducar-fleet").strip()
+LOCATION_MAP_API_KEY = os.getenv("LOCATION_MAP_API_KEY", "").strip()
+LOCATION_MAP_STYLE_URL = os.getenv(
+    "LOCATION_MAP_STYLE_URL",
+    f"https://maps.geo.{LOCATION_MAP_REGION}.amazonaws.com/"
+    f"maps/v0/maps/{LOCATION_MAP_NAME}/style-descriptor",
+).strip()
 DEVICE_OVERHEAT_CELSIUS = float(os.getenv("DEVICE_OVERHEAT_CELSIUS", "45"))
 DEVICE_MEDIA_CACHE_BYTES = int(os.getenv("DEVICE_MEDIA_CACHE_BYTES", str(10 * 1024**3)))
 DEVICE_EVENT_QUEUE_BYTES = int(

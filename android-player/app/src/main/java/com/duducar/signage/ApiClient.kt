@@ -81,6 +81,14 @@ class ApiClient(private val credentials: CredentialStore) {
             compressBody = true,
         )
 
+    fun uploadLocationBatch(body: JSONObject): JSONObject =
+        authenticatedRequest(
+            "devices/location-batches/",
+            "POST",
+            body,
+            compressBody = true,
+        )
+
     fun uploadOperationalEvent(body: JSONObject): JSONObject =
         authenticatedRequest("devices/operational-events/", "POST", body)
 

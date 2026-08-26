@@ -4,6 +4,9 @@ from . import views
 
 urlpatterns = [
     path("", views.dashboard, name="dashboard"),
+    path("locations/", views.location_map, name="location-map"),
+    path("locations/latest.json", views.location_latest, name="location-latest"),
+    path("locations/history.json", views.location_history, name="location-history"),
     path("media/", views.media_list, name="media-list"),
     path("media/upload/", views.media_upload, name="media-upload"),
     path("media/<uuid:media_id>/delete/", views.media_delete, name="media-delete"),

@@ -110,6 +110,52 @@ Malaysia pilot on the existing low-cost AWS design. Keep the current Android
   and vehicle enrollment remain pending. Re-run read-only AWS/owner preflight
   before any production action; do not treat this dated status as live proof.
 
+## GPS tracking implementation status (2026-08-26)
+
+The foreground-only GPS feature is implemented in the current GPS working
+tree, but has not been deployed or enabled in production. The Android player
+uses native `LocationManager` GPS/network providers while the enrolled
+activity is visible, records a qualifying non-mock fix every minute, persists
+unsent points in SQLite (newest 50,000 cap), and uploads gzip batches of up to
+500 with current-point priority and idempotent acknowledgements. Device-owner
+policy grants precise location and enables location services; playback,
+fallback, maintenance, shutdown, and connectivity paths remain independent of
+location collection.
+
+The backend migration `0014_location_tracking` adds the indexed PostgreSQL
+point model, historical assignment binding, cached state, 30-day retention,
+authenticated batch ingestion, permanent rejection handling, and minute-level
+health evaluation. Owner/marketing dashboard routes expose only device label,
+vehicle registration, driver internal ID, coordinates, recorded/received time,
+provider, accuracy, current state, and a single-device maximum-24-hour raw
+polyline. No driver names, public endpoint, reverse geocoding, geofencing, or
+location writes are included. Batch processing logs counts only (never
+coordinates or point payloads); queue overflow, rejected points, and stale or
+disabled devices create operational alerts.
+
+The map uses the pinned self-hosted MapLibre GL JS/CSS v5.6.0 bundle:
+
+- JS SHA-256: `07e6ca71a5b6d835a7c3803fb484f0a6e5f0dcbfa131407666edb9e9316564f9`
+- CSS SHA-256: `792ac997dcf6ae6f643eb4e2dee4630c85e7056526bd8fb85ffe83c67d6c41b4`
+
+Terraform provisions a read-only, production-dashboard-referrer-restricted
+Amazon Location API key for GrabMaps `vector.basemap` in `ap-southeast-5` and
+changes fleet-health evaluation to every minute. The browser key value must be
+added by the operator as `LOCATION_MAP_API_KEY` in the existing application
+Secrets Manager JSON; it is intentionally not stored in Terraform source or
+this handoff. The Maps key, map tile usage, ingestion/rejection counts,
+overflow alerts, evaluator duration, and database growth still require the
+normal production monitoring review.
+
+Before rollout, run a fresh reviewed migration/plan and the supported release
+activation path, then build a signed GPS APK at a version code strictly higher
+than the current code 3 (code 4 is the next eligible OTA target). Do not enable
+the rollout until the exact Android 12+ tablet/firmware passes GNSS cadence and
+accuracy, offline replay/reconnect, permission, battery, thermal, and
+mock-location qualification; provide the documented driver notice; and run the
+one-device 72-hour canary. No Terraform apply, migration, map-key installation,
+APK publication, or production activation has been run for this GPS change.
+
 ## Blocking gates
 
 1. Obtain an exact Android 12+ tablet or OEM-signed Android 12+ firmware with

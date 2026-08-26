@@ -44,6 +44,7 @@ class MainActivity : Activity() {
     private lateinit var operationsScheduler: OperationsScheduler
     private lateinit var appUpdater: AppUpdater
     private lateinit var uploadApi: ApiClient
+    private lateinit var locationTracker: LocationTracker
     private val controlExecutor = Executors.newSingleThreadExecutor()
     private val downloadExecutor = Executors.newSingleThreadExecutor()
     private val uploadExecutor = Executors.newSingleThreadExecutor()
@@ -109,6 +110,14 @@ class MainActivity : Activity() {
         store = PlayerStore(this)
         serverClock = ServerClock(this)
         integrity = IntegrityClient(this)
+        locationTracker = LocationTracker(
+            context = this,
+            credentials = credentials,
+            kioskPolicies = kioskPolicies,
+            store = store,
+            serverClock = serverClock,
+            requestUpload = ::requestUploadFlush,
+        )
         activeManifest = cache.activeManifest()
         shutdownPrepared = store.hasPlannedShutdownMarker()
         val checkpointRecovered = recoverInterruptedPlayback()
@@ -126,6 +135,7 @@ class MainActivity : Activity() {
         }
 
         if (isShutdownPrepared()) {
+            locationTracker.markShutdown()
             credentials.endAdminSession()
             if (!enterLockedKiosk()) {
                 showStatus(
@@ -260,6 +270,7 @@ class MainActivity : Activity() {
         try {
             val created = store.preparePlannedShutdown(marker, event)
             shutdownPrepared = true
+            locationTracker.markShutdown()
             operationsHandler.removeCallbacksAndMessages(null)
             operationsScheduler.cancel()
             if (created) {
@@ -288,6 +299,7 @@ class MainActivity : Activity() {
     private fun resumeAfterPreparedShutdown() {
         store.clearPlannedShutdownMarker()
         shutdownPrepared = false
+        locationTracker.resumeAfterShutdown()
         binding.shutdownReady.visibility = View.GONE
         if (!enterLockedKiosk()) {
             showStatus(
@@ -335,6 +347,7 @@ class MainActivity : Activity() {
         controlExecutor.shutdownNow()
         downloadExecutor.shutdownNow()
         uploadExecutor.shutdownNow()
+        if (::locationTracker.isInitialized) locationTracker.destroy()
         if (::appUpdater.isInitialized) appUpdater.close()
         super.onDestroy()
     }
@@ -364,8 +377,10 @@ class MainActivity : Activity() {
         super.onResume()
         activityResumed = true
         if (!::credentials.isInitialized) return
+        locationTracker.onForegroundChanged(true)
         updateKeepScreenOn()
         if (isShutdownPrepared()) {
+            locationTracker.markShutdown()
             credentials.endAdminSession()
             if (enterLockedKiosk()) showShutdownReady()
             return
@@ -395,6 +410,7 @@ class MainActivity : Activity() {
 
     override fun onPause() {
         activityResumed = false
+        if (::locationTracker.isInitialized) locationTracker.onForegroundChanged(false)
         super.onPause()
     }
 
@@ -425,8 +441,10 @@ class MainActivity : Activity() {
             return
         }
         credentials.beginAdminSession(nowEpochMs, SystemClock.elapsedRealtime())
+        locationTracker.beginPlannedGap()
         if (!adminRelockScheduler.schedule(KioskAdminPolicy.SESSION_DURATION_MS)) {
             credentials.endAdminSession()
+            locationTracker.endAdminSession()
             binding.adminError.text = getString(R.string.exact_alarm_required)
             return
         }
@@ -436,6 +454,7 @@ class MainActivity : Activity() {
         if (!kioskPolicies.relaxForAdminSession()) {
             adminRelockScheduler.cancel()
             credentials.endAdminSession()
+            locationTracker.endAdminSession()
             showStatus(getString(R.string.kiosk_policy_failed))
             return
         }
@@ -475,6 +494,7 @@ class MainActivity : Activity() {
         adminHandler.removeCallbacks(adminRelock)
         adminRelockScheduler.cancel()
         credentials.endAdminSession()
+        locationTracker.endAdminSession()
         binding.adminUnlock.visibility = View.GONE
         binding.adminControls.visibility = View.GONE
         if (!activityResumed && bringToFront) {
@@ -581,6 +601,7 @@ class MainActivity : Activity() {
                         }
                         binding.enrollment.visibility = View.GONE
                         binding.enrollmentError.text = ""
+                        locationTracker.onForegroundChanged(activityResumed)
                         synchronizeAndPlay()
                         scheduleOperations()
                     }
@@ -852,6 +873,7 @@ class MainActivity : Activity() {
             operationsScheduler.cancel()
             api.clearAccessToken()
             uploadApi.clearAccessToken()
+            locationTracker.onForegroundChanged(activityResumed)
             adminRelockScheduler.cancel()
             credentials.endAdminSession()
             invalidateManifestPreparation()
@@ -1262,6 +1284,17 @@ class MainActivity : Activity() {
                 return
             }
         }
+        try {
+            flushPendingLocation()
+        } catch (_: CredentialRejectedException) {
+            handleCredentialsRejected()
+            return
+        } catch (_: ForbiddenException) {
+            handleServerForbidden()
+            return
+        } catch (_: Exception) {
+            return
+        }
         while (true) {
             val (id, payload) = store.oldestPendingBatch(serverClock.now().toString()) ?: break
             try {
@@ -1279,6 +1312,53 @@ class MainActivity : Activity() {
             } catch (_: Exception) {
                 return
             }
+        }
+    }
+
+    private fun flushPendingLocation() {
+        val rows = store.pendingLocationBatch(
+            limit = LOCATION_BATCH_MAX_POINTS,
+        )
+        val state = store.pendingLocationCollectionState()
+        if (rows.isEmpty() && state == null) return
+        val points = JSONArray()
+        rows.forEach { (_, point) -> points.put(point) }
+        val body = JSONObject().put("points", points)
+        state?.let { body.put("current", it) }
+        val response = uploadApi.uploadLocationBatch(body)
+        val sentIds = rows.map { it.first }.toSet()
+        val acknowledged = buildSet {
+            response.optJSONArray("acknowledged_ids")?.let { values ->
+                for (index in 0 until values.length()) {
+                    values.optString(index)
+                        .takeIf { it.isNotBlank() && it in sentIds }
+                        ?.let(::add)
+                }
+            }
+        }
+        store.acknowledgeLocationPoints(acknowledged)
+        response.optJSONArray("rejected")?.let { rejected ->
+            for (index in 0 until rejected.length()) {
+                val item = rejected.optJSONObject(index) ?: continue
+                val id = item.optString("id")
+                    .takeIf { it.isNotBlank() && it in sentIds }
+                    ?: continue
+                store.discardLocationPointAsPoison(
+                    id = id,
+                    reason = item.optString("reason", "permanent_rejection"),
+                    statusCode = 422,
+                    recordedAt = serverClock.now().toString(),
+                )
+            }
+        }
+        if (state != null && response.optBoolean("state_accepted", false)) {
+            store.acknowledgeLocationCollectionState(state)
+        }
+        if (store.hasPendingLocationPoints()) {
+            operationsHandler.postDelayed(
+                { requestUploadFlush() },
+                LOCATION_DRAIN_DELAY_MS,
+            )
         }
     }
 
@@ -1431,6 +1511,7 @@ class MainActivity : Activity() {
     private fun showShutdownReady() {
         // Covers a process death in the tiny interval after the durable marker
         // was written but before the normal prepare path cancelled its alarms.
+        if (::locationTracker.isInitialized) locationTracker.markShutdown()
         operationsScheduler.cancel()
         stopPlayback()
         binding.adminUnlock.visibility = View.GONE
@@ -1741,6 +1822,8 @@ class MainActivity : Activity() {
         private const val VIDEO_START_TIMEOUT_MS = 10_000L
         private const val VIDEO_COMPLETION_GRACE_MS = 15_000L
         private const val INVALID_PLAYLIST_RETRY_MS = 60_000L
+        private const val LOCATION_BATCH_MAX_POINTS = 500
+        private const val LOCATION_DRAIN_DELAY_MS = 5_000L
         private val playbackResultStatuses = setOf("completed", "interrupted", "failed")
     }
 

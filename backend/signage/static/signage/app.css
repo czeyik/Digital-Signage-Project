@@ -52,7 +52,7 @@ th, td { padding: 13px 10px; border-bottom: 1px solid var(--line); text-align: l
 th { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0; }
 .compact-table, .data-table { font-size: 14px; }
 .compact-table th, .compact-table td, .data-table th, .data-table td { padding: 11px 8px; }
-.data-table { margin: 0; min-width: 520px; }
+.data-table { margin: 0; min-width: 620px; }
 .table-wrap { width: 100%; overflow-x: auto; margin-top: 18px; }
 button, .button { min-height: 38px; border: 1px solid #b8c2ba; border-radius: 7px; padding: 9px 13px; background: white; color: var(--ink); cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; line-height: 1.2; }
 .primary { background: var(--green); border-color: var(--green); color: white; }
@@ -123,4 +123,18 @@ input, select, textarea { width: 100%; margin-top: 5px; padding: 10px; border: 1
   .metric-grid, .kpi-grid, .dashboard-columns, .result-grid { grid-template-columns: 1fr; }
   .topbar { padding: 0 18px; }
   .dashboard-hero, .dashboard-card { padding: 18px; }
+}
+
+.location-shell { display: grid; gap: 16px; }
+.location-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.location-toolbar label { color: var(--muted); font-size: 13px; font-weight: 700; }
+.location-toolbar select, .location-toolbar input { min-height: 38px; }
+.fleet-map { min-height: 560px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #dfe8e5; }
+.maplibregl-popup-content { font: 13px/1.5 system-ui, sans-serif; }
+.location-state-planned_gap, .location-state-shutdown { color: #6b7280; }
+.location-state-stale { color: #b54708; }
+.location-state-unavailable, .location-state-permission_disabled, .location-state-location_disabled, .location-state-mock { color: var(--red); }
+@media (max-width: 620px) {
+  .fleet-map { min-height: 420px; }
+  .location-toolbar { align-items: stretch; flex-direction: column; }
 }

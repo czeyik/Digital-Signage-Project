@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import uuid
 from datetime import datetime, time, timedelta
 
 from django.conf import settings
@@ -22,7 +23,7 @@ from django.db.models.functions import TruncDate
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.debug import sensitive_variables
 from django.views.decorators.http import require_http_methods, require_POST
 
@@ -39,6 +40,7 @@ from .models import (
     Alert,
     AuditEvent,
     Device,
+    DeviceLocationPoint,
     EnrollmentCode,
     LoginThrottle,
     MediaAsset,
@@ -317,6 +319,110 @@ def dashboard(request):
         "chart_max": max(chart_max, 1),
     }
     return render(request, "signage/dashboard.html", context)
+
+
+@login_required
+def location_map(request):
+    return render(
+        request,
+        "signage/location_map.html",
+        {
+            "location_map_api_key": settings.LOCATION_MAP_API_KEY,
+            "location_map_style_url": settings.LOCATION_MAP_STYLE_URL,
+            "location_map_region": settings.LOCATION_MAP_REGION,
+        },
+    )
+
+
+def _location_point_json(point):
+    assignment = point.assignment
+    return {
+        "id": str(point.id),
+        "device_id": str(point.device_id),
+        "device_label": point.device.label,
+        "vehicle_registration": assignment.vehicle.registration if assignment else None,
+        "driver_internal_id": assignment.driver.internal_id if assignment else None,
+        "latitude": float(point.latitude),
+        "longitude": float(point.longitude),
+        "accuracy_m": float(point.accuracy_m),
+        "provider": point.provider,
+        "recorded_at": point.recorded_at,
+        "received_at": point.received_at,
+    }
+
+
+@login_required
+def location_latest(request):
+    rows = []
+    for device in Device.objects.filter(status=Device.Status.ACTIVE).order_by("label"):
+        point = (
+            DeviceLocationPoint.objects.filter(device=device)
+            .select_related("device", "assignment__vehicle", "assignment__driver")
+            .order_by("-recorded_at")
+            .first()
+        )
+        rows.append(
+            {
+                "device_id": str(device.id),
+                "device_label": device.label,
+                "state": device.location_state,
+                "state_updated_at": device.location_state_updated_at,
+                "last_reported_at": device.last_location_reported_at,
+                "planned_gap_until": device.location_planned_gap_until,
+                "point": _location_point_json(point) if point else None,
+            }
+        )
+    return JsonResponse({"devices": rows})
+
+
+@login_required
+def location_history(request):
+    raw_device_id = request.GET.get("device_id", "")
+    try:
+        device_id = uuid.UUID(raw_device_id)
+    except (TypeError, ValueError):
+        return JsonResponse({"error": "device_id is required."}, status=400)
+    device = get_object_or_404(Device, pk=device_id)
+    now = timezone.now()
+    today = timezone.localdate()
+    default_start = timezone.make_aware(datetime.combine(today, time.min))
+    start = _parse_location_query_datetime(request.GET.get("start"), default_start)
+    end = _parse_location_query_datetime(request.GET.get("end"), now)
+    if start is None or end is None or end <= start:
+        return JsonResponse({"error": "Invalid history time range."}, status=400)
+    if start < now - timedelta(days=30) or end > now + timedelta(minutes=5):
+        return JsonResponse(
+            {"error": "History must be within the preceding 30 days."},
+            status=400,
+        )
+    if end - start > timedelta(hours=24):
+        return JsonResponse({"error": "History is limited to 24 hours."}, status=400)
+    points = (
+        DeviceLocationPoint.objects.filter(
+            device=device,
+            recorded_at__gte=start,
+            recorded_at__lt=end,
+        )
+        .select_related("device", "assignment__vehicle", "assignment__driver")
+        .order_by("recorded_at")
+    )
+    return JsonResponse(
+        {
+            "device": {"id": str(device.id), "label": device.label},
+            "start": start,
+            "end": end,
+            "points": [_location_point_json(point) for point in points],
+        }
+    )
+
+
+def _parse_location_query_datetime(value, default):
+    if not value:
+        return default
+    parsed = parse_datetime(value)
+    if parsed and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
 
 
 @login_required

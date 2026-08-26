@@ -220,3 +220,13 @@ output "production_release_activation_sha256" {
   description = "Reviewed SHA-256 of the activation helper embedded in its SSM document."
   value       = local.ec2_release_activation_sha256
 }
+
+output "location_map_api_key_arn" {
+  description = "ARN of the read-only, dashboard-referrer-restricted Amazon Location API key."
+  value       = awscc_location_api_key.fleet_map.key_arn
+}
+
+output "location_map_style_url" {
+  description = "Amazon Location Maps v2 Standard style descriptor URL for GrabMaps vector.basemap."
+  value       = "https://maps.geo.${var.aws_region}.amazonaws.com/v2/styles/Standard/descriptor"
+}
