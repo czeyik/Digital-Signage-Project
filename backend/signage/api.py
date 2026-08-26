@@ -1,5 +1,7 @@
+import hashlib
 import io
 import ipaddress
+import re
 import secrets
 import uuid
 import zlib
@@ -8,6 +10,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.files.storage import default_storage
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -59,6 +62,7 @@ PLAYBACK_FAILURE_REASONS_BY_STATUS = {
             "administrator_session",
             "app_restart_or_power_loss",
             "app_restart_or_unexpected_exit",
+            "app_update",
             "credential_rejected",
             "device_disabled",
             "device_owner_removed",
@@ -287,6 +291,67 @@ def media_url_uses_origin(download_url, origin):
         )
     except ValueError:
         return False
+
+
+def configured_app_update(device):
+    version_code = settings.APP_UPDATE_VERSION_CODE
+    if version_code == 0:
+        if any(
+            (
+                settings.APP_UPDATE_VERSION_NAME,
+                settings.APP_UPDATE_STORAGE_NAME,
+                settings.APP_UPDATE_SHA256,
+                settings.APP_UPDATE_SIZE_BYTES,
+                settings.APP_UPDATE_ROLLOUT_PERCENT,
+            )
+        ):
+            raise exceptions.APIException(
+                "Application update configuration is unavailable."
+            )
+        return None
+    configuration_error = "Application update configuration is unavailable."
+    if not 1 <= version_code <= 2_147_483_647:
+        raise exceptions.APIException(configuration_error)
+    if not re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?",
+        settings.APP_UPDATE_VERSION_NAME,
+    ):
+        raise exceptions.APIException(configuration_error)
+    if not re.fullmatch(r"[0-9a-f]{64}", settings.APP_UPDATE_SHA256):
+        raise exceptions.APIException(configuration_error)
+    if not 1 <= settings.APP_UPDATE_SIZE_BYTES <= 200 * 1024 * 1024:
+        raise exceptions.APIException(configuration_error)
+    if not 1 <= settings.APP_UPDATE_ROLLOUT_PERCENT <= 100:
+        raise exceptions.APIException(configuration_error)
+    if not re.fullmatch(
+        r"updates/[A-Za-z0-9._/-]+\.apk", settings.APP_UPDATE_STORAGE_NAME
+    ):
+        raise exceptions.APIException(configuration_error)
+    rollout_bucket = int(
+        hashlib.sha256(
+            f"duducar-app-update-v1:{device.pk}".encode("ascii")
+        ).hexdigest()[:8],
+        16,
+    ) % 100
+    if rollout_bucket >= settings.APP_UPDATE_ROLLOUT_PERCENT:
+        return None
+    try:
+        download_url = default_storage.url(settings.APP_UPDATE_STORAGE_NAME)
+    except Exception as exc:
+        raise exceptions.APIException(
+            "Application update delivery is unavailable."
+        ) from exc
+    if settings.DEPLOYMENT_ENV == "production" and not media_url_uses_origin(
+        download_url, configured_media_origin()
+    ):
+        raise exceptions.APIException("Application update delivery is unavailable.")
+    return {
+        "version_code": version_code,
+        "version_name": settings.APP_UPDATE_VERSION_NAME,
+        "download_url": download_url,
+        "sha256": settings.APP_UPDATE_SHA256,
+        "size_bytes": settings.APP_UPDATE_SIZE_BYTES,
+    }
 
 
 def enrollment_device_details(data, *, require_hardware=False):
@@ -631,6 +696,7 @@ def sync_manifest(request):
         # Authentication normally rejects this before the view; keep the
         # defense-in-depth path aligned with credential revocation.
         raise exceptions.AuthenticationFailed("Invalid or expired device token.")
+    app_update = configured_app_update(device)
     if missing_enrollment_eligible_hardware:
         # Keep an active device in maintenance when its exact, attested hardware
         # identity becomes ineligible. Physical checklist completion remains a
@@ -642,6 +708,7 @@ def sync_manifest(request):
                 "server_time": timezone.now(),
                 "message": "This display is temporarily unavailable.",
                 "kiosk_pin_verifier": device.kiosk_pin_hash,
+                "app_update": app_update,
             }
         )
     playlist = active_playlist()
@@ -653,6 +720,7 @@ def sync_manifest(request):
                 "server_time": timezone.now(),
                 "playlist": None,
                 "kiosk_pin_verifier": device.kiosk_pin_hash,
+                "app_update": app_update,
             }
         )
     items = playlist.items.select_related("media").all()
@@ -685,6 +753,7 @@ def sync_manifest(request):
             "mode": "play",
             "server_time": timezone.now(),
             "kiosk_pin_verifier": device.kiosk_pin_hash,
+            "app_update": app_update,
             "playlist": {
                 "id": str(playlist.id),
                 "name": playlist.name,

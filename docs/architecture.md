@@ -81,7 +81,12 @@ three-year shape for the 10-device pilot.
   tamper-proof.
 - Factory reset protection and true screen-state reporting depend on qualified
   hardware.
-- MFA and remote application updates are deferred by product decision.
+- The production player can receive DUDU-owned APK updates from the authenticated
+  sync response. It downloads only a higher version signed by the installed
+  certificate, verifies the exact SHA-256/size, installs through the device-owner
+  PackageInstaller path, and keeps the current app playing until the update is
+  staged. The first updater-enabled APK still requires the existing post-Setup
+  Wizard ADB install; later releases use the OTA path.
 - Media scanning requires ClamAV in the deployed processing environment.
 - The current EC2 host contains both Django and PostgreSQL and is therefore a
   single-host failure domain. Daily logical backups, DLM snapshots, and tested

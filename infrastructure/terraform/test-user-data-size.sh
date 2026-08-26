@@ -53,6 +53,12 @@ replace_placeholder backup_bucket "duducar-signage-production-backups-$sample"
 replace_placeholder dashboard_hostname marketing.duducaradmin.com
 replace_placeholder api_hostname api.marketing.duducaradmin.com
 replace_placeholder required_app_version 1.0.0
+replace_placeholder app_update_version_code 0
+replace_placeholder app_update_version_name ''
+replace_placeholder app_update_storage_name ''
+replace_placeholder app_update_sha256 ''
+replace_placeholder app_update_size_bytes 0
+replace_placeholder app_update_rollout_percent 0
 replace_placeholder backend_image "173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-backend@sha256:${sample}0123456789abcdef"
 replace_placeholder postgres_image "postgres@sha256:${sample}0123456789abcdef"
 replace_placeholder caddy_image "caddy@sha256:${sample}0123456789abcdef"

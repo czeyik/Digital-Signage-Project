@@ -126,6 +126,25 @@ check "ec2_target_image" {
   }
 }
 
+check "app_update_configuration" {
+  assert {
+    condition = var.app_update_version_code == 0 ? (
+      var.app_update_version_name == "" &&
+      var.app_update_storage_name == "" &&
+      var.app_update_sha256 == "" &&
+      var.app_update_size_bytes == 0 &&
+      var.app_update_rollout_percent == 0
+      ) : (
+      var.app_update_version_name != "" &&
+      var.app_update_storage_name != "" &&
+      var.app_update_sha256 != "" &&
+      var.app_update_size_bytes > 0 &&
+      var.app_update_rollout_percent > 0
+    )
+    error_message = "Configure every app-update field when OTA is enabled, or leave all staged APK fields at their zero/empty disabled values."
+  }
+}
+
 check "application_origin" {
   assert {
     condition     = var.application_origin != "ec2" || var.enable_ec2_target

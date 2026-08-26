@@ -245,6 +245,40 @@ def test_sync_manifest_exposes_and_enforces_the_configured_media_origin(
 
 
 @pytest.mark.django_db
+@override_settings(
+    AWS_S3_CUSTOM_DOMAIN="media.example",
+    APP_UPDATE_VERSION_CODE=3,
+    APP_UPDATE_VERSION_NAME="1.0.2",
+    APP_UPDATE_STORAGE_NAME="updates/dudu-signage-1.0.2.apk",
+    APP_UPDATE_SHA256="a" * 64,
+    APP_UPDATE_SIZE_BYTES=1_200_000,
+    APP_UPDATE_ROLLOUT_PERCENT=100,
+)
+def test_sync_manifest_advertises_a_configured_app_update(
+    client, provisioned_device, monkeypatch
+):
+    _, _, item, access = provisioned_device
+    set_manifest_media_url(monkeypatch, item, "https://media.example/validated/poster.png")
+    monkeypatch.setattr(
+        "signage.api.default_storage.url",
+        lambda name: f"https://media.example/{name}?Expires=1",
+    )
+
+    response = client.get(
+        reverse("device-sync"), HTTP_AUTHORIZATION=f"Bearer {access}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["app_update"] == {
+        "version_code": 3,
+        "version_name": "1.0.2",
+        "download_url": "https://media.example/updates/dudu-signage-1.0.2.apk?Expires=1",
+        "sha256": "a" * 64,
+        "size_bytes": 1_200_000,
+    }
+
+
+@pytest.mark.django_db
 @override_settings(AWS_S3_CUSTOM_DOMAIN="https://media.example.cloudfront.net")
 def test_sync_manifest_rejects_a_non_hostname_media_origin(
     client, provisioned_device
@@ -296,6 +330,7 @@ def test_valid_gzip_playback_batch_is_idempotent(client, provisioned_device):
     [
         "external_power_lost",
         "planned_shutdown",
+        "app_update",
         "app_restart_or_unexpected_exit",
         "credential_rejected",
         "server_forbidden",

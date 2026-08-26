@@ -42,6 +42,7 @@ class MainActivity : Activity() {
     private lateinit var kioskPolicies: KioskPolicyManager
     private lateinit var adminRelockScheduler: AdminRelockScheduler
     private lateinit var operationsScheduler: OperationsScheduler
+    private lateinit var appUpdater: AppUpdater
     private lateinit var uploadApi: ApiClient
     private val controlExecutor = Executors.newSingleThreadExecutor()
     private val downloadExecutor = Executors.newSingleThreadExecutor()
@@ -101,6 +102,7 @@ class MainActivity : Activity() {
         kioskPolicies = KioskPolicyManager(this)
         adminRelockScheduler = AdminRelockScheduler(this)
         operationsScheduler = OperationsScheduler(this)
+        appUpdater = AppUpdater(this)
         api = ApiClient(credentials)
         uploadApi = ApiClient(credentials)
         cache = CacheManager(this)
@@ -333,6 +335,7 @@ class MainActivity : Activity() {
         controlExecutor.shutdownNow()
         downloadExecutor.shutdownNow()
         uploadExecutor.shutdownNow()
+        if (::appUpdater.isInitialized) appUpdater.close()
         super.onDestroy()
     }
 
@@ -645,7 +648,10 @@ class MainActivity : Activity() {
                         }
                     }
                 }
-                "play" -> queueManifestPreparation(response.getJSONObject("playlist"))
+                "play" -> {
+                    queueManifestPreparation(response.getJSONObject("playlist"))
+                    requestAppUpdate(response.optJSONObject("app_update"))
+                }
                 else -> throw IllegalArgumentException("Unknown device mode")
             }
         } catch (_: CredentialRejectedException) {
@@ -694,6 +700,62 @@ class MainActivity : Activity() {
                 }
             }
         }
+    }
+
+    private fun requestAppUpdate(payload: JSONObject?) {
+        val metadata = AppUpdatePolicy.parse(payload, BuildConfig.VERSION_CODE) ?: return
+        runOnUiThread {
+            val battery = currentBatteryState()
+            if (!AppUpdatePolicy.mayStage(
+                    isProduction = BuildConfig.IS_PRODUCTION,
+                    isDeviceOwner = kioskPolicies.isDeviceOwner(),
+                    shutdownPrepared = isShutdownPrepared(),
+                    adminSessionActive = hasActiveAdminSession(),
+                    usableBytes = filesDir.usableSpace,
+                    updateSizeBytes = metadata.sizeBytes,
+                    batteryPercent = battery.first,
+                    charging = battery.second,
+                )
+            ) return@runOnUiThread
+            appUpdater.stage(metadata) { apk ->
+                val readyBattery = currentBatteryState()
+                if (!AppUpdatePolicy.mayStage(
+                        isProduction = BuildConfig.IS_PRODUCTION,
+                        isDeviceOwner = kioskPolicies.isDeviceOwner(),
+                        shutdownPrepared = isShutdownPrepared(),
+                        adminSessionActive = hasActiveAdminSession(),
+                        usableBytes = filesDir.usableSpace,
+                        updateSizeBytes = metadata.sizeBytes,
+                        batteryPercent = readyBattery.first,
+                        charging = readyBattery.second,
+                    )
+                ) {
+                    false
+                } else {
+                    interruptCurrent("app_update")
+                    stopPlayback()
+                    appUpdater.install(apk, metadata)
+                }
+            }
+        }
+    }
+
+    private fun currentBatteryState(): Pair<Int?, Boolean?> {
+        val intent = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val level = intent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = intent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+        val status = intent?.getIntExtra(BatteryManager.EXTRA_STATUS, -1) ?: -1
+        val percent = if (level >= 0 && scale > 0) level * 100 / scale else null
+        val charging = when (status) {
+            BatteryManager.BATTERY_STATUS_CHARGING,
+            BatteryManager.BATTERY_STATUS_FULL,
+            -> true
+            BatteryManager.BATTERY_STATUS_DISCHARGING,
+            BatteryManager.BATTERY_STATUS_NOT_CHARGING,
+            -> false
+            else -> null
+        }
+        return percent to charging
     }
 
     private fun invalidateManifestPreparation() {

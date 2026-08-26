@@ -82,6 +82,12 @@ run "current_production_topology" {
     container_image                      = "173454940059.dkr.ecr.ap-southeast-5.amazonaws.com/duducar-signage-backend@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     postgres_image                       = "postgres@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     caddy_image                          = "caddy@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    app_update_version_code              = 0
+    app_update_version_name              = ""
+    app_update_storage_name              = ""
+    app_update_sha256                    = ""
+    app_update_size_bytes                = 0
+    app_update_rollout_percent           = 0
     cloudfront_public_key_pem            = "-----BEGIN PUBLIC KEY-----\ntest-only\n-----END PUBLIC KEY-----"
     legacy_rds_final_snapshot_identifier = "duducar-signage-production-final-reviewed"
     confirm_legacy_rds_final_snapshot    = true

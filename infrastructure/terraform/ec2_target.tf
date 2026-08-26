@@ -438,6 +438,12 @@ resource "aws_instance" "ec2_target" {
     dashboard_hostname           = var.dashboard_hostname
     api_hostname                 = var.api_hostname
     required_app_version         = var.required_app_version
+    app_update_version_code      = var.app_update_version_code
+    app_update_version_name      = var.app_update_version_name
+    app_update_storage_name      = var.app_update_storage_name
+    app_update_sha256            = var.app_update_sha256
+    app_update_size_bytes        = var.app_update_size_bytes
+    app_update_rollout_percent   = var.app_update_rollout_percent
     backend_image                = var.container_image
     postgres_image               = var.postgres_image
     caddy_image                  = var.caddy_image
@@ -1002,10 +1008,13 @@ data "aws_iam_policy_document" "media_cloudfront" {
     for_each = var.enable_media_cloudfront ? [1] : []
 
     content {
-      sid       = "AllowCloudFrontValidatedMedia"
-      effect    = "Allow"
-      actions   = ["s3:GetObject"]
-      resources = ["${aws_s3_bucket.media.arn}/validated/*"]
+      sid     = "AllowCloudFrontValidatedMediaAndUpdates"
+      effect  = "Allow"
+      actions = ["s3:GetObject"]
+      resources = [
+        "${aws_s3_bucket.media.arn}/validated/*",
+        "${aws_s3_bucket.media.arn}/updates/*",
+      ]
 
       principals {
         type        = "Service"

@@ -22,6 +22,7 @@ postgres_image=postgres@sha256:ddddddddddddddddddddddddddddddddddddddddddddddddd
 caddy_image=caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 other_postgres_image=postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 other_caddy_image=caddy@sha256:1111111111111111111111111111111111111111111111111111111111111111
+disabled_update_args=(0 "" "" "" 0 0 0 "" "" "" 0 0)
 test_root=$(mktemp -d /tmp/duducar-release-config-test.XXXXXX)
 
 cleanup() {
@@ -72,7 +73,8 @@ run_manager() {
   requested_version=$5
   DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
     "$manager" "$@" "$postgres_image" "$caddy_image" \
-      "$requested_image" "$requested_version" "$postgres_image" "$caddy_image"
+      "$requested_image" "$requested_version" "$postgres_image" "$caddy_image" \
+      "${disabled_update_args[@]}"
 }
 
 # Validation is read-only and does not create a backup directory.
@@ -83,28 +85,32 @@ test ! -e "$test_root/var/lib/duducar/release-config-backups"
 if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$postgres_image" "$caddy_image" \
-  "$other_image" 1.0.0 "$postgres_image" "$caddy_image"; then
+  "$other_image" 1.0.0 "$postgres_image" "$caddy_image" \
+  "${disabled_update_args[@]}"; then
   echo "Manager accepted a value different from the Terraform-reviewed image." >&2
   exit 1
 fi
 if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$postgres_image" "$caddy_image" \
-  "$new_image" 1.0.1 "$postgres_image" "$caddy_image"; then
+  "$new_image" 1.0.1 "$postgres_image" "$caddy_image" \
+  "${disabled_update_args[@]}"; then
   echo "Manager accepted a version different from the Terraform-reviewed value." >&2
   exit 1
 fi
 if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$other_postgres_image" "$caddy_image" \
-  "$new_image" 1.0.0 "$postgres_image" "$caddy_image"; then
+  "$new_image" 1.0.0 "$postgres_image" "$caddy_image" \
+  "${disabled_update_args[@]}"; then
   echo "Manager accepted a PostgreSQL image different from the reviewed value." >&2
   exit 1
 fi
 if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$postgres_image" "$other_caddy_image" \
-  "$new_image" 1.0.0 "$postgres_image" "$caddy_image"; then
+  "$new_image" 1.0.0 "$postgres_image" "$caddy_image" \
+  "${disabled_update_args[@]}"; then
   echo "Manager accepted a Caddy image different from the reviewed value." >&2
   exit 1
 fi

@@ -147,6 +147,12 @@ BACKEND_IMAGE=${backend_image}
 POSTGRES_IMAGE=${postgres_image}
 CADDY_IMAGE=${caddy_image}
 REQUIRED_APP_VERSION=${required_app_version}
+APP_UPDATE_VERSION_CODE=${app_update_version_code}
+APP_UPDATE_VERSION_NAME=${app_update_version_name}
+APP_UPDATE_STORAGE_NAME=${app_update_storage_name}
+APP_UPDATE_SHA256=${app_update_sha256}
+APP_UPDATE_SIZE_BYTES=${app_update_size_bytes}
+APP_UPDATE_ROLLOUT_PERCENT=${app_update_rollout_percent}
 # Current production uses the direct-to-EC2 configuration. The preflight and
 # production Caddyfiles are retired migration artifacts and are rejected.
 CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover

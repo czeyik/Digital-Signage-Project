@@ -5,12 +5,110 @@ import java.io.ByteArrayInputStream
 import java.util.zip.GZIPInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 class PlayerPoliciesTest {
+    @Test
+    fun appUpdatePolicyRejectsMalformedOrNonIncreasingArtifacts() {
+        val currentVersion = BuildConfig.VERSION_CODE
+        assertNotNull(
+            AppUpdatePolicy.parse(
+                currentVersion + 1,
+                "1.0.2",
+                "https://media.example.invalid/updates/player.apk",
+                "a".repeat(64),
+                1_000_000,
+                currentVersion,
+            ),
+        )
+        assertFalse(
+            AppUpdatePolicy.parse(
+                currentVersion,
+                "1.0.2",
+                "https://media.example.invalid/updates/player.apk",
+                "a".repeat(64),
+                1_000_000,
+                currentVersion,
+            ) != null,
+        )
+        assertFalse(
+            AppUpdatePolicy.parse(
+                currentVersion + 1,
+                "1.0.2",
+                "http://media.example.invalid/player.apk",
+                "a".repeat(64),
+                1_000_000,
+                currentVersion,
+            ) != null,
+        )
+        assertFalse(
+            AppUpdatePolicy.parse(
+                currentVersion + 1,
+                "1.0.2",
+                "https://media.example.invalid/player.apk",
+                "not-a-digest",
+                1_000_000,
+                currentVersion,
+            ) != null,
+        )
+    }
+
+    @Test
+    fun appUpdatePolicyRequiresOwnerAndSafePowerConditions() {
+        assertFalse(
+            AppUpdatePolicy.mayStage(
+                isProduction = true,
+                isDeviceOwner = false,
+                shutdownPrepared = false,
+                adminSessionActive = false,
+                usableBytes = 1_000_000_000,
+                updateSizeBytes = 1_000_000,
+                batteryPercent = 100,
+                charging = true,
+            ),
+        )
+        assertFalse(
+            AppUpdatePolicy.mayStage(
+                isProduction = true,
+                isDeviceOwner = true,
+                shutdownPrepared = false,
+                adminSessionActive = false,
+                usableBytes = 1_000_000_000,
+                updateSizeBytes = 1_000_000,
+                batteryPercent = 49,
+                charging = false,
+            ),
+        )
+        assertTrue(
+            AppUpdatePolicy.mayStage(
+                isProduction = true,
+                isDeviceOwner = true,
+                shutdownPrepared = false,
+                adminSessionActive = false,
+                usableBytes = 1_000_000_000,
+                updateSizeBytes = 1_000_000,
+                batteryPercent = 49,
+                charging = true,
+            ),
+        )
+        assertTrue(
+            AppUpdatePolicy.mayStage(
+                isProduction = true,
+                isDeviceOwner = true,
+                shutdownPrepared = false,
+                adminSessionActive = false,
+                usableBytes = 1_000_000_000,
+                updateSizeBytes = 1_000_000,
+                batteryPercent = 50,
+                charging = false,
+            ),
+        )
+    }
+
     @Test
     fun cachePolicyRejectsOversizedOrUnsafeReplacement() {
         assertFalse(StoragePolicy.canStage(11_000, 0, 11_000, 20_000, 10_000, 2_000))

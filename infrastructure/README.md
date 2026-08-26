@@ -121,6 +121,14 @@ production must select:
 CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover
 ```
 
+The same release file carries the optional DUDU-owned OTA selection:
+`APP_UPDATE_VERSION_CODE`, `APP_UPDATE_VERSION_NAME`, `APP_UPDATE_STORAGE_NAME`,
+`APP_UPDATE_SHA256`, `APP_UPDATE_SIZE_BYTES`, and
+`APP_UPDATE_ROLLOUT_PERCENT`. Terraform defaults keep all six disabled. When
+enabled, the signed APK must already exist at the private `updates/*.apk` key;
+the release-config document validates the exact reviewed values and never
+restarts services.
+
 `Caddyfile.preflight` and `Caddyfile.production` are retired migration
 artifacts. The checked-in runtime helper refuses to use them.
 
