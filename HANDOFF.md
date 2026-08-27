@@ -20,9 +20,10 @@ Malaysia pilot on the existing low-cost AWS design. Keep the current Android
 
 - The `origin/main` baseline used for this work is
   `196655d91aa3466c9697a6cc4a8f887225e32edf`.
-- The DUDU-owned updater implementation is the clean commit
-  `1cbcd587aff263ca5aa73205f94b6af8b703697c` on
-  `feat/dudu-owned-updater` at `/tmp/duducar-ota.0XOW02`.
+- The DUDU-owned updater originated in commit
+  `1cbcd587aff263ca5aa73205f94b6af8b703697c`; the combined GPS/OpenMapTiles
+  source is clean commit `ea7394c` on `feat/dudu-owned-updater` at
+  `/tmp/duducar-openmaptiles`.
 - Do **not** build or deploy from this primary workspace: it is
   `fix/recovery-xfs-journal-replay` at `ab073e8` and has uncommitted
   documentation changes.
