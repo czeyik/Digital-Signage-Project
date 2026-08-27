@@ -113,8 +113,9 @@ class DeviceProvisioningForm(forms.Form):
         queryset=HardwareQualification.objects.none(),
         required=False,
         help_text=(
-            "Required before production enrollment; select the exact model and "
-            "firmware record with an attested 9.00–12.00-inch display."
+            "Required before production enrollment; select the exact model, "
+            "firmware, and security-patch registration with an attested "
+            "9.00–12.00-inch display."
         ),
     )
     driver_internal_id = forms.CharField(max_length=64)
@@ -131,7 +132,6 @@ class DeviceProvisioningForm(forms.Form):
             .exclude(model_name="")
             .exclude(firmware_version="")
             .exclude(security_patch_level="")
-            .exclude(evidence_reference="")
             .order_by("model_name", "firmware_version")
         )
 

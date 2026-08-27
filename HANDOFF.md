@@ -163,11 +163,14 @@ GPS change.
 
 ## Blocking gates
 
-1. Obtain an exact Android 12+ tablet or OEM-signed Android 12+ firmware with
-   documented support and current verified patch level.
-2. Complete full exact-model/firmware hardware qualification, including
-   device-owner/lock-task, battery, LTE, media, shutdown/recovery, thermal,
-   kiosk escape, and factory-reset revocation evidence.
+1. Obtain an exact Android 12+ tablet or OEM-signed Android 12+ firmware and
+   record its exact model, firmware, security patch, and compatible display.
+   The security patch is matched exactly; no vendor advisory or patch-age
+   threshold applies.
+2. Complete the exact model/firmware/security-patch registration with the
+   compatible display measurement. Device-owner/lock-task, battery, LTE, media,
+   shutdown/recovery, thermal, kiosk escape, and factory-reset checks remain
+   available as optional physical observations; do not fabricate evidence.
 3. Require a real `MEETS_DEVICE_INTEGRITY` result before production enrollment.
 4. Complete the remaining runbook rehearsal, controlled SNS/EventBridge
    notification delivery test, and owner/migration preflight.
@@ -193,9 +196,9 @@ Obtain an Android 12+ candidate and run a read-only ADB preflight before
 installing anything: record model, firmware, Android API
 (`ro.build.version.sdk >= 31`), platform/vendor patch, verified-boot state, and
 Google Play availability. If it passes, begin the documented exact-device
-qualification in an isolated workflow. Only after the `HardwareQualification`
-record has an exact model/firmware/security-patch match, an attested
-9.00–12.00-inch display, and a nonempty evidence reference should the code-3
-APK be installed manually after Setup Wizard and device-owner assignment.
-Keep OTA disabled until a later higher-code APK is reviewed and the canary is
-healthy. Full physical approval remains tracked separately.
+registration in an isolated workflow. Only after the `HardwareQualification`
+record has an exact model/firmware/security-patch match and an attested
+9.00–12.00-inch display should the code-3 APK be installed manually after
+Setup Wizard and device-owner assignment. Keep OTA disabled until a later
+higher-code APK is reviewed and the canary is healthy. Physical checks and
+evidence remain optional observations.

@@ -1,18 +1,17 @@
-# Exact Android Display Qualification
+# Exact Android Display Registration
 
-Record the exact model **and firmware** before purchase or production
+Register the exact model **and firmware** before purchase or production
 enrollment. Record model, a physical corner-to-corner display diagonal to two
 decimal places (excluding the bezel), firmware/build, Android version/security
-patch, date, tester, APK version, photos/logs/video/notes, and an evidence
-location. Android-reported DPI or diagonal estimates are not physical evidence.
-An owner creates the `HardwareQualification` record in `/admin/`. Production
-enrollment requires an exact identity record with a nonempty evidence reference
-and a recorded 9.00–12.00-inch measurement; the physical pass fields remain
-tracked but do not block enrollment. `approved_for_pilot` still requires every
-current required field to be true and complete evidence. Emulators, phones, and
-a different firmware never qualify the exact identity record.
-The approval evidence is immutable: revoke it and create a new record rather
-than editing a previously approved physical build.
+patch, date, tester, and APK version. Photos, logs, video, notes, and an
+evidence location are optional. Android-reported DPI or diagonal estimates are
+not physical evidence. An owner creates the `HardwareQualification` record in
+`/admin/`; physical test flags and evidence do not gate `approved_for_pilot`
+under the simplified policy. The measured 9.00–12.00-inch display remains
+required for production enrollment and approval. Emulators, phones, and a
+different firmware never qualify the exact identity record. The identity and
+display fields remain immutable after approval: revoke the record and create a
+fresh one when the build changes.
 
 A display-policy migration revokes an approval that lacks a compliant physical
 measurement. Before deploying that migration, inventory affected active devices
@@ -23,13 +22,14 @@ During production enrollment, the player submits its `hardware_model`,
 `firmware_version`, and `security_patch_level` in the integrity-bound challenge.
 All three must exactly match the selected enrollment-eligible record; the server
 persists that binding on the enrolled device. A changed build or security patch
-requires fresh qualification and owner-issued enrollment. Completing the 19
-physical pass fields remains required for `approved_for_pilot`, not enrollment
-or sync.
+requires fresh registration and owner-issued enrollment. The security patch is
+recorded for exact identity matching; this project does not impose a vendor
+advisory or patch-age threshold. The 19 physical pass fields are optional
+observations and do not gate approval, enrollment, or sync.
 
 ## Entry conditions
 
-- Android 12+ with current security updates; 9–12-inch landscape (inclusive),
+- Android 12+; 9–12-inch landscape (inclusive),
   battery-backed display with LTE; factory-reset device-owner/lock-task
   provisioning; signed release APK; appropriate SIM, mount, cable/fuse/adapter
   and safe test area.
@@ -40,9 +40,11 @@ or sync.
   `legacy_external_power_loss_path_passed` fields are historical only. They
   never approve a new record or restore the former vehicle-power policy.
 
-## Required evidence and pass criteria
+## Optional physical observations
 
-Mark and evidence each current database field:
+The following fields remain available for operators who choose to test them.
+Unset or false values do not block approval, and a result must not be marked
+passed unless it was actually tested:
 
 1. `device_owner_lock_task_passed`, `kiosk_escape_resistance_passed`, and
    `screen_state_passed`: DUDU is persistent Home; navigation/status controls,
@@ -77,7 +79,7 @@ Mark and evidence each current database field:
    and offline reboot remains at non-playing re-enrollment; reset plus server
    revocation blocks old credentials.
 
-## Adversarial checks
+## Optional adversarial checks
 
 - Test wrong PIN throttling (4 failures; then 1/5/15-minute lockouts), correct
   PIN automatic relock and **Relock now**; kill DUDU during admin Settings and
