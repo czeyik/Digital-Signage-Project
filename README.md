@@ -14,10 +14,12 @@ work with the [current handoff](HANDOFF.md) and
 [infrastructure guide](infrastructure/README.md) for operator commands and the
 [recovery runbook](docs/backup-restore.md) for backup/restore controls.
 
-Do not enroll a production tablet until its exact model and firmware passes
-[hardware qualification](docs/hardware-qualification.md), device integrity, and
-every runbook gate. Review the [cost worksheet](docs/aws-cost-estimate.md)
-before any infrastructure change that could affect the target.
+Do not enroll a production tablet until its exact model, firmware, and security
+patch are registered in [hardware qualification](docs/hardware-qualification.md),
+device integrity passes, and every runbook gate is authorized. Physical test
+flags and evidence are optional observations under the simplified policy.
+Review the [cost worksheet](docs/aws-cost-estimate.md) before any infrastructure
+change that could affect the target.
 
 ## Local verification
 

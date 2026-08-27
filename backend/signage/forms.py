@@ -111,8 +111,8 @@ class DeviceProvisioningForm(forms.Form):
         queryset=HardwareQualification.objects.none(),
         required=False,
         help_text=(
-            "Required before production enrollment; select the approved exact model "
-            "and firmware qualification."
+            "Required before production enrollment; select the approved exact model, "
+            "firmware, and security-patch registration."
         ),
     )
     driver_internal_id = forms.CharField(max_length=64)

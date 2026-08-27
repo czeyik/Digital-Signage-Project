@@ -1,24 +1,26 @@
-# Exact Android Display Qualification
+# Exact Android Display Registration
 
-Qualify the exact model **and firmware** before purchase or production
-enrollment. Record model, measured display diagonal, firmware/build, Android
-version/security patch, date, tester, APK version, photos/logs/video/notes, and
-an evidence location. An owner creates the `HardwareQualification` record in
-`/admin/`; it may be
-`approved_for_pilot` only when every current required field is true and evidence
-is complete. Emulators, phones, and a different firmware never qualify it.
-The approval evidence is immutable: revoke it and create a new record rather
-than editing a previously approved physical build.
+Register the exact model **and firmware** before purchase or production
+enrollment. Record model, display details when available, firmware/build,
+Android version/security patch, date, tester, and APK version. Photos, logs,
+video, notes, and an evidence location are optional. An owner creates the
+`HardwareQualification` record in `/admin/`; physical test flags and evidence
+do not gate `approved_for_pilot` under the simplified policy. Emulators, phones,
+and a different firmware never qualify it. The identity fields remain
+immutable after approval: revoke the record and create a fresh one when the
+build changes.
 
 During production enrollment, the player submits its `hardware_model`,
 `firmware_version`, and `security_patch_level` in the integrity-bound challenge.
 All three must exactly match the selected approved record; the server persists
 that binding on the enrolled device. A changed build or security patch requires
-fresh qualification and owner-issued enrollment.
+fresh registration and owner-issued enrollment. The security patch is recorded
+for exact identity matching; this project does not impose a vendor advisory or
+patch-age threshold.
 
 ## Entry conditions
 
-- Android 12+ with current security updates; 9–12-inch landscape (inclusive),
+- Android 12+; 9–12-inch landscape (inclusive),
   battery-backed display with LTE; factory-reset device-owner/lock-task
   provisioning; signed release APK; appropriate SIM, mount, cable/fuse/adapter
   and safe test area.
@@ -29,9 +31,11 @@ fresh qualification and owner-issued enrollment.
   `legacy_external_power_loss_path_passed` fields are historical only. They
   never approve a new record or restore the former vehicle-power policy.
 
-## Required evidence and pass criteria
+## Optional physical observations
 
-Mark and evidence each current database field:
+The following fields remain available for operators who choose to test them.
+Unset or false values do not block approval, and a result must not be marked
+passed unless it was actually tested:
 
 1. `device_owner_lock_task_passed`, `kiosk_escape_resistance_passed`, and
    `screen_state_passed`: DUDU is persistent Home; navigation/status controls,
@@ -65,7 +69,7 @@ Mark and evidence each current database field:
    monotonic server-time anchor remains stable; offline reboot stays maintenance
    after remote disable; reset plus server revocation blocks old credentials.
 
-## Adversarial checks
+## Optional adversarial checks
 
 - Test wrong PIN throttling (4 failures; then 1/5/15-minute lockouts), correct
   PIN automatic relock and **Relock now**; kill DUDU during admin Settings and

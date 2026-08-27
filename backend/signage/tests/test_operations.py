@@ -16,7 +16,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from django.apps import apps as django_apps
 from django.core.exceptions import ImproperlyConfigured, ValidationError
 from django.core.management import CommandError, call_command
-from django.db import IntegrityError, transaction
 from django.test import Client, override_settings
 from storages.backends.s3 import S3Storage
 
@@ -51,7 +50,7 @@ TEST_CLOUDFRONT_PRIVATE_KEY = (
 
 
 @pytest.mark.django_db
-def test_hardware_cannot_be_approved_until_required_tests_pass():
+def test_hardware_can_be_approved_without_physical_tests_or_evidence():
     owner = User.objects.create_user(
         "owner@duducar.co",
         "A-very-long-password-123",
@@ -64,12 +63,17 @@ def test_hardware_cannot_be_approved_until_required_tests_pass():
         security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=date.today(),
-        evidence_reference="internal://hardware/example-10",
         approved_for_pilot=True,
     )
 
-    with pytest.raises(ValidationError):
-        qualification.save()
+    qualification.save()
+
+    assert qualification.approved_at is not None
+    assert qualification.evidence_reference == ""
+    assert not any(
+        getattr(qualification, field_name)
+        for field_name in HardwareQualification.REQUIRED_PASS_FIELDS
+    )
 
 
 @pytest.mark.django_db
@@ -129,14 +133,12 @@ def test_approved_hardware_evidence_is_immutable_and_cannot_be_reapproved():
 
 
 @pytest.mark.django_db
-def test_hardware_legacy_power_results_cannot_satisfy_new_battery_gates():
+def test_hardware_legacy_power_results_are_optional_observations():
     owner = User.objects.create_user(
         "owner@duducar.co",
         "A-very-long-password-123",
         role=User.Role.OWNER,
     )
-    pass_fields = {field: True for field in HardwareQualification.REQUIRED_PASS_FIELDS}
-    pass_fields["battery_runtime_passed"] = False
     qualification = HardwareQualification(
         model_name="Legacy Example 10",
         firmware_version="1.0",
@@ -148,11 +150,11 @@ def test_hardware_legacy_power_results_cannot_satisfy_new_battery_gates():
         approved_for_pilot=True,
         legacy_boot_on_vehicle_power_passed=True,
         legacy_external_power_loss_path_passed=True,
-        **pass_fields,
     )
 
-    with pytest.raises(ValidationError, match="battery runtime passed"):
-        qualification.save()
+    qualification.save()
+
+    assert qualification.approved_for_pilot is True
 
     assert "legacy_boot_on_vehicle_power_passed" not in (
         HardwareQualification.REQUIRED_PASS_FIELDS
@@ -169,7 +171,7 @@ def test_hardware_legacy_power_results_cannot_satisfy_new_battery_gates():
 
 
 @pytest.mark.django_db
-def test_database_blocks_legacy_policy_hardware_reapproval():
+def test_database_allows_approval_without_physical_gate_fields():
     owner = User.objects.create_user(
         "owner@duducar.co",
         "A-very-long-password-123",
@@ -187,11 +189,12 @@ def test_database_blocks_legacy_policy_hardware_reapproval():
         legacy_external_power_loss_path_passed=True,
     )
 
-    with transaction.atomic():
-        with pytest.raises(IntegrityError):
-            HardwareQualification.objects.filter(pk=qualification.pk).update(
-                approved_for_pilot=True
-            )
+    HardwareQualification.objects.filter(pk=qualification.pk).update(
+        approved_for_pilot=True
+    )
+
+    qualification.refresh_from_db()
+    assert qualification.approved_for_pilot is True
 
 
 @pytest.mark.django_db

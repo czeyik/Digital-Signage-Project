@@ -41,11 +41,11 @@ the date/time device-owner restriction, atomic checkpoint/batch persistence,
 and planned-shutdown marker/event durability. They do not exercise
 `MainActivity`'s visible non-PIN shutdown confirmation, neutral stopped screen,
 no-automatic-resume behavior, or the visible non-PIN **Resume DUDU**
-confirmation after launch. Those flows
-must be executed on an Android 12+ emulator and again during exact-device
-qualification. Physical battery behavior, physical shutdown/recovery, and
-Android-13 exit-reason behavior still require the qualification checklist on
-the selected display model.
+confirmation after launch. Those flows should be executed on an Android 12+
+emulator and, when practical, on the selected display model. Physical battery
+behavior, physical shutdown/recovery, and Android-13 exit-reason behavior are
+optional operator observations under the simplified hardware-registration
+policy.
 
 CI additionally generates a disposable test-only keystore, builds and lints the
 configured minified `productionRelease`, and verifies its APK signature. This

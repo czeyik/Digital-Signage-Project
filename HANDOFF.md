@@ -87,17 +87,19 @@ The expected tablet is NDL-L09 / HNNDL-Q, Android 16/API 36, firmware `NDL-L09 1
 
 Do not assume the tablet is currently connected, still factory-reset, or ADB-authorized. Ask the owner to connect USB and freshly authorize ADB, then collect and compare the actual identifiers before installing or assigning device owner. Device-owner setup must only occur while the device is at factory setup/reset state.
 
-### Qualification discrepancy to resolve before enrollment-code issuance
+### Simplified qualification policy
 
-PR #59 correctly decoupled the 19 physical/pilot approval checks from enrollment. However, the currently merged `HardwareQualification.is_enrollment_eligible` still requires a nonempty `evidence_reference` in addition to model, firmware, security-patch, and 9–12 inch diagonal checks. The owner explicitly said an evidence reference is not needed because they own the tablet.
-
-Do not invent an evidence reference or silently bypass the field. Inspect the production qualification record/admin workflow and resolve this product/code mismatch with the owner before creating an enrollment code. `approved_for_pilot` still requires all physical fields, but it is no longer needed for enrollment.
+The owner authorized the simplified policy: physical pass fields and
+`evidence_reference` are optional observations, and no vendor advisory or
+patch-age threshold is applied. Exact model, firmware, and security-patch
+identity, Android 12+, device-owner provisioning, and signed-APK Play Integrity
+remain enrollment gates. Do not fabricate optional observations.
 
 ## Remaining safe sequence
 
 1. Obtain exact `ARM` confirmation, execute the reviewed arm action, and report its result.
 2. Obtain a separate exact `RECOVER` confirmation, execute the reviewed recovery, and complete the post-recovery checks above.
-3. Resolve the `evidence_reference` qualification mismatch without fabricating evidence.
+3. Use the simplified qualification record without fabricating optional evidence.
 4. With fresh USB/ADB authorization on the factory-reset tablet, validate identifiers, install the verified APK, set the approved device owner, and verify exact-alarm permission/owner state.
 5. Use the production admin workflow to assign the qualified device and issue a short-lived enrollment code.
 6. Enroll exactly one tablet and run the canary gates: enrollment, Play Integrity result, API/sync, asset hash/playback, fallback, and observed production health/alerts.

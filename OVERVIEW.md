@@ -97,7 +97,7 @@ before changing it:
   secret environment files; pin/scan production deps and images.
 - Use understandable maintained components; validate trust boundaries on the
   server; make retry APIs idempotent; avoid unrelated refactors. Emulator/phone
-  tests never qualify the 9–12-inch display hardware.
+  tests do not substitute for exact model, firmware, and security-patch identity.
 - For backend/shared changes run relevant `ruff`, Django check/migration dry
   run, pytest, and readiness checks; use documented Android Docker/JDK17-SDK36
   build. Test the changed surface plus auth/privacy, offline/evidence, recovery

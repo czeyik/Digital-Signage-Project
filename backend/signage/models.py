@@ -16,7 +16,12 @@ def token_hash(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS = (
+# Keep the physical result inventory for optional operator observations.  These
+# fields no longer gate approval under the simplified qualification policy.
+# ponytail: this accepts an untested build without a patch-age threshold;
+# reinstate approval gates when the qualification workflow can collect the full
+# evidence set and an owner-approved update policy exists.
+HARDWARE_QUALIFICATION_RECORDED_PASS_FIELDS = (
     "device_owner_lock_task_passed",
     "screen_state_passed",
     "battery_backed_playback_passed",
@@ -36,6 +41,10 @@ HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS = (
     "device_time_change_passed",
     "remote_disable_reboot_passed",
     "factory_reset_revocation_passed",
+)
+# Preserve the old import name for integrations that enumerate these fields.
+HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS = (
+    HARDWARE_QUALIFICATION_RECORDED_PASS_FIELDS
 )
 
 
@@ -80,6 +89,8 @@ class HardwareQualification(TimeStampedModel):
     test_date = models.DateField()
     evidence_reference = models.CharField(
         max_length=255,
+        blank=True,
+        default="",
         help_text="Internal path or ticket containing photos, logs, and test notes.",
     )
     device_owner_lock_task_passed = models.BooleanField(default=False)
@@ -121,7 +132,8 @@ class HardwareQualification(TimeStampedModel):
     approved_for_pilot = models.BooleanField(default=False)
     approved_at = models.DateTimeField(null=True, blank=True)
 
-    REQUIRED_PASS_FIELDS = HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS
+    # Compatibility name for callers that enumerate the optional observations.
+    REQUIRED_PASS_FIELDS = HARDWARE_QUALIFICATION_RECORDED_PASS_FIELDS
     # Approval attests to the exact physical build that was tested. A later
     # correction must be a new record, rather than rewriting that evidence.
     IMMUTABLE_AFTER_APPROVAL_FIELDS = (
@@ -135,27 +147,11 @@ class HardwareQualification(TimeStampedModel):
         "legacy_boot_on_vehicle_power_passed",
         "screen_state_passed",
         "legacy_external_power_loss_path_passed",
-        *HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS,
+        *HARDWARE_QUALIFICATION_RECORDED_PASS_FIELDS,
     )
 
     class Meta:
         ordering = ["-test_date", "model_name"]
-        constraints = [
-            models.CheckConstraint(
-                condition=(
-                    Q(approved_for_pilot=False)
-                    | Q(
-                        **{
-                            field_name: True
-                            for field_name in (
-                                HARDWARE_QUALIFICATION_REQUIRED_PASS_FIELDS
-                            )
-                        }
-                    )
-                ),
-                name="signage_hq_battery_policy_approved",
-            )
-        ]
 
     def clean(self):
         if self.pk:
@@ -178,24 +174,6 @@ class HardwareQualification(TimeStampedModel):
                     )
         if not self.approved_for_pilot:
             return
-        missing = [
-            self._meta.get_field(field_name).verbose_name
-            for field_name in self.REQUIRED_PASS_FIELDS
-            if not getattr(self, field_name)
-        ]
-        if missing:
-            raise ValidationError(
-                {
-                    "approved_for_pilot": (
-                        "All hardware qualification tests must pass before approval: "
-                        + ", ".join(missing)
-                    )
-                }
-            )
-        if not self.evidence_reference:
-            raise ValidationError(
-                {"evidence_reference": "Approval requires an evidence reference."}
-            )
         if not self.security_patch_level:
             raise ValidationError(
                 {

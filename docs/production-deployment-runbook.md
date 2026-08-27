@@ -19,8 +19,9 @@ broad authorization never permits an unexpected plan.
 3. Require a final signed APK and matching `required_app_version`; its version
    name, version code, package, checksum and signing certificate fingerprint
    must be recorded. Never send signing or service secrets through Git/chat.
-4. Require an exact Android 12+ device qualification and real signed-APK
-   `MEETS_DEVICE_INTEGRITY`; enrollment stays disabled if either is absent.
+4. Require an exact Android 12+ model/firmware/security-patch registration and
+   real signed-APK `MEETS_DEVICE_INTEGRITY`; enrollment stays disabled if
+   either is absent.
 5. Review `docs/aws-cost-estimate.md`; stop if projected monthly cost exceeds
    USD 30 excluding per-tablet mobile data, unless the owner changes the target.
 
@@ -85,20 +86,21 @@ broad authorization never permits an unexpected plan.
 
 ## Hardware, rehearsal, and canary
 
-1. Store evidence for every test in `hardware-qualification.md`; an owner must
-   approve the exact model/firmware `HardwareQualification` before assignment.
-   Legacy vehicle-power fields never qualify a device.
+1. An owner must approve the exact model/firmware/security-patch
+   `HardwareQualification` before assignment. Physical pass fields and test
+   evidence are optional observations under the simplified policy; legacy
+   vehicle-power fields never qualify a device.
 2. From outside the host, verify DNS/TLS/redirects/live+ready. Test owner and
    marketing authorization, logout/lockout/reset, driver-name privacy, private
    signed-media denial, JPEG/PNG/MP4 quarantine/normalization/preview, playlist
    behavior, isolated-worker exit, timers/host alarms/backup alerts and budget.
 3. Deliberately fail one isolated worker task and require EventBridge/SNS
    delivery to a test inbox. A configured rule is not proof of notification.
-4. On exactly one assigned tablet: enroll using a 15-minute code; verify atomic
-   sync/hash/playback/fallback, idempotent proof/report/CSV privacy, offline and
-   corrupt-download recovery, server time, normal/urgent replacement,
-   disable/reactivate, 10-GiB cache/500-MiB loss record, kiosk/PIN, low battery
-   escalation, shutdown/neutral screen/visible Resume, and physical recovery.
+4. On exactly one assigned tablet: enroll using a 15-minute code; optionally
+   exercise atomic sync/hash/playback/fallback, idempotent proof/report/CSV
+   privacy, offline and corrupt-download recovery, server time, replacement,
+   disable/reactivate, cache/queue behavior, kiosk/PIN, battery, shutdown,
+   and physical recovery.
 5. Confirm only full media counts once; a battery/parked play proves neither
    vehicle operation, occupancy, external power nor audience. Run Android-13
    exit diagnostics where applicable and document platform limitations.
@@ -111,6 +113,7 @@ CSV export evidence. Header-only CSV is export-path evidence only when the
 selected source genuinely has zero playback events; never fabricate records.
 
 **Go** only when CI, image review, owner prerequisites, private media,
-notification delivery, restore evidence, cost, integrity and exact-hardware
-gates all pass. Otherwise keep vehicle enrollment disabled; dashboard/API-only
-operation is the fallback. Expand beyond one device only with separate approval.
+notification delivery, restore evidence, cost, integrity and exact-device
+identity gates pass. Otherwise keep vehicle enrollment disabled; dashboard/API-
+only operation is the fallback. Expand beyond one device only with separate
+approval.
