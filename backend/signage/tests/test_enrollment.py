@@ -43,7 +43,7 @@ def enrollment_fixture():
         security_patch_level=HARDWARE_DETAILS["security_patch_level"],
         tested_by=owner,
         test_date=timezone.localdate(),
-        evidence_reference="restricted/hardware/canary-tablet",
+        evidence_reference="",
         measured_display_diagonal_inches=Decimal("10.00"),
     )
     qualification.save()
@@ -97,7 +97,7 @@ def test_production_challenge_requires_enrollment_eligible_hardware(client):
         security_patch_level=HARDWARE_DETAILS["security_patch_level"],
         tested_by=owner,
         test_date=timezone.localdate(),
-        evidence_reference="restricted/hardware/attested-canary-tablet",
+        evidence_reference="",
         measured_display_diagonal_inches=Decimal("10.00"),
     )
     qualification.save()
@@ -544,7 +544,7 @@ def test_dashboard_can_provision_device_with_attested_unapproved_hardware(client
         security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=timezone.localdate(),
-        evidence_reference="restricted/hardware/attested-canary-tablet",
+        evidence_reference="",
         measured_display_diagonal_inches=Decimal("10.00"),
     )
     client.force_login(owner)

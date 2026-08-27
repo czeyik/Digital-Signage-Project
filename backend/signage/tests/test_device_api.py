@@ -310,7 +310,7 @@ def test_production_sync_requires_a_current_enrollment_eligible_hardware_record(
         security_patch_level="2026-08-05",
         tested_by=owner,
         test_date=timezone.localdate(),
-        evidence_reference="restricted/hardware/qualified-canary-tablet",
+        evidence_reference="",
         measured_display_diagonal_inches=Decimal("10.00"),
     )
     qualification.save()
