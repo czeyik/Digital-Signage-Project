@@ -34,14 +34,19 @@ broad authorization never permits an unexpected plan.
    HIGH/CRITICAL findings. Push the approved image and select its immutable ECR
    digest—never a tag. If worker code changes, its task definition uses this
    same digest and required IAM (including host `ecs:ListTasks`) before web code.
-3. Create and verify a fresh versioned logical backup and a completed DLM data
+3. For an OTA release, upload the final same-key APK to the private media bucket
+   under its reviewed `updates/*.apk` key and independently verify the object
+   checksum and byte size before enabling the matching Terraform `app_update_*`
+   values. Keep the rollout percentage at the approved one-device scope until
+   the canary is healthy.
+4. Create and verify a fresh versioned logical backup and a completed DLM data
    snapshot; record exact versions and source. Ensure no isolated worker task
    runs before schema/worker changes.
-4. Make a fresh saved Terraform plan using protected production variables.
+5. Make a fresh saved Terraform plan using protected production variables.
    Review every action: expected controls retain EC2/private CloudFront/no
    continuous worker and no ECS web/ALB/RDS/NAT/public S3. Explicitly approve
    any backup lifecycle retention/deletion effect. Stop on unexpected changes.
-5. Apply the reviewed Terraform plan before host configuration. Never put
+6. Apply the reviewed Terraform plan before host configuration. Never put
    secrets in Terraform, arguments, history, logs or chat; enter them only via
    the approved Secrets Manager path.
 
@@ -62,7 +67,10 @@ broad authorization never permits an unexpected plan.
    activate anything. Record both command IDs and require `Success`.
 3. Validate then install the pinned release-config document with the same commit
    and operation ID and exact `BackendImage`, `PostgresImage`, `CaddyImage`, and
-   `RequiredAppVersion`. It atomically owns all release selections. A same-input
+   `RequiredAppVersion`. Include the exact `AppUpdateVersionCode`,
+   `AppUpdateVersionName`, `AppUpdateStorageName`, `AppUpdateSha256`,
+   `AppUpdateSizeBytes`, and `AppUpdateRolloutPercent` values when overriding
+   the document defaults. It atomically owns all release selections. A same-input
    config rollback is allowed only before activation/migrations; runtime-bundle
    rollback likewise uses its original document/operation and is forbidden once
    activation starts.

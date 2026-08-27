@@ -661,6 +661,25 @@ def test_readiness_rejects_limits_outside_pilot_safety_ranges():
 
 
 @override_settings(
+    APP_UPDATE_VERSION_CODE=3,
+    APP_UPDATE_VERSION_NAME="1.0.2",
+    APP_UPDATE_STORAGE_NAME="validated/not-an-update.apk",
+    APP_UPDATE_SHA256="A" * 64,
+    APP_UPDATE_SIZE_BYTES=0,
+    APP_UPDATE_ROLLOUT_PERCENT=101,
+)
+def test_readiness_rejects_invalid_app_update_configuration():
+    errors = []
+
+    ReadinessCommand()._check_app_update_configuration(errors)
+
+    assert any("APP_UPDATE_STORAGE_NAME" in error for error in errors)
+    assert any("APP_UPDATE_SHA256" in error for error in errors)
+    assert any("APP_UPDATE_SIZE_BYTES" in error for error in errors)
+    assert any("APP_UPDATE_ROLLOUT_PERCENT" in error for error in errors)
+
+
+@override_settings(
     DEPLOYMENT_ENV="production",
     DEBUG=False,
     SECRET_KEY=TEST_SECRET_KEY,

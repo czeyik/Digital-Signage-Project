@@ -34,7 +34,10 @@ RUN curl --fail --location --silent --show-error \
 
 FROM alpine:3.24.1@sha256:e7a1a92a5bfeee40966aea60f0796b0e7917cc35591542701834f03a68fa3d18
 
-RUN apk add --no-cache ca-certificates=20260611-r0 \
+RUN apk add --no-cache \
+    ca-certificates=20260611-r0 \
+    libcrypto3=3.5.8-r0 \
+    libssl3=3.5.8-r0 \
     && install -d -m 1777 /config/caddy /data/caddy \
     && install -d /etc/caddy /usr/share/caddy
 COPY --from=caddy-build /out/caddy /usr/bin/caddy

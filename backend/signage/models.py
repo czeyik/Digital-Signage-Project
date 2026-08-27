@@ -676,6 +676,10 @@ class Device(TimeStampedModel):
     android_version = models.CharField(max_length=32, blank=True)
     last_seen_at = models.DateTimeField(null=True, blank=True)
     last_heartbeat_recorded_at = models.DateTimeField(null=True, blank=True)
+    last_location_reported_at = models.DateTimeField(null=True, blank=True)
+    location_state = models.CharField(max_length=32, default="initializing")
+    location_state_updated_at = models.DateTimeField(null=True, blank=True)
+    location_planned_gap_until = models.DateTimeField(null=True, blank=True)
     last_sync_at = models.DateTimeField(null=True, blank=True)
     last_playback_at = models.DateTimeField(null=True, blank=True)
     current_playlist = models.ForeignKey(
@@ -881,6 +885,41 @@ class DeviceHeartbeat(models.Model):
         indexes = [models.Index(fields=["device", "-recorded_at"])]
 
 
+class DeviceLocationPoint(models.Model):
+    """One accepted, idempotent foreground location observation."""
+
+    id = models.UUIDField(primary_key=True, editable=False)
+    device = models.ForeignKey(
+        Device,
+        on_delete=models.PROTECT,
+        related_name="location_points",
+    )
+    assignment = models.ForeignKey(
+        DeviceAssignment,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="location_points",
+    )
+    recorded_at = models.DateTimeField()
+    device_recorded_at = models.DateTimeField()
+    received_at = models.DateTimeField(auto_now_add=True)
+    latitude = models.DecimalField(max_digits=9, decimal_places=6)
+    longitude = models.DecimalField(max_digits=9, decimal_places=6)
+    accuracy_m = models.DecimalField(max_digits=6, decimal_places=2)
+    provider = models.CharField(max_length=16)
+    source = models.CharField(max_length=32)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["device", "-recorded_at"],
+                name="signage_loc_dev_rec_idx",
+            ),
+            models.Index(fields=["recorded_at"], name="signage_loc_recorded_idx"),
+        ]
+
+
 class PlaybackBatch(models.Model):
     id = models.UUIDField(primary_key=True, editable=False)
     device = models.ForeignKey(Device, on_delete=models.PROTECT)
@@ -953,6 +992,8 @@ class DeviceOperationalEvent(models.Model):
         REPLACEMENT_FAILED = "replacement_failed", "Replacement validation failed"
         PLANNED_SHUTDOWN = "planned_shutdown", "Planned shutdown"
         ABNORMAL_APP_EXIT = "abnormal_app_exit", "Abnormal application exit"
+        LOCATION_QUEUE_LOSS = "location_queue_loss", "Location queue data loss"
+        LOCATION_POINT_REJECTED = "location_point_rejected", "Location point rejected"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     device = models.ForeignKey(

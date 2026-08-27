@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% load static %}
+{% block title %}Fleet locations · DUDU Signage{% endblock %}
+{% block content %}
+<section class="dashboard-hero">
+  <div>
+    <p class="eyebrow">Vehicle operations</p>
+    <h1>Fleet locations</h1>
+    <p class="supporting-text">Latest positions refresh once per minute while this page is visible. History is limited to one device and 24 hours.</p>
+  </div>
+</section>
+<section class="dashboard-card location-shell">
+  <div class="location-toolbar">
+    <label for="location-device">History device</label>
+    <select id="location-device"><option value="">Select a device</option></select>
+    <label for="location-start">Start</label>
+    <input id="location-start" type="datetime-local">
+    <label for="location-end">End</label>
+    <input id="location-end" type="datetime-local">
+    <button id="location-history" type="button">Load history</button>
+  </div>
+  <div id="fleet-map"
+       class="fleet-map"
+       data-style-url="{{ location_map_style_url }}"
+       data-latest-url="{% url 'location-latest' %}"
+       data-history-url="{% url 'location-history' %}"
+       aria-label="Fleet location map"></div>
+  <p id="location-message" class="supporting-text" role="status">Loading locations…</p>
+  <p class="supporting-text">Basemap © OpenStreetMap contributors · © OpenMapTiles.</p>
+  <div class="table-wrap">
+    <table class="data-table" id="location-table">
+      <thead><tr><th>Device</th><th>State</th><th>Vehicle</th><th>Driver ID</th><th>Time</th><th>Provider</th><th>Accuracy</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</section>
+<link rel="stylesheet" href="{% static 'signage/vendor/maplibre-gl.css' %}">
+<script src="{% static 'signage/vendor/maplibre-gl.js' %}" defer></script>
+<script src="{% static 'signage/location_map.js' %}" defer></script>
+{% endblock %}

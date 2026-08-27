@@ -20,6 +20,9 @@ system.
 - PostgreSQL: users, assignments, immutable playlists, telemetry, alerts, and
   proof-of-play.
 - Private object storage: quarantined uploads and validated media objects.
+- OpenMapTiles vector basemap: a verified Malaysia MBTiles extract mounted
+  read-only on the web host and served through authenticated same-origin
+  dashboard routes; no third-party map API key is required.
 - Media worker: ClamAV and FFmpeg/FFprobe processing. It may run in the web
   container for local development but must run separately in production.
 
@@ -81,8 +84,17 @@ three-year shape for the 10-device pilot.
   tamper-proof.
 - Factory reset protection and true screen-state reporting depend on qualified
   hardware.
-- MFA and remote application updates are deferred by product decision.
+- The production player can receive DUDU-owned APK updates from the authenticated
+  sync response. It downloads only a higher version signed by the installed
+  certificate, verifies the exact SHA-256/size, installs through the device-owner
+  PackageInstaller path, and keeps the current app playing until the update is
+  staged. The first updater-enabled APK still requires the existing post-Setup
+  Wizard ADB install; later releases use the OTA path.
 - Media scanning requires ClamAV in the deployed processing environment.
 - The current EC2 host contains both Django and PostgreSQL and is therefore a
   single-host failure domain. Daily logical backups, DLM snapshots, and tested
   recovery procedures support the accepted 24-hour RPO/RTO.
+- The pilot serves OpenMapTiles directly from MBTiles through Django. Tile
+  generation/update and high-concurrency delivery are intentionally outside
+  the pilot; move the same TileJSON/style contract to a dedicated tile server
+  or CDN before materially increasing dashboard traffic.

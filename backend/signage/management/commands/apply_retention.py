@@ -16,6 +16,7 @@ from signage.models import (
     DeviceAssignment,
     DeviceCredential,
     DeviceHeartbeat,
+    DeviceLocationPoint,
     DeviceOperationalEvent,
     Driver,
     EnrollmentChallenge,
@@ -35,11 +36,15 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         cutoff = timezone.now() - timedelta(days=365)
+        location_cutoff = timezone.now() - timedelta(days=30)
         driver_count = self._anonymize_drivers(cutoff)
         vehicle_count = self._anonymize_vehicles(cutoff)
         playback_counts = self._delete_expired_playback_evidence(cutoff)
         heartbeat_count = self._delete_in_batches(
             DeviceHeartbeat.objects.filter(recorded_at__lt=cutoff)
+        )
+        location_count = self._delete_in_batches(
+            DeviceLocationPoint.objects.filter(recorded_at__lt=location_cutoff)
         )
         operational_count = self._delete_in_batches(
             DeviceOperationalEvent.objects.filter(recorded_at__lt=cutoff)
@@ -59,6 +64,7 @@ class Command(BaseCommand):
                 "drivers_anonymized": driver_count,
                 "vehicles_anonymized": vehicle_count,
                 "heartbeats_deleted": heartbeat_count,
+                "location_points_deleted": location_count,
                 "operational_events_deleted": operational_count,
                 **playback_counts,
                 "alerts_deleted": alert_count,
@@ -69,7 +75,9 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 f"Anonymized {driver_count} drivers and {vehicle_count} vehicles; "
-                f"removed {heartbeat_count} heartbeats, {operational_count} "
+                f"removed {heartbeat_count} heartbeats, "
+                f"{location_count} location points, "
+                f"{operational_count} "
                 f"operational events, {alert_count} alerts, and {audit_count} audits."
             )
         )

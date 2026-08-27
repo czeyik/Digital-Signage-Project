@@ -53,6 +53,28 @@ for name in "${required_host_values[@]}"; do
   fi
 done
 
+OPENMAPTILES_STYLE_URL=${OPENMAPTILES_STYLE_URL:-/locations/style.json}
+OPENMAPTILES_MBTILES_PATH=${OPENMAPTILES_MBTILES_PATH:-/openmaptiles/malaysia.mbtiles}
+case "$OPENMAPTILES_STYLE_URL" in
+  /*)
+    if [[ "$OPENMAPTILES_STYLE_URL" == //* ]]; then
+      echo "OPENMAPTILES_STYLE_URL must be a same-origin path." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "OPENMAPTILES_STYLE_URL must be a same-origin path." >&2
+    exit 1
+    ;;
+esac
+case "$OPENMAPTILES_MBTILES_PATH" in
+  /openmaptiles/*.mbtiles) ;;
+  *)
+    echo "OPENMAPTILES_MBTILES_PATH must point inside /openmaptiles." >&2
+    exit 1
+    ;;
+esac
+
 install -d -o root -g root -m 0700 "$runtime_dir"
 backend_secrets_dir="$runtime_dir/backend-secrets"
 install -d -o 10001 -g 10001 -m 0500 "$backend_secrets_dir"
@@ -156,6 +178,8 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit DEPLOYMENT_COMPONENT web
   emit DJANGO_ALLOWED_HOSTS "$DJANGO_ALLOWED_HOSTS"
   emit DJANGO_CSRF_TRUSTED_ORIGINS "$DJANGO_CSRF_TRUSTED_ORIGINS"
+  emit OPENMAPTILES_STYLE_URL "$OPENMAPTILES_STYLE_URL"
+  emit OPENMAPTILES_MBTILES_PATH "$OPENMAPTILES_MBTILES_PATH"
   emit DJANGO_SECURE_SSL_REDIRECT true
   emit DJANGO_TRUST_X_FORWARDED_PROTO true
   emit DJANGO_USE_X_FORWARDED_HOST false
@@ -178,6 +202,12 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit PILOT_BACKUP_RETENTION_DAYS 3
   emit PILOT_BACKUP_MAX_LOCAL_ARCHIVES 3
   emit REQUIRED_APP_VERSION "$REQUIRED_APP_VERSION"
+  emit APP_UPDATE_VERSION_CODE "${APP_UPDATE_VERSION_CODE:-0}"
+  emit APP_UPDATE_VERSION_NAME "${APP_UPDATE_VERSION_NAME:-}"
+  emit APP_UPDATE_STORAGE_NAME "${APP_UPDATE_STORAGE_NAME:-}"
+  emit APP_UPDATE_SHA256 "${APP_UPDATE_SHA256:-}"
+  emit APP_UPDATE_SIZE_BYTES "${APP_UPDATE_SIZE_BYTES:-0}"
+  emit APP_UPDATE_ROLLOUT_PERCENT "${APP_UPDATE_ROLLOUT_PERCENT:-0}"
   emit PLAY_INTEGRITY_PROJECT_NUMBER "$PLAY_INTEGRITY_PROJECT_NUMBER"
   emit PLAY_INTEGRITY_PACKAGE_NAME com.duducar.signage
   emit PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 "$play_integrity_app_certificates"

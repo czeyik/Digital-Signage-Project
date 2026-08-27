@@ -267,6 +267,25 @@ DEVICE_ACCESS_TOKEN_TTL_SECONDS = 60 * 60
 ENROLLMENT_CODE_TTL_SECONDS = 15 * 60
 ENROLLMENT_CHALLENGE_TTL_SECONDS = 5 * 60
 REQUIRED_APP_VERSION = os.getenv("REQUIRED_APP_VERSION", "0.1.0")
+APP_UPDATE_VERSION_CODE = int(os.getenv("APP_UPDATE_VERSION_CODE", "0"))
+APP_UPDATE_VERSION_NAME = os.getenv("APP_UPDATE_VERSION_NAME", "").strip()
+APP_UPDATE_STORAGE_NAME = os.getenv("APP_UPDATE_STORAGE_NAME", "").strip()
+APP_UPDATE_SHA256 = os.getenv("APP_UPDATE_SHA256", "").strip().lower()
+APP_UPDATE_SIZE_BYTES = int(os.getenv("APP_UPDATE_SIZE_BYTES", "0"))
+APP_UPDATE_ROLLOUT_PERCENT = int(os.getenv("APP_UPDATE_ROLLOUT_PERCENT", "0"))
+OPENMAPTILES_STYLE_URL = os.getenv(
+    "OPENMAPTILES_STYLE_URL", "/locations/style.json"
+).strip()
+if not OPENMAPTILES_STYLE_URL.startswith("/") or OPENMAPTILES_STYLE_URL.startswith(
+    "//"
+):
+    raise ImproperlyConfigured("OPENMAPTILES_STYLE_URL must be a same-origin path.")
+OPENMAPTILES_MBTILES_PATH = os.getenv(
+    "OPENMAPTILES_MBTILES_PATH", "/openmaptiles/malaysia.mbtiles"
+).strip()
+OPENMAPTILES_MAX_ZOOM = int(os.getenv("OPENMAPTILES_MAX_ZOOM", "14"))
+if not 0 <= OPENMAPTILES_MAX_ZOOM <= 22:
+    raise ImproperlyConfigured("OPENMAPTILES_MAX_ZOOM must be between 0 and 22.")
 DEVICE_OVERHEAT_CELSIUS = float(os.getenv("DEVICE_OVERHEAT_CELSIUS", "45"))
 DEVICE_MEDIA_CACHE_BYTES = int(os.getenv("DEVICE_MEDIA_CACHE_BYTES", str(10 * 1024**3)))
 DEVICE_EVENT_QUEUE_BYTES = int(

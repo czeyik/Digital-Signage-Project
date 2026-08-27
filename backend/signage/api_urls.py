@@ -12,6 +12,7 @@ urlpatterns = [
     path("devices/token/", api.token_refresh, name="device-token"),
     path("devices/sync/", api.sync_manifest, name="device-sync"),
     path("devices/heartbeat/", api.heartbeat, name="device-heartbeat"),
+    path("devices/location-batches/", api.location_batch, name="device-location-batch"),
     path("devices/playback-batches/", api.playback_batch, name="playback-batch"),
     path(
         "devices/operational-events/",

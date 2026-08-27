@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 
 from django.conf import settings
@@ -69,6 +70,7 @@ class Command(BaseCommand):
     def _check_production_settings(self, errors, warnings, component):
         if settings.DEPLOYMENT_ENV != "production":
             errors.append("DEPLOYMENT_ENV must be production for a production check.")
+        self._check_app_update_configuration(errors)
         if settings.DEBUG:
             errors.append("DJANGO_DEBUG must be false in production.")
         if (
@@ -91,6 +93,48 @@ class Command(BaseCommand):
             self._check_media_processing_limits(errors)
         if component in {"all", "web"}:
             self._check_web_settings(errors)
+
+    def _check_app_update_configuration(self, errors):
+        version_code = settings.APP_UPDATE_VERSION_CODE
+        if not 0 <= version_code <= 2_147_483_647:
+            errors.append(
+                "APP_UPDATE_VERSION_CODE must be zero or a positive 32-bit integer."
+            )
+            return
+        if version_code == 0:
+            if any(
+                (
+                    settings.APP_UPDATE_VERSION_NAME,
+                    settings.APP_UPDATE_STORAGE_NAME,
+                    settings.APP_UPDATE_SHA256,
+                    settings.APP_UPDATE_SIZE_BYTES,
+                    settings.APP_UPDATE_ROLLOUT_PERCENT,
+                )
+            ):
+                errors.append(
+                    "Disabled app-update configuration must leave all staged APK "
+                    "fields empty or zero."
+                )
+            return
+        if not re.fullmatch(
+            r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?",
+            settings.APP_UPDATE_VERSION_NAME,
+        ):
+            errors.append(
+                "APP_UPDATE_VERSION_NAME must be an explicit semantic version."
+            )
+        if not re.fullmatch(
+            r"updates/[A-Za-z0-9._/-]+\.apk", settings.APP_UPDATE_STORAGE_NAME
+        ):
+            errors.append(
+                "APP_UPDATE_STORAGE_NAME must be an updates/*.apk object key."
+            )
+        if not re.fullmatch(r"[0-9a-f]{64}", settings.APP_UPDATE_SHA256):
+            errors.append("APP_UPDATE_SHA256 must be a lowercase 64-hex digest.")
+        if not 1 <= settings.APP_UPDATE_SIZE_BYTES <= 200 * 1024 * 1024:
+            errors.append("APP_UPDATE_SIZE_BYTES must be between 1 and 200 MiB.")
+        if not 1 <= settings.APP_UPDATE_ROLLOUT_PERCENT <= 100:
+            errors.append("APP_UPDATE_ROLLOUT_PERCENT must be between 1 and 100.")
 
     def _check_backup_limits(self, errors):
         backup_limits = {

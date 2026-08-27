@@ -6,6 +6,11 @@ CloudFront/S3 media, on-demand Fargate processing, systemd timers, and layered
 backups. ECS web services and schedules, ALB, live RDS, the continuous worker,
 and Container Insights are retired and are not recovery paths.
 
+The fleet basemap is self-hosted OpenMapTiles. Prepare and transfer the
+verified MBTiles extract using [`docs/openmaptiles.md`](../docs/openmaptiles.md);
+the runtime mounts it read-only and does not retrieve map data from a third
+party API.
+
 The Terraform names `ec2_target`, `migration_target`, and `legacy_*` are
 migration-era state addresses. They are intentionally retained to avoid
 replacing live resources or losing decommission history; they do not describe
@@ -120,6 +125,14 @@ production must select:
 ```text
 CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover
 ```
+
+The same release file carries the optional DUDU-owned OTA selection:
+`APP_UPDATE_VERSION_CODE`, `APP_UPDATE_VERSION_NAME`, `APP_UPDATE_STORAGE_NAME`,
+`APP_UPDATE_SHA256`, `APP_UPDATE_SIZE_BYTES`, and
+`APP_UPDATE_ROLLOUT_PERCENT`. Terraform defaults keep all six disabled. When
+enabled, the signed APK must already exist at the private `updates/*.apk` key;
+the release-config document validates the exact reviewed values and never
+restarts services.
 
 `Caddyfile.preflight` and `Caddyfile.production` are retired migration
 artifacts. The checked-in runtime helper refuses to use them.

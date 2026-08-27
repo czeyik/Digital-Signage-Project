@@ -36,6 +36,8 @@ locals {
     { name = "DEPLOYMENT_ENV", value = "production" },
     { name = "DJANGO_ALLOWED_HOSTS", value = "${var.dashboard_hostname},${var.api_hostname}" },
     { name = "DJANGO_CSRF_TRUSTED_ORIGINS", value = "https://${var.dashboard_hostname}" },
+    { name = "OPENMAPTILES_STYLE_URL", value = "/locations/style.json" },
+    { name = "OPENMAPTILES_MBTILES_PATH", value = var.openmaptiles_mbtiles_path },
     { name = "DJANGO_SECURE_SSL_REDIRECT", value = "true" },
     { name = "DJANGO_TRUST_X_FORWARDED_PROTO", value = "true" },
     { name = "DJANGO_USE_X_FORWARDED_HOST", value = "false" },
@@ -123,6 +125,25 @@ check "ec2_target_image" {
   assert {
     condition     = !var.enable_ec2_target || var.enable_media_cloudfront
     error_message = "enable_media_cloudfront must be true whenever enable_ec2_target is true."
+  }
+}
+
+check "app_update_configuration" {
+  assert {
+    condition = var.app_update_version_code == 0 ? (
+      var.app_update_version_name == "" &&
+      var.app_update_storage_name == "" &&
+      var.app_update_sha256 == "" &&
+      var.app_update_size_bytes == 0 &&
+      var.app_update_rollout_percent == 0
+      ) : (
+      var.app_update_version_name != "" &&
+      var.app_update_storage_name != "" &&
+      var.app_update_sha256 != "" &&
+      var.app_update_size_bytes > 0 &&
+      var.app_update_rollout_percent > 0
+    )
+    error_message = "Configure every app-update field when OTA is enabled, or leave all staged APK fields at their zero/empty disabled values."
   }
 }
 
@@ -1035,7 +1056,7 @@ resource "aws_iam_role_policy" "events" {
 
 locals {
   scheduled_tasks = local.legacy_ecs_runtime_enabled && local.legacy_ecs_task_definitions_enabled ? {
-    fleet-health    = { expression = "rate(30 minutes)", command = ["python", "manage.py", "evaluate_device_health"] },
+    fleet-health    = { expression = "rate(1 minute)", command = ["python", "manage.py", "evaluate_device_health"] },
     playlists       = { expression = "rate(6 hours)", command = ["python", "manage.py", "evaluate_playlists"] },
     media-reconcile = { expression = "rate(15 minutes)", command = ["python", "manage.py", "reconcile_media_processing"] },
     retention       = { expression = "cron(30 17 * * ? *)", command = ["python", "manage.py", "apply_retention"] },

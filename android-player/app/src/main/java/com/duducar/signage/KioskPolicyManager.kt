@@ -1,10 +1,12 @@
 package com.duducar.signage
 
 import android.app.admin.DevicePolicyManager
+import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.os.UserManager
 
 class KioskPolicyManager(private val context: Context) {
@@ -12,6 +14,33 @@ class KioskPolicyManager(private val context: Context) {
     private val admin = ComponentName(context, KioskDeviceAdminReceiver::class.java)
 
     fun isDeviceOwner(): Boolean = manager.isDeviceOwnerApp(context.packageName)
+
+    /** Device-owner-only setup for the foreground location collector. */
+    fun ensureLocationAccess(): Boolean {
+        if (!isDeviceOwner()) return false
+        return try {
+            val fineGranted = manager.setPermissionGrantState(
+                admin,
+                context.packageName,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED,
+            )
+            val coarseGranted = manager.setPermissionGrantState(
+                admin,
+                context.packageName,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED,
+            )
+            if (!fineGranted || !coarseGranted) return false
+            manager.setLocationEnabled(admin, true)
+            context.checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+        } catch (_: SecurityException) {
+            false
+        } catch (_: IllegalArgumentException) {
+            false
+        }
+    }
 
     fun applyLockedPolicies(restrictUsbFileTransfer: Boolean): Boolean {
         if (!isDeviceOwner()) return false

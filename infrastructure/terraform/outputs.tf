@@ -220,3 +220,13 @@ output "production_release_activation_sha256" {
   description = "Reviewed SHA-256 of the activation helper embedded in its SSM document."
   value       = local.ec2_release_activation_sha256
 }
+
+output "openmaptiles_mbtiles_path" {
+  description = "Read-only OpenMapTiles MBTiles path inside the web container."
+  value       = var.openmaptiles_mbtiles_path
+}
+
+output "openmaptiles_style_url" {
+  description = "Authenticated same-origin OpenMapTiles style endpoint used by the fleet dashboard."
+  value       = "https://${var.dashboard_hostname}/locations/style.json"
+}

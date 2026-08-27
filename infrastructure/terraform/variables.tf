@@ -199,6 +199,101 @@ variable "required_app_version" {
   }
 }
 
+variable "openmaptiles_mbtiles_path" {
+  type        = string
+  description = "Read-only OpenMapTiles MBTiles path inside the web container. The matching file is installed on the host under /srv/duducar/openmaptiles."
+  default     = "/openmaptiles/malaysia.mbtiles"
+
+  validation {
+    condition = can(regex(
+      "^/openmaptiles/[A-Za-z0-9][A-Za-z0-9._-]*\\.mbtiles$",
+      var.openmaptiles_mbtiles_path,
+    ))
+    error_message = "openmaptiles_mbtiles_path must be a .mbtiles file directly under /openmaptiles."
+  }
+}
+
+variable "app_update_version_code" {
+  type        = number
+  description = "Version code advertised to enrolled device-owner players for the staged signed APK; zero disables OTA delivery."
+  default     = 0
+
+  validation {
+    condition     = var.app_update_version_code >= 0 && var.app_update_version_code <= 2147483647 && floor(var.app_update_version_code) == var.app_update_version_code
+    error_message = "app_update_version_code must be zero or a positive 32-bit integer."
+  }
+}
+
+variable "app_update_version_name" {
+  type        = string
+  description = "Semantic version name of the staged signed APK; empty only when OTA is disabled."
+  default     = ""
+
+  validation {
+    condition = (
+      var.app_update_version_name == "" || can(regex(
+        "^[0-9]+\\.[0-9]+\\.[0-9]+([-+][0-9A-Za-z.-]+)?$",
+        var.app_update_version_name,
+      ))
+    )
+    error_message = "app_update_version_name must be empty or an explicit semantic version."
+  }
+}
+
+variable "app_update_storage_name" {
+  type        = string
+  description = "Private media-bucket key for the staged signed APK; empty only when OTA is disabled."
+  default     = ""
+
+  validation {
+    condition = (
+      var.app_update_storage_name == "" || can(regex(
+        "^updates/[A-Za-z0-9._/-]+\\.apk$",
+        var.app_update_storage_name,
+      ))
+    )
+    error_message = "app_update_storage_name must be empty or an updates/*.apk key."
+  }
+}
+
+variable "app_update_sha256" {
+  type        = string
+  description = "Lowercase SHA-256 checksum of the staged signed APK; empty only when OTA is disabled."
+  default     = ""
+
+  validation {
+    condition = (
+      var.app_update_sha256 == "" || can(regex(
+        "^[0-9a-f]{64}$",
+        var.app_update_sha256,
+      ))
+    )
+    error_message = "app_update_sha256 must be empty or a lowercase 64-hex SHA-256 digest."
+  }
+}
+
+variable "app_update_size_bytes" {
+  type        = number
+  description = "Exact byte size of the staged signed APK; zero only when OTA is disabled."
+  default     = 0
+
+  validation {
+    condition     = var.app_update_size_bytes >= 0 && var.app_update_size_bytes <= 209715200 && floor(var.app_update_size_bytes) == var.app_update_size_bytes
+    error_message = "app_update_size_bytes must be zero or an integer no larger than 200 MiB."
+  }
+}
+
+variable "app_update_rollout_percent" {
+  type        = number
+  description = "Deterministic percentage of enrolled devices eligible for the staged APK; zero disables OTA delivery."
+  default     = 0
+
+  validation {
+    condition     = var.app_update_rollout_percent >= 0 && var.app_update_rollout_percent <= 100 && floor(var.app_update_rollout_percent) == var.app_update_rollout_percent
+    error_message = "app_update_rollout_percent must be an integer from zero through 100."
+  }
+}
+
 variable "play_integrity_project_number" {
   type        = string
   description = "Non-secret Google Cloud numeric project number."

@@ -1,5 +1,8 @@
+import hashlib
 import io
 import ipaddress
+import logging
+import re
 import secrets
 import uuid
 import zlib
@@ -8,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from urllib.parse import urlsplit
 
 from django.conf import settings
+from django.core.files.storage import default_storage
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -31,6 +35,7 @@ from .models import (
     DeviceAccessToken,
     DeviceCredential,
     DeviceHeartbeat,
+    DeviceLocationPoint,
     DeviceOperationalEvent,
     EnrollmentChallenge,
     EnrollmentCode,
@@ -47,7 +52,26 @@ from .services import (
     throttle_wait,
 )
 
+logger = logging.getLogger(__name__)
+
 MAX_DEVICE_TIMESTAMP_FUTURE_SKEW = timedelta(minutes=5)
+MAX_LOCATION_AGE = timedelta(days=30)
+MAX_LOCATION_POINTS_PER_BATCH = 500
+LOCATION_STATES = frozenset(
+    {
+        "initializing",
+        "fresh",
+        "stale",
+        "unavailable",
+        "planned_gap",
+        "shutdown",
+        "permission_disabled",
+        "location_disabled",
+        "mock",
+    }
+)
+LOCATION_PROVIDERS = frozenset({"gps", "network"})
+LOCATION_SOURCE = "location_manager"
 MAX_PLAYBACK_EVENT_DURATION_MS = 2_147_483_647
 PLAYBACK_TIMESTAMP_TOLERANCE = timedelta(seconds=5)
 PLAYBACK_FAILURE_REASONS_BY_STATUS = {
@@ -59,6 +83,7 @@ PLAYBACK_FAILURE_REASONS_BY_STATUS = {
             "administrator_session",
             "app_restart_or_power_loss",
             "app_restart_or_unexpected_exit",
+            "app_update",
             "credential_rejected",
             "device_disabled",
             "device_owner_removed",
@@ -287,6 +312,67 @@ def media_url_uses_origin(download_url, origin):
         )
     except ValueError:
         return False
+
+
+def configured_app_update(device):
+    version_code = settings.APP_UPDATE_VERSION_CODE
+    if version_code == 0:
+        if any(
+            (
+                settings.APP_UPDATE_VERSION_NAME,
+                settings.APP_UPDATE_STORAGE_NAME,
+                settings.APP_UPDATE_SHA256,
+                settings.APP_UPDATE_SIZE_BYTES,
+                settings.APP_UPDATE_ROLLOUT_PERCENT,
+            )
+        ):
+            raise exceptions.APIException(
+                "Application update configuration is unavailable."
+            )
+        return None
+    configuration_error = "Application update configuration is unavailable."
+    if not 1 <= version_code <= 2_147_483_647:
+        raise exceptions.APIException(configuration_error)
+    if not re.fullmatch(
+        r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?",
+        settings.APP_UPDATE_VERSION_NAME,
+    ):
+        raise exceptions.APIException(configuration_error)
+    if not re.fullmatch(r"[0-9a-f]{64}", settings.APP_UPDATE_SHA256):
+        raise exceptions.APIException(configuration_error)
+    if not 1 <= settings.APP_UPDATE_SIZE_BYTES <= 200 * 1024 * 1024:
+        raise exceptions.APIException(configuration_error)
+    if not 1 <= settings.APP_UPDATE_ROLLOUT_PERCENT <= 100:
+        raise exceptions.APIException(configuration_error)
+    if not re.fullmatch(
+        r"updates/[A-Za-z0-9._/-]+\.apk", settings.APP_UPDATE_STORAGE_NAME
+    ):
+        raise exceptions.APIException(configuration_error)
+    rollout_bucket = int(
+        hashlib.sha256(
+            f"duducar-app-update-v1:{device.pk}".encode("ascii")
+        ).hexdigest()[:8],
+        16,
+    ) % 100
+    if rollout_bucket >= settings.APP_UPDATE_ROLLOUT_PERCENT:
+        return None
+    try:
+        download_url = default_storage.url(settings.APP_UPDATE_STORAGE_NAME)
+    except Exception as exc:
+        raise exceptions.APIException(
+            "Application update delivery is unavailable."
+        ) from exc
+    if settings.DEPLOYMENT_ENV == "production" and not media_url_uses_origin(
+        download_url, configured_media_origin()
+    ):
+        raise exceptions.APIException("Application update delivery is unavailable.")
+    return {
+        "version_code": version_code,
+        "version_name": settings.APP_UPDATE_VERSION_NAME,
+        "download_url": download_url,
+        "sha256": settings.APP_UPDATE_SHA256,
+        "size_bytes": settings.APP_UPDATE_SIZE_BYTES,
+    }
 
 
 def enrollment_device_details(data, *, require_hardware=False):
@@ -631,6 +717,7 @@ def sync_manifest(request):
         # Authentication normally rejects this before the view; keep the
         # defense-in-depth path aligned with credential revocation.
         raise exceptions.AuthenticationFailed("Invalid or expired device token.")
+    app_update = configured_app_update(device)
     if missing_enrollment_eligible_hardware:
         # Keep an active device in maintenance when its exact, attested hardware
         # identity becomes ineligible. Physical checklist completion remains a
@@ -642,6 +729,7 @@ def sync_manifest(request):
                 "server_time": timezone.now(),
                 "message": "This display is temporarily unavailable.",
                 "kiosk_pin_verifier": device.kiosk_pin_hash,
+                "app_update": app_update,
             }
         )
     playlist = active_playlist()
@@ -653,6 +741,7 @@ def sync_manifest(request):
                 "server_time": timezone.now(),
                 "playlist": None,
                 "kiosk_pin_verifier": device.kiosk_pin_hash,
+                "app_update": app_update,
             }
         )
     items = playlist.items.select_related("media").all()
@@ -685,6 +774,7 @@ def sync_manifest(request):
             "mode": "play",
             "server_time": timezone.now(),
             "kiosk_pin_verifier": device.kiosk_pin_hash,
+            "app_update": app_update,
             "playlist": {
                 "id": str(playlist.id),
                 "name": playlist.name,
@@ -856,6 +946,315 @@ def heartbeat(request):
     return Response({"accepted": True, "server_time": timezone.now()})
 
 
+def _location_decimal(value, field, lower, upper, places):
+    try:
+        parsed = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise serializers.ValidationError({field: "Use a finite number."}) from exc
+    if not parsed.is_finite() or parsed < lower or parsed > upper:
+        raise serializers.ValidationError(
+            {field: "Value is outside the allowed range."}
+        )
+    try:
+        return parsed.quantize(Decimal(places))
+    except InvalidOperation as exc:
+        raise serializers.ValidationError(
+            {field: "Number precision is invalid."}
+        ) from exc
+
+
+def _location_point_matches(existing, point):
+    return (
+        existing.device_id == point["device"].id
+        and existing.recorded_at == point["recorded_at"]
+        and existing.device_recorded_at == point["device_recorded_at"]
+        and existing.latitude == point["latitude"]
+        and existing.longitude == point["longitude"]
+        and existing.accuracy_m == point["accuracy_m"]
+        and existing.provider == point["provider"]
+        and existing.source == point["source"]
+    )
+
+
+def _location_assignment(device, recorded_at):
+    return (
+        device.assignments.filter(assigned_at__lte=recorded_at)
+        .filter(
+            models.Q(unassigned_at__isnull=True)
+            | models.Q(unassigned_at__gt=recorded_at)
+        )
+        .order_by("-assigned_at")
+        .first()
+    )
+
+
+@api_view(["POST"])
+@parser_classes([GzipPlaybackBatchJSONParser])
+def location_batch(request):
+    device = device_for(request)
+    if device.status == Device.Status.DISABLED:
+        raise exceptions.PermissionDenied("Disabled devices cannot submit locations.")
+    unexpected = set(request.data).difference({"current", "points"})
+    if unexpected:
+        raise serializers.ValidationError("Location batch contains unknown fields.")
+    points = request.data.get("points", [])
+    if not isinstance(points, list):
+        raise serializers.ValidationError({"points": "Use a JSON array."})
+    if len(points) > MAX_LOCATION_POINTS_PER_BATCH:
+        raise serializers.ValidationError(
+            {"points": "A location batch may contain at most 500 points."}
+        )
+
+    now = timezone.now()
+    current = request.data.get("current")
+    current_values = None
+    if current is not None:
+        if not isinstance(current, dict):
+            raise serializers.ValidationError({"current": "Use a JSON object."})
+        if set(current).difference({"state", "reported_at", "planned_gap_until"}):
+            raise serializers.ValidationError("Location state contains unknown fields.")
+        state = required_short_string(current, "state", 32)
+        if state not in LOCATION_STATES:
+            raise serializers.ValidationError(
+                {"current.state": "Unknown location state."}
+            )
+        reported_at = parse_required_datetime(
+            current.get("reported_at"), "reported_at"
+        )
+        if reported_at < now - MAX_LOCATION_AGE:
+            raise serializers.ValidationError(
+                {"reported_at": "State is older than 30 days."}
+            )
+        planned_gap_until = None
+        if current.get("planned_gap_until"):
+            planned_gap_until = parse_required_datetime(
+                current["planned_gap_until"], "planned_gap_until"
+            )
+            if planned_gap_until > now + timedelta(minutes=10):
+                raise serializers.ValidationError(
+                    {"planned_gap_until": "Planned gaps may not exceed ten minutes."}
+                )
+        if state == "planned_gap" and planned_gap_until is None:
+            raise serializers.ValidationError(
+                {"planned_gap_until": "Planned gaps require an end time."}
+            )
+        current_values = {
+            "state": state,
+            "reported_at": reported_at,
+            "planned_gap_until": planned_gap_until,
+        }
+
+    accepted_points = []
+    rejected = []
+    seen = {}
+    for raw in points:
+        if not isinstance(raw, dict):
+            raise serializers.ValidationError(
+                {"points": "Each point must be an object."}
+            )
+        raw_id = raw.get("id")
+        try:
+            point_id = parse_required_uuid(raw_id, "id")
+        except serializers.ValidationError as exc:
+            raise serializers.ValidationError(
+                {"points": "Each point needs a UUID id."}
+            ) from exc
+        try:
+            if set(raw).difference(
+                {
+                    "id",
+                    "recorded_at",
+                    "device_recorded_at",
+                    "latitude",
+                    "longitude",
+                    "accuracy_m",
+                    "provider",
+                    "source",
+                }
+            ):
+                raise serializers.ValidationError("Point contains unknown fields.")
+            recorded_at = parse_required_datetime(raw.get("recorded_at"), "recorded_at")
+            device_recorded_at = parse_required_datetime(
+                raw.get("device_recorded_at"), "device_recorded_at"
+            )
+            if recorded_at < now - MAX_LOCATION_AGE:
+                raise serializers.ValidationError("Point is older than 30 days.")
+            provider = required_short_string(raw, "provider", 16).lower()
+            if provider not in LOCATION_PROVIDERS:
+                raise serializers.ValidationError("Unsupported location provider.")
+            source = required_short_string(raw, "source", 32)
+            if source != LOCATION_SOURCE:
+                raise serializers.ValidationError("Unsupported location source.")
+            latitude = _location_decimal(
+                raw.get("latitude"),
+                "latitude",
+                Decimal("-90"),
+                Decimal("90"),
+                "0.000001",
+            )
+            longitude = _location_decimal(
+                raw.get("longitude"),
+                "longitude",
+                Decimal("-180"),
+                Decimal("180"),
+                "0.000001",
+            )
+            accuracy_m = _location_decimal(
+                raw.get("accuracy_m"),
+                "accuracy_m",
+                Decimal("0"),
+                Decimal("100"),
+                "0.01",
+            )
+        except serializers.ValidationError:
+            rejected.append({"id": str(point_id), "reason": "invalid_point"})
+            continue
+        normalized = {
+            "id": point_id,
+            "recorded_at": recorded_at,
+            "device_recorded_at": device_recorded_at,
+            "latitude": latitude,
+            "longitude": longitude,
+            "accuracy_m": accuracy_m,
+            "provider": provider,
+            "source": source,
+        }
+        prior = seen.get(point_id)
+        if prior is not None:
+            if prior != normalized:
+                rejected.append({"id": str(point_id), "reason": "id_collision"})
+            continue
+        seen[point_id] = normalized
+        accepted_points.append(normalized)
+
+    acknowledged = []
+    with transaction.atomic():
+        locked_device = Device.objects.select_for_update().get(pk=device.pk)
+        for point in accepted_points:
+            existing = DeviceLocationPoint.objects.filter(pk=point["id"]).first()
+            if existing:
+                if existing.device_id != locked_device.id:
+                    rejected.append({"id": str(point["id"]), "reason": "id_collision"})
+                elif _location_point_matches(
+                    existing,
+                    {**point, "device": locked_device},
+                ):
+                    acknowledged.append(str(point["id"]))
+                else:
+                    rejected.append({"id": str(point["id"]), "reason": "id_collision"})
+                continue
+            assignment = _location_assignment(locked_device, point["recorded_at"])
+            try:
+                DeviceLocationPoint.objects.create(
+                    id=point["id"],
+                    device=locked_device,
+                    assignment=assignment,
+                    recorded_at=point["recorded_at"],
+                    device_recorded_at=point["device_recorded_at"],
+                    latitude=point["latitude"],
+                    longitude=point["longitude"],
+                    accuracy_m=point["accuracy_m"],
+                    provider=point["provider"],
+                    source=point["source"],
+                )
+            except IntegrityError:
+                existing = DeviceLocationPoint.objects.filter(pk=point["id"]).first()
+                if (
+                    existing
+                    and existing.device_id == locked_device.id
+                    and _location_point_matches(
+                        existing, {**point, "device": locked_device}
+                    )
+                ):
+                    acknowledged.append(str(point["id"]))
+                else:
+                    rejected.append({"id": str(point["id"]), "reason": "id_collision"})
+            else:
+                acknowledged.append(str(point["id"]))
+
+        update_fields = []
+        state_is_newer = (
+            current_values is not None
+            and (
+                locked_device.location_state_updated_at is None
+                or current_values["reported_at"]
+                >= locked_device.location_state_updated_at
+            )
+        )
+        if state_is_newer:
+            locked_device.location_state = current_values["state"]
+            locked_device.location_state_updated_at = current_values["reported_at"]
+            locked_device.location_planned_gap_until = current_values[
+                "planned_gap_until"
+            ]
+            update_fields.extend(
+                [
+                    "location_state",
+                    "location_state_updated_at",
+                    "location_planned_gap_until",
+                ]
+            )
+        if state_is_newer or acknowledged:
+            locked_device.last_location_reported_at = now
+            update_fields.append("last_location_reported_at")
+        if update_fields:
+            locked_device.save(update_fields=[*set(update_fields), "updated_at"])
+
+        if state_is_newer:
+            state = current_values["state"]
+            if state == "permission_disabled":
+                open_or_escalate_alert(
+                    locked_device,
+                    "location_permission_disabled",
+                    Alert.Severity.CRITICAL,
+                    "Device precise-location permission is disabled.",
+                )
+            elif state == "location_disabled":
+                open_or_escalate_alert(
+                    locked_device,
+                    "location_disabled",
+                    Alert.Severity.CRITICAL,
+                    "Device location services are disabled.",
+                )
+            elif state == "mock":
+                open_or_escalate_alert(
+                    locked_device,
+                    "location_mock",
+                    Alert.Severity.CRITICAL,
+                    "Device reported a mock location source.",
+                )
+            elif state == "stale":
+                open_or_escalate_alert(
+                    locked_device,
+                    "location_stale",
+                    Alert.Severity.WARNING,
+                    "Device location report is stale.",
+                )
+            elif state == "unavailable":
+                open_or_escalate_alert(
+                    locked_device,
+                    "location_unavailable",
+                    Alert.Severity.CRITICAL,
+                    "Device has no fresh valid location fix.",
+                )
+
+    logger.info(
+        "location_batch_processed points=%d acknowledged=%d rejected=%d state=%s",
+        len(points),
+        len(acknowledged),
+        len(rejected),
+        current_values["state"] if current_values is not None else "none",
+    )
+    return Response(
+        {
+            "acknowledged_ids": acknowledged,
+            "rejected": rejected,
+            "state_accepted": current_values is not None,
+            "server_time": now,
+        }
+    )
+
+
 def validate_operational_event_details(kind, data):
     details_provided = "details" in data
     details = data.get("details", {})
@@ -921,6 +1320,38 @@ def validate_operational_event_details(kind, data):
         if not isinstance(reason, str) or reason not in ABNORMAL_APP_EXIT_REASONS:
             raise serializers.ValidationError(
                 {"details.reason": "Use a recognized abnormal exit reason."}
+            )
+    elif kind == DeviceOperationalEvent.Kind.LOCATION_QUEUE_LOSS:
+        expected = {"removed_points", "estimated_removed_bytes", "retained_points"}
+        if set(details) != expected or any(
+            type(details[field]) is not int or details[field] < 0 for field in expected
+        ):
+            raise serializers.ValidationError(
+                {
+                    "details": (
+                        "Location queue loss details must contain non-negative integer "
+                        "removed_points, estimated_removed_bytes, and retained_points."
+                    )
+                }
+            )
+    elif kind == DeviceOperationalEvent.Kind.LOCATION_POINT_REJECTED:
+        if set(details) != {"point_id", "reason"}:
+            raise serializers.ValidationError(
+                {"details": "Location point rejection details are invalid."}
+            )
+        try:
+            uuid.UUID(str(details["point_id"]))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise serializers.ValidationError(
+                {"details.point_id": "Use a location point UUID."}
+            ) from exc
+        if (
+            not isinstance(details["reason"], str)
+            or not details["reason"]
+            or len(details["reason"]) > 64
+        ):
+            raise serializers.ValidationError(
+                {"details.reason": "Use a short rejection reason."}
             )
     return details
 
@@ -996,6 +1427,20 @@ def operational_event(request):
         raise serializers.ValidationError(
             "Operational event identifier collision."
         ) from None
+    if kind == DeviceOperationalEvent.Kind.LOCATION_QUEUE_LOSS:
+        open_or_escalate_alert(
+            device,
+            "location_queue_loss",
+            Alert.Severity.CRITICAL,
+            "Location queue overflow evicted unsent points.",
+        )
+    elif kind == DeviceOperationalEvent.Kind.LOCATION_POINT_REJECTED:
+        open_or_escalate_alert(
+            device,
+            "location_point_rejected",
+            Alert.Severity.CRITICAL,
+            "The server permanently rejected a location point.",
+        )
     return Response(
         {"accepted": True, "duplicate": False, "id": str(event.id)},
         status=status.HTTP_201_CREATED,

@@ -38,6 +38,29 @@ production tfvars to this exact `productionVersionName`. The server compares
 that value to the APK version name in every heartbeat; a mismatch produces an
 outdated-app alert even when the APK is otherwise valid.
 
+## DUDU-owned OTA updates
+
+Build each OTA candidate with the same production keystore and a strictly higher
+`productionVersionCode`. Upload the signed APK to the private media bucket under
+an `updates/*.apk` key, record its lowercase SHA-256 and exact byte size, and set
+the matching Terraform `app_update_*` values plus a rollout percentage. The
+reviewed release-config and activation documents carry those values to the host;
+the backend then advertises a short-lived signed CloudFront URL in `devices/sync/`.
+
+The player accepts an update only in production while DUDU remains device owner,
+the device is not in shutdown or administrator mode, storage has headroom, and
+the tablet is charging or at least 50% battery. It verifies package name, version
+code, APK digest, and the installed signing certificate before using Android's
+silent device-owner PackageInstaller flow. A failed or interrupted install is
+retried on a later sync and never replaces the current playback files.
+
+Existing 1.0.1/code-2 tablets do not contain this updater. Install the first
+updater-enabled release manually after Setup Wizard and device-owner assignment;
+subsequent higher-code releases can be delivered OTA. Keep the previous same-key
+APK for rollback, and disable OTA by setting all `app_update_*` values back to
+their zero/empty defaults before selecting a release that should not advertise an
+update.
+
 ## Current reviewed canary release identity — 2026-08-24
 
 The current canary candidate uses previous version code `1`, production version

@@ -1,3 +1,5 @@
+import logging
+import time
 from datetime import timedelta
 
 from django.core.management.base import BaseCommand
@@ -8,17 +10,21 @@ from signage.models import Alert, Device, DeviceOperationalEvent, PlaybackEvent
 from signage.services import open_alert, open_or_escalate_alert
 
 ABNORMAL_APP_EXIT_KIND = DeviceOperationalEvent.Kind.ABNORMAL_APP_EXIT
+logger = logging.getLogger(__name__)
 
 
 class Command(BaseCommand):
     help = "Evaluate fleet status and create operational alerts."
 
     def handle(self, *args, **options):
+        started = time.monotonic()
         now = timezone.now()
         active_devices = Device.objects.filter(status=Device.Status.ACTIVE).annotate(
             latest_credential_issued_at=Max("credentials__created_at")
         )
+        evaluated_devices = 0
         for device in active_devices:
+            evaluated_devices += 1
             # ``last_seen_at`` is set from DeviceHeartbeat.received_at, never
             # from device-provided timestamps. A newly activated device with no
             # heartbeat gets a server-side grace period from credential issue;
@@ -42,6 +48,7 @@ class Command(BaseCommand):
                     if critical
                     else "Device has not sent a heartbeat for 24 hours.",
                 )
+            self._evaluate_location_health(device, now)
             if not device.last_sync_at or device.last_sync_at < now - timedelta(days=1):
                 severity = (
                     Alert.Severity.CRITICAL
@@ -100,4 +107,57 @@ class Command(BaseCommand):
                     "Device reported at least three abnormal application exits "
                     "within 24 hours.",
                 )
+        logger.info(
+            "device_health_evaluation_complete devices=%d duration_seconds=%.3f",
+            evaluated_devices,
+            time.monotonic() - started,
+        )
         self.stdout.write(self.style.SUCCESS("Fleet health evaluated."))
+
+    def _evaluate_location_health(self, device, now):
+        if device.location_state == "shutdown":
+            return
+        if device.location_state == "planned_gap" and (
+            device.location_planned_gap_until is None
+            or device.location_planned_gap_until > now
+        ):
+            return
+        last_report = (
+            device.last_location_reported_at
+            or device.latest_credential_issued_at
+            or device.created_at
+        )
+        age = now - last_report
+        if device.location_state in {
+            "permission_disabled",
+            "location_disabled",
+            "mock",
+        }:
+            code = {
+                "permission_disabled": "location_permission_disabled",
+                "location_disabled": "location_disabled",
+                "mock": "location_mock",
+            }[device.location_state]
+            message = {
+                "permission_disabled": (
+                    "Device precise-location permission is disabled."
+                ),
+                "location_disabled": "Device location services are disabled.",
+                "mock": "Device reported a mock location source.",
+            }[device.location_state]
+            open_or_escalate_alert(device, code, Alert.Severity.CRITICAL, message)
+            return
+        if age >= timedelta(minutes=10):
+            open_or_escalate_alert(
+                device,
+                "location_unavailable",
+                Alert.Severity.CRITICAL,
+                "Device has not reported a valid location for ten minutes.",
+            )
+        elif age >= timedelta(minutes=3):
+            open_or_escalate_alert(
+                device,
+                "location_stale",
+                Alert.Severity.WARNING,
+                "Device location report is stale.",
+            )

@@ -9,3 +9,8 @@ data class PlaybackResult(
     val status: String,
     val failureReason: String = "",
 )
+
+data class LocationQueueLoss(
+    val removedPoints: Int,
+    val removedBytes: Long,
+)
