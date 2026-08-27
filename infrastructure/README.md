@@ -6,6 +6,11 @@ CloudFront/S3 media, on-demand Fargate processing, systemd timers, and layered
 backups. ECS web services and schedules, ALB, live RDS, the continuous worker,
 and Container Insights are retired and are not recovery paths.
 
+The fleet basemap is self-hosted OpenMapTiles. Prepare and transfer the
+verified MBTiles extract using [`docs/openmaptiles.md`](../docs/openmaptiles.md);
+the runtime mounts it read-only and does not retrieve map data from a third
+party API.
+
 The Terraform names `ec2_target`, `migration_target`, and `legacy_*` are
 migration-era state addresses. They are intentionally retained to avoid
 replacing live resources or losing decommission history; they do not describe

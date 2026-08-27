@@ -11,8 +11,7 @@ def apply_production_security_headers(response):
         "Content-Security-Policy",
         "default-src 'self'; img-src 'self' data: https:; "
         "media-src 'self' https:; style-src 'self' 'unsafe-inline'; "
-        "script-src 'self'; connect-src "
-        "https://maps.geo.ap-southeast-5.amazonaws.com; "
+        "script-src 'self'; connect-src 'self'; "
         "worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; "
         "form-action 'self'",
     )

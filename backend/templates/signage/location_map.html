@@ -21,13 +21,12 @@
   </div>
   <div id="fleet-map"
        class="fleet-map"
-       data-api-key="{{ location_map_api_key }}"
        data-style-url="{{ location_map_style_url }}"
        data-latest-url="{% url 'location-latest' %}"
        data-history-url="{% url 'location-history' %}"
-       data-region="{{ location_map_region }}"
        aria-label="Fleet location map"></div>
   <p id="location-message" class="supporting-text" role="status">Loading locations…</p>
+  <p class="supporting-text">Basemap © OpenStreetMap contributors · © OpenMapTiles.</p>
   <div class="table-wrap">
     <table class="data-table" id="location-table">
       <thead><tr><th>Device</th><th>State</th><th>Vehicle</th><th>Driver ID</th><th>Time</th><th>Provider</th><th>Accuracy</th></tr></thead>

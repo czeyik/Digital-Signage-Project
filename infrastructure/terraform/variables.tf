@@ -199,6 +199,20 @@ variable "required_app_version" {
   }
 }
 
+variable "openmaptiles_mbtiles_path" {
+  type        = string
+  description = "Read-only OpenMapTiles MBTiles path inside the web container. The matching file is installed on the host under /srv/duducar/openmaptiles."
+  default     = "/openmaptiles/malaysia.mbtiles"
+
+  validation {
+    condition = can(regex(
+      "^/openmaptiles/[A-Za-z0-9][A-Za-z0-9._-]*\\.mbtiles$",
+      var.openmaptiles_mbtiles_path,
+    ))
+    error_message = "openmaptiles_mbtiles_path must be a .mbtiles file directly under /openmaptiles."
+  }
+}
+
 variable "app_update_version_code" {
   type        = number
   description = "Version code advertised to enrolled device-owner players for the staged signed APK; zero disables OTA delivery."

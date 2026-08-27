@@ -45,7 +45,8 @@ install -d -o root -g root -m 0700 \
   /srv/duducar/caddy-config \
   /srv/duducar/caddy-data \
   /srv/duducar/docker \
-  /srv/duducar/postgres
+  /srv/duducar/postgres \
+  /srv/duducar/openmaptiles
 
 # Container metadata is disposable; persistent database, Caddy, and backup
 # data lives outside this directory. Quarantine inherited metadata before the
@@ -113,8 +114,8 @@ AWS_STORAGE_BUCKET_NAME=${media_bucket}
 PILOT_BACKUP_S3_BUCKET=${backup_bucket}
 DJANGO_ALLOWED_HOSTS=${dashboard_hostname},${api_hostname}
 DJANGO_CSRF_TRUSTED_ORIGINS=https://${dashboard_hostname}
-LOCATION_MAP_REGION=${aws_region}
-LOCATION_MAP_STYLE_URL=https://maps.geo.${aws_region}.amazonaws.com/v2/styles/Standard/descriptor
+OPENMAPTILES_STYLE_URL=/locations/style.json
+OPENMAPTILES_MBTILES_PATH=${openmaptiles_mbtiles_path}
 REQUIRED_APP_VERSION=${required_app_version}
 PLAY_INTEGRITY_PROJECT_NUMBER=${play_integrity_project}
 EMAIL_HOST=${smtp_host}

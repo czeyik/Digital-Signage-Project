@@ -36,8 +36,8 @@ locals {
     { name = "DEPLOYMENT_ENV", value = "production" },
     { name = "DJANGO_ALLOWED_HOSTS", value = "${var.dashboard_hostname},${var.api_hostname}" },
     { name = "DJANGO_CSRF_TRUSTED_ORIGINS", value = "https://${var.dashboard_hostname}" },
-    { name = "LOCATION_MAP_REGION", value = var.aws_region },
-    { name = "LOCATION_MAP_STYLE_URL", value = "https://maps.geo.${var.aws_region}.amazonaws.com/v2/styles/Standard/descriptor" },
+    { name = "OPENMAPTILES_STYLE_URL", value = "/locations/style.json" },
+    { name = "OPENMAPTILES_MBTILES_PATH", value = var.openmaptiles_mbtiles_path },
     { name = "DJANGO_SECURE_SSL_REDIRECT", value = "true" },
     { name = "DJANGO_TRUST_X_FORWARDED_PROTO", value = "true" },
     { name = "DJANGO_USE_X_FORWARDED_HOST", value = "false" },
@@ -93,8 +93,7 @@ locals {
       { name = "DJANGO_SECRET_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:DJANGO_SECRET_KEY::" },
       { name = "EMAIL_HOST_USER", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_USER::" },
       { name = "EMAIL_HOST_PASSWORD", valueFrom = "${aws_secretsmanager_secret.application.arn}:EMAIL_HOST_PASSWORD::" },
-      { name = "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", valueFrom = "${aws_secretsmanager_secret.application.arn}:PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON::" },
-      { name = "LOCATION_MAP_API_KEY", valueFrom = "${aws_secretsmanager_secret.application.arn}:LOCATION_MAP_API_KEY::" }
+      { name = "PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON", valueFrom = "${aws_secretsmanager_secret.application.arn}:PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON::" }
     ],
     var.enable_legacy_rds ? [
       { name = "DB_PASSWORD", valueFrom = "${aws_db_instance.production[0].master_user_secret[0].secret_arn}:password::" }

@@ -1,6 +1,6 @@
 # DUDU Car — Continuation Handoff
 
-**Updated:** 2026-08-26, Asia/Kuala_Lumpur
+**Updated:** 2026-08-27, Asia/Kuala_Lumpur
 
 ## Goal
 
@@ -110,7 +110,7 @@ Malaysia pilot on the existing low-cost AWS design. Keep the current Android
   and vehicle enrollment remain pending. Re-run read-only AWS/owner preflight
   before any production action; do not treat this dated status as live proof.
 
-## GPS tracking implementation status (2026-08-26)
+## GPS tracking implementation status (2026-08-27)
 
 The foreground-only GPS feature is implemented in the current GPS working
 tree, but has not been deployed or enabled in production. The Android player
@@ -133,19 +133,22 @@ location writes are included. Batch processing logs counts only (never
 coordinates or point payloads); queue overflow, rejected points, and stale or
 disabled devices create operational alerts.
 
-The map uses the pinned self-hosted MapLibre GL JS/CSS v5.6.0 bundle:
+The map uses the pinned self-hosted MapLibre GL JS/CSS v5.6.0 bundle and the
+same-origin OpenMapTiles service:
 
-- JS SHA-256: `07e6ca71a5b6d835a7c3803fb484f0a6e5f0dcbfa131407666edb9e9316564f9`
+- JS SHA-256: `0bec2961695addc0ed69b4b6e35cf0d545d23677e290d57f2a4f5d10815c12fc`
 - CSS SHA-256: `792ac997dcf6ae6f643eb4e2dee4630c85e7056526bd8fb85ffe83c67d6c41b4`
 
-Terraform provisions a read-only, production-dashboard-referrer-restricted
-Amazon Location API key for GrabMaps `vector.basemap` in `ap-southeast-5` and
-changes fleet-health evaluation to every minute. The browser key value must be
-added by the operator as `LOCATION_MAP_API_KEY` in the existing application
-Secrets Manager JSON; it is intentionally not stored in Terraform source or
-this handoff. The Maps key, map tile usage, ingestion/rejection counts,
-overflow alerts, evaluator duration, and database growth still require the
-normal production monitoring review.
+The dashboard no longer calls a third-party map API or exposes a map key. It
+serves an OpenMapTiles-compatible style and TileJSON document from authenticated
+same-origin routes and reads vector tiles from a verified, read-only MBTiles
+file mounted at `/openmaptiles/malaysia.mbtiles`. Terraform creates the host
+directory and passes the path into the web container; the map-data file still
+needs to be installed through the reviewed operator transfer procedure. Keep
+OpenStreetMap/OpenMapTiles attribution and refresh the extract on its own
+reviewed schedule. Tile availability, ingestion/rejection counts, overflow
+alerts, evaluator duration, and database growth still require the normal
+production monitoring review.
 
 Before rollout, run a fresh reviewed migration/plan and the supported release
 activation path, then build a signed GPS APK at a version code strictly higher
@@ -153,8 +156,9 @@ than the current code 3 (code 4 is the next eligible OTA target). Do not enable
 the rollout until the exact Android 12+ tablet/firmware passes GNSS cadence and
 accuracy, offline replay/reconnect, permission, battery, thermal, and
 mock-location qualification; provide the documented driver notice; and run the
-one-device 72-hour canary. No Terraform apply, migration, map-key installation,
-APK publication, or production activation has been run for this GPS change.
+one-device 72-hour canary. No Terraform apply, migration, OpenMapTiles data
+installation, APK publication, or production activation has been run for this
+GPS change.
 
 ## Blocking gates
 

@@ -31,6 +31,10 @@ app_update_sha256          = ""
 app_update_size_bytes      = 0
 app_update_rollout_percent = 0
 
+# The verified OpenMapTiles MBTiles file is installed on the host under
+# /srv/duducar/openmaptiles and mounted read-only into the web container.
+openmaptiles_mbtiles_path = "/openmaptiles/malaysia.mbtiles"
+
 # These are required and intentionally invalid until the operator supplies the
 # currently reviewed immutable digests. A blind copy cannot configure a host.
 postgres_image = ""

@@ -437,6 +437,7 @@ resource "aws_instance" "ec2_target" {
     backup_bucket                = aws_s3_bucket.backups.bucket
     dashboard_hostname           = var.dashboard_hostname
     api_hostname                 = var.api_hostname
+    openmaptiles_mbtiles_path    = var.openmaptiles_mbtiles_path
     required_app_version         = var.required_app_version
     app_update_version_code      = var.app_update_version_code
     app_update_version_name      = var.app_update_version_name

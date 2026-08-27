@@ -1,3 +1,5 @@
+import gzip
+import sqlite3
 import uuid
 from datetime import timedelta
 
@@ -82,3 +84,55 @@ def test_location_history_rejects_ranges_over_24_hours(client):
         },
     )
     assert response.status_code == 400
+
+
+@pytest.mark.django_db
+def test_openmaptiles_style_and_tile_endpoints_use_authenticated_mbtiles(
+    client, tmp_path, settings
+):
+    user = User.objects.create_user(
+        "marketing-openmaptiles@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    mbtiles_path = tmp_path / "malaysia.mbtiles"
+    with sqlite3.connect(mbtiles_path) as database:
+        database.execute(
+            "CREATE TABLE tiles ("
+            "zoom_level INTEGER, tile_column INTEGER, tile_row INTEGER, tile_data BLOB"
+            ")"
+        )
+        database.execute(
+            "INSERT INTO tiles VALUES (?, ?, ?, ?)",
+            (1, 0, 1, gzip.compress(b"test-vector-tile")),
+        )
+    settings.OPENMAPTILES_MBTILES_PATH = str(mbtiles_path)
+
+    assert client.get(reverse("location-style")).status_code == 302
+    client.force_login(user)
+
+    page = client.get(reverse("location-map"))
+    assert page.status_code == 200
+    assert "data-api-key" not in page.content.decode()
+
+    style = client.get(reverse("location-style"))
+    assert style.status_code == 200
+    assert style.json()["sources"]["openmaptiles"]["url"].endswith(
+        "/locations/tiles.json"
+    )
+
+    tilejson = client.get(reverse("location-tilejson"))
+    assert tilejson.status_code == 200
+    assert tilejson.json()["scheme"] == "xyz"
+    assert tilejson.json()["tiles"][0].endswith(
+        "/locations/tiles/{z}/{x}/{y}.pbf"
+    )
+
+    tile = client.get(reverse("location-tile", args=[1, 0, 0]))
+    assert tile.status_code == 200
+    assert tile["Content-Type"] == "application/vnd.mapbox-vector-tile"
+    assert tile["Content-Encoding"] == "gzip"
+    assert gzip.decompress(tile.content) == b"test-vector-tile"
+
+    assert client.get(reverse("location-tile", args=[1, 2, 0])).status_code == 404
+    assert client.get(reverse("location-tile", args=[1, 0, 2])).status_code == 404

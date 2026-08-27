@@ -20,6 +20,9 @@ system.
 - PostgreSQL: users, assignments, immutable playlists, telemetry, alerts, and
   proof-of-play.
 - Private object storage: quarantined uploads and validated media objects.
+- OpenMapTiles vector basemap: a verified Malaysia MBTiles extract mounted
+  read-only on the web host and served through authenticated same-origin
+  dashboard routes; no third-party map API key is required.
 - Media worker: ClamAV and FFmpeg/FFprobe processing. It may run in the web
   container for local development but must run separately in production.
 
@@ -91,3 +94,7 @@ three-year shape for the 10-device pilot.
 - The current EC2 host contains both Django and PostgreSQL and is therefore a
   single-host failure domain. Daily logical backups, DLM snapshots, and tested
   recovery procedures support the accepted 24-hour RPO/RTO.
+- The pilot serves OpenMapTiles directly from MBTiles through Django. Tile
+  generation/update and high-concurrency delivery are intentionally outside
+  the pilot; move the same TileJSON/style contract to a dedicated tile server
+  or CDN before materially increasing dashboard traffic.

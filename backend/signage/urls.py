@@ -5,6 +5,13 @@ from . import views
 urlpatterns = [
     path("", views.dashboard, name="dashboard"),
     path("locations/", views.location_map, name="location-map"),
+    path("locations/style.json", views.location_style, name="location-style"),
+    path("locations/tiles.json", views.location_tilejson, name="location-tilejson"),
+    path(
+        "locations/tiles/<int:z>/<int:x>/<int:y>.pbf",
+        views.location_tile,
+        name="location-tile",
+    ),
     path("locations/latest.json", views.location_latest, name="location-latest"),
     path("locations/history.json", views.location_history, name="location-history"),
     path("media/", views.media_list, name="media-list"),

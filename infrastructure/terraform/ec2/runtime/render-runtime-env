@@ -38,8 +38,6 @@ required_host_values=(
   PILOT_BACKUP_S3_BUCKET
   DJANGO_ALLOWED_HOSTS
   DJANGO_CSRF_TRUSTED_ORIGINS
-  LOCATION_MAP_REGION
-  LOCATION_MAP_STYLE_URL
   ECS_MEDIA_CLUSTER
   ECS_MEDIA_TASK_DEFINITION
   ECS_MEDIA_SUBNET_IDS
@@ -54,6 +52,28 @@ for name in "${required_host_values[@]}"; do
     exit 1
   fi
 done
+
+OPENMAPTILES_STYLE_URL=${OPENMAPTILES_STYLE_URL:-/locations/style.json}
+OPENMAPTILES_MBTILES_PATH=${OPENMAPTILES_MBTILES_PATH:-/openmaptiles/malaysia.mbtiles}
+case "$OPENMAPTILES_STYLE_URL" in
+  /*)
+    if [[ "$OPENMAPTILES_STYLE_URL" == //* ]]; then
+      echo "OPENMAPTILES_STYLE_URL must be a same-origin path." >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "OPENMAPTILES_STYLE_URL must be a same-origin path." >&2
+    exit 1
+    ;;
+esac
+case "$OPENMAPTILES_MBTILES_PATH" in
+  /openmaptiles/*.mbtiles) ;;
+  *)
+    echo "OPENMAPTILES_MBTILES_PATH must point inside /openmaptiles." >&2
+    exit 1
+    ;;
+esac
 
 install -d -o root -g root -m 0700 "$runtime_dir"
 backend_secrets_dir="$runtime_dir/backend-secrets"
@@ -127,7 +147,6 @@ if ! [[ "$play_integrity_app_certificates" =~ ^[0-9a-f]{64}(,[0-9a-f]{64})*$ ]];
   echo "PLAY_INTEGRITY_APP_CERTIFICATE_SHA256 must contain canonical comma-separated SHA-256 fingerprints." >&2
   exit 1
 fi
-extract_secret_string LOCATION_MAP_API_KEY "$staging_dir/location-map-api-key"
 existing_credential_token="$backend_secrets_dir/aws-credentials-token"
 if test -e "$existing_credential_token" || test -L "$existing_credential_token"; then
   if ! test -f "$existing_credential_token" || test -L "$existing_credential_token" || \
@@ -159,9 +178,8 @@ openssl pkey -in "$staging_dir/cloudfront-private.pem" -check -noout >/dev/null
   emit DEPLOYMENT_COMPONENT web
   emit DJANGO_ALLOWED_HOSTS "$DJANGO_ALLOWED_HOSTS"
   emit DJANGO_CSRF_TRUSTED_ORIGINS "$DJANGO_CSRF_TRUSTED_ORIGINS"
-  emit LOCATION_MAP_REGION "$LOCATION_MAP_REGION"
-  emit LOCATION_MAP_STYLE_URL "$LOCATION_MAP_STYLE_URL"
-  emit LOCATION_MAP_API_KEY "$(<"$staging_dir/location-map-api-key")"
+  emit OPENMAPTILES_STYLE_URL "$OPENMAPTILES_STYLE_URL"
+  emit OPENMAPTILES_MBTILES_PATH "$OPENMAPTILES_MBTILES_PATH"
   emit DJANGO_SECURE_SSL_REDIRECT true
   emit DJANGO_TRUST_X_FORWARDED_PROTO true
   emit DJANGO_USE_X_FORWARDED_HOST false

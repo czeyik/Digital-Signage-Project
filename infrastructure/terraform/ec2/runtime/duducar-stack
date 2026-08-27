@@ -5,6 +5,7 @@ umask 0077
 host_config=/etc/duducar/host.env
 release_config=/etc/duducar/release.env
 runtime_dir=/run/duducar
+openmaptiles_host_dir=/srv/duducar/openmaptiles
 if [ -n "${DUDUCAR_STACK_TEST_ROOT:-}" ]; then
   [[ "$DUDUCAR_STACK_TEST_ROOT" =~ ^/tmp/duducar-stack-test\.[A-Za-z0-9]{6,}$ ]] || {
     echo "Stack test root is outside the permitted temporary path." >&2
@@ -13,6 +14,7 @@ if [ -n "${DUDUCAR_STACK_TEST_ROOT:-}" ]; then
   host_config=$DUDUCAR_STACK_TEST_ROOT/etc/duducar/host.env
   release_config=$DUDUCAR_STACK_TEST_ROOT/etc/duducar/release.env
   runtime_dir=$DUDUCAR_STACK_TEST_ROOT/run/duducar
+  openmaptiles_host_dir=$DUDUCAR_STACK_TEST_ROOT/srv/duducar/openmaptiles
 fi
 network=duducar
 network_subnet=172.30.0.0/24
@@ -30,6 +32,15 @@ set -a
 source "$host_config"
 source "$release_config"
 set +a
+
+OPENMAPTILES_MBTILES_PATH=${OPENMAPTILES_MBTILES_PATH:-/openmaptiles/malaysia.mbtiles}
+case "$OPENMAPTILES_MBTILES_PATH" in
+  /openmaptiles/*.mbtiles) ;;
+  *)
+    echo "OPENMAPTILES_MBTILES_PATH must point inside /openmaptiles." >&2
+    exit 1
+    ;;
+esac
 
 for name in BACKEND_IMAGE POSTGRES_IMAGE CADDY_IMAGE CADDY_CONFIG; do
   if [ -z "${!name:-}" ]; then
@@ -163,6 +174,7 @@ create_web() {
     --env-file "$runtime_dir/application.env" \
     --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m \
     --volume /srv/duducar/backups:/backups \
+    --volume "$openmaptiles_host_dir:/openmaptiles:ro" \
     --volume "$runtime_dir/backend-secrets:/run/duducar/backend-secrets:ro" \
     --health-cmd "python -c \"import urllib.request; req=urllib.request.Request('http://127.0.0.1:8000/health/live/', headers={'Host':'marketing.duducaradmin.com'}); urllib.request.urlopen(req, timeout=3)\"" \
     --health-interval 30s \
@@ -246,8 +258,21 @@ container_config_matches() {
     [ "$current_ip" = "$expected_ip" ]
 }
 
+ensure_openmaptiles_dir() {
+  if [ -L "$openmaptiles_host_dir" ]; then
+    echo "OpenMapTiles directory must not be a symlink." >&2
+    exit 1
+  fi
+  if [ -n "${DUDUCAR_STACK_TEST_ROOT:-}" ]; then
+    install -d -m 0755 "$openmaptiles_host_dir"
+  else
+    install -d -o root -g root -m 0755 "$openmaptiles_host_dir"
+  fi
+}
+
 prepare_stack() {
   ensure_network
+  ensure_openmaptiles_dir
 }
 
 start_container_if_stopped() {
@@ -259,6 +284,7 @@ start_container_if_stopped() {
 
 start_stack() {
   ensure_network
+  ensure_openmaptiles_dir
 
   if docker container inspect duducar-postgres >/dev/null 2>&1; then
     assert_container_config duducar-postgres "$POSTGRES_IMAGE" "$database_ip"
@@ -286,6 +312,7 @@ start_stack() {
 
 deploy_stack() {
   ensure_network
+  ensure_openmaptiles_dir
   pull_images
 
   remove_container duducar-caddy

@@ -221,12 +221,12 @@ output "production_release_activation_sha256" {
   value       = local.ec2_release_activation_sha256
 }
 
-output "location_map_api_key_arn" {
-  description = "ARN of the read-only, dashboard-referrer-restricted Amazon Location API key."
-  value       = awscc_location_api_key.fleet_map.key_arn
+output "openmaptiles_mbtiles_path" {
+  description = "Read-only OpenMapTiles MBTiles path inside the web container."
+  value       = var.openmaptiles_mbtiles_path
 }
 
-output "location_map_style_url" {
-  description = "Amazon Location Maps v2 Standard style descriptor URL for GrabMaps vector.basemap."
-  value       = "https://maps.geo.${var.aws_region}.amazonaws.com/v2/styles/Standard/descriptor"
+output "openmaptiles_style_url" {
+  description = "Authenticated same-origin OpenMapTiles style endpoint used by the fleet dashboard."
+  value       = "https://${var.dashboard_hostname}/locations/style.json"
 }

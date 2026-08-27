@@ -43,8 +43,6 @@ mock_provider "aws" {
   }
 }
 
-mock_provider "awscc" {}
-
 run "current_production_topology" {
   command = plan
 

@@ -4,7 +4,6 @@
 
   const latestUrl = root.dataset.latestUrl;
   const historyUrl = root.dataset.historyUrl;
-  const key = root.dataset.apiKey;
   const styleUrl = root.dataset.styleUrl;
   const deviceSelect = document.getElementById("location-device");
   const startInput = document.getElementById("location-start");
@@ -150,13 +149,12 @@
     }
   };
 
-  if (!key || !styleUrl || !window.maplibregl) {
+  if (!styleUrl || !window.maplibregl) {
     setMessage("Map configuration is not available.");
   } else {
-    const separator = styleUrl.includes("?") ? "&" : "?";
     map = new maplibregl.Map({
       container: root,
-      style: `${styleUrl}${separator}key=${encodeURIComponent(key)}`,
+      style: styleUrl,
       center: [101.6869, 3.139],
       zoom: 8,
       attributionControl: false,
@@ -165,10 +163,11 @@
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(
       new maplibregl.AttributionControl({
-        customAttribution: "© GrabMaps © AWS",
+        customAttribution: "© OpenStreetMap contributors · © OpenMapTiles",
       }),
       "bottom-right",
     );
+    map.on("error", () => setMessage("Map tiles are temporarily unavailable."));
     map.on("load", () => {
       map.addSource("location-history", {
         type: "geojson",

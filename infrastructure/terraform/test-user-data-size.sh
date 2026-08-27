@@ -52,6 +52,7 @@ replace_placeholder media_bucket "duducar-signage-production-media-$sample"
 replace_placeholder backup_bucket "duducar-signage-production-backups-$sample"
 replace_placeholder dashboard_hostname marketing.duducaradmin.com
 replace_placeholder api_hostname api.marketing.duducaradmin.com
+replace_placeholder openmaptiles_mbtiles_path /openmaptiles/malaysia.mbtiles
 replace_placeholder required_app_version 1.0.0
 replace_placeholder app_update_version_code 0
 replace_placeholder app_update_version_name ''

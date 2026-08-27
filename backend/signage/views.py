@@ -1,7 +1,10 @@
 import csv
 import hashlib
+import logging
+import sqlite3
 import uuid
 from datetime import datetime, time, timedelta
+from pathlib import Path
 
 from django.conf import settings
 from django.contrib import messages
@@ -63,6 +66,8 @@ from .services import (
     revoke_device_credentials,
     throttle_wait,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def owner_required(user):
@@ -327,11 +332,223 @@ def location_map(request):
         request,
         "signage/location_map.html",
         {
-            "location_map_api_key": settings.LOCATION_MAP_API_KEY,
-            "location_map_style_url": settings.LOCATION_MAP_STYLE_URL,
-            "location_map_region": settings.LOCATION_MAP_REGION,
+            "location_map_style_url": settings.OPENMAPTILES_STYLE_URL,
         },
     )
+
+
+def _openmaptiles_style(request):
+    return {
+        "version": 8,
+        "name": "DUDU OpenMapTiles",
+        "center": [101.6869, 3.139],
+        "zoom": 8,
+        "sources": {
+            "openmaptiles": {
+                "type": "vector",
+                "url": request.build_absolute_uri("/locations/tiles.json"),
+                "attribution": "© OpenStreetMap contributors · © OpenMapTiles",
+            }
+        },
+        "layers": [
+            {
+                "id": "background",
+                "type": "background",
+                "paint": {"background-color": "#eef2f5"},
+            },
+            {
+                "id": "landcover",
+                "type": "fill",
+                "source": "openmaptiles",
+                "source-layer": "landcover",
+                "paint": {"fill-color": "#d9ead3", "fill-opacity": 0.7},
+            },
+            {
+                "id": "landuse",
+                "type": "fill",
+                "source": "openmaptiles",
+                "source-layer": "landuse",
+                "paint": {"fill-color": "#e8f0df", "fill-opacity": 0.8},
+            },
+            {
+                "id": "water",
+                "type": "fill",
+                "source": "openmaptiles",
+                "source-layer": "water",
+                "paint": {"fill-color": "#b9d9ee"},
+            },
+            {
+                "id": "waterway",
+                "type": "line",
+                "source": "openmaptiles",
+                "source-layer": "waterway",
+                "paint": {
+                    "line-color": "#8fc5e8",
+                    "line-width": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        5,
+                        0.5,
+                        13,
+                        2,
+                    ],
+                },
+            },
+            {
+                "id": "building",
+                "type": "fill",
+                "source": "openmaptiles",
+                "source-layer": "building",
+                "minzoom": 13,
+                "paint": {
+                    "fill-color": "#d8d5d0",
+                    "fill-outline-color": "#c1bdb6",
+                    "fill-opacity": 0.75,
+                },
+            },
+            {
+                "id": "transportation",
+                "type": "line",
+                "source": "openmaptiles",
+                "source-layer": "transportation",
+                "paint": {
+                    "line-color": "#ffffff",
+                    "line-width": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        5,
+                        0.5,
+                        12,
+                        1.5,
+                        16,
+                        6,
+                    ],
+                },
+            },
+            {
+                "id": "transportation-major",
+                "type": "line",
+                "source": "openmaptiles",
+                "source-layer": "transportation",
+                "filter": [
+                    "in",
+                    ["get", "class"],
+                    "motorway",
+                    "trunk",
+                    "primary",
+                    "secondary",
+                ],
+                "paint": {
+                    "line-color": "#f0a35b",
+                    "line-width": [
+                        "interpolate",
+                        ["linear"],
+                        ["zoom"],
+                        5,
+                        1,
+                        12,
+                        2.5,
+                        16,
+                        8,
+                    ],
+                },
+            },
+        ],
+    }
+
+
+@login_required
+def location_style(request):
+    response = JsonResponse(_openmaptiles_style(request))
+    response["Cache-Control"] = "private, max-age=3600"
+    return response
+
+
+@login_required
+def location_tilejson(request):
+    tile_url = (
+        request.build_absolute_uri("/").rstrip("/")
+        + "/locations/tiles/{z}/{x}/{y}.pbf"
+    )
+    response = JsonResponse(
+        {
+            "tilejson": "3.0.0",
+            "name": "DUDU OpenMapTiles",
+            "scheme": "xyz",
+            "format": "pbf",
+            "minzoom": 0,
+            "maxzoom": settings.OPENMAPTILES_MAX_ZOOM,
+            "bounds": [99.0, 0.0, 120.0, 8.0],
+            "tiles": [tile_url],
+            "vector_layers": [
+                {"id": layer}
+                for layer in (
+                    "landcover",
+                    "landuse",
+                    "water",
+                    "waterway",
+                    "building",
+                    "transportation",
+                )
+            ],
+            "attribution": "© OpenStreetMap contributors · © OpenMapTiles",
+        }
+    )
+    response["Cache-Control"] = "private, max-age=3600"
+    return response
+
+
+def _openmaptiles_path():
+    path = Path(settings.OPENMAPTILES_MBTILES_PATH)
+    if path.is_symlink() or not path.is_file():
+        return None
+    return path
+
+
+@login_required
+def location_tile(request, z, x, y):
+    if (
+        z < 0
+        or x < 0
+        or y < 0
+        or z > settings.OPENMAPTILES_MAX_ZOOM
+        or x >= 2**z
+        or y >= 2**z
+    ):
+        return HttpResponse("Map tile is outside the configured bounds.", status=404)
+    path = _openmaptiles_path()
+    if path is None:
+        return HttpResponse("Map tiles are not installed.", status=503)
+
+    # MBTiles stores rows in TMS order while MapLibre requests XYZ rows.
+    tile_row = (2**z) - 1 - y
+    try:
+        database_uri = f"{path.as_uri()}?mode=ro"
+        with sqlite3.connect(database_uri, uri=True, timeout=1) as database:
+            row = database.execute(
+                """
+                SELECT tile_data
+                FROM tiles
+                WHERE zoom_level = ? AND tile_column = ? AND tile_row = ?
+                """,
+                (z, x, tile_row),
+            ).fetchone()
+    except sqlite3.Error:
+        logger.warning("OpenMapTiles database read failed", exc_info=True)
+        return HttpResponse("Map tiles are temporarily unavailable.", status=503)
+
+    if row is None:
+        return HttpResponse("Map tile not found.", status=404)
+    tile_data = bytes(row[0])
+    response = HttpResponse(
+        tile_data, content_type="application/vnd.mapbox-vector-tile"
+    )
+    if tile_data.startswith(b"\x1f\x8b"):
+        response["Content-Encoding"] = "gzip"
+    response["Cache-Control"] = "private, max-age=3600"
+    return response
 
 
 def _location_point_json(point):
