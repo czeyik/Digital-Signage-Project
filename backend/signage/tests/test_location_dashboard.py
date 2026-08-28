@@ -87,6 +87,30 @@ def test_location_history_rejects_ranges_over_24_hours(client):
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    "invalid_timestamp",
+    ["2026-01-01T00:00:00+24:00", "0000-01-01T00:00:00Z"],
+)
+def test_location_history_rejects_malformed_timestamps_without_server_error(
+    client, invalid_timestamp
+):
+    user = User.objects.create_user(
+        "marketing-locations-invalid-time@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    device = Device.objects.create(label=f"MAP-INVALID-{invalid_timestamp[:4]}")
+    client.force_login(user)
+
+    response = client.get(
+        reverse("location-history"),
+        {"device_id": str(device.id), "start": invalid_timestamp},
+    )
+
+    assert response.status_code == 400
+
+
+@pytest.mark.django_db
 def test_openmaptiles_style_and_tile_endpoints_use_authenticated_mbtiles(
     client, tmp_path, settings
 ):

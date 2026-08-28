@@ -33,7 +33,8 @@ def test_hardware_qualification_schema_supports_old_image_rollback(tmp_path):
     )
     rehearsal = dedent(
         """
-        from datetime import date, datetime, timezone
+        from datetime import date, datetime, timedelta, timezone
+        import uuid
 
         import django
 
@@ -208,6 +209,36 @@ def test_hardware_qualification_schema_supports_old_image_rollback(tmp_path):
             raise AssertionError(
                 "The display policy must block re-approval without a measurement."
             )
+
+        final_target = [("signage", "0015_simplify_hardware_qualification")]
+        executor = MigrationExecutor(connection)
+        executor.migrate(final_target)
+        final_apps = executor.loader.project_state(final_target).apps
+        FinalDevice = final_apps.get_model("signage", "Device")
+        FinalLocationPoint = final_apps.get_model("signage", "DeviceLocationPoint")
+        gps_device = FinalDevice.objects.create(
+            label="GPS migration rehearsal",
+            status="active",
+            app_version="1.0.0",
+            android_version="13",
+        )
+        recorded_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        location_point = FinalLocationPoint.objects.create(
+            id=uuid.uuid4(),
+            device=gps_device,
+            recorded_at=recorded_at,
+            device_recorded_at=recorded_at,
+            latitude="3.139000",
+            longitude="101.686900",
+            accuracy_m="12.50",
+            provider="gps",
+            source="location_manager",
+        )
+        assert gps_device.location_state == "initializing"
+        assert (
+            FinalLocationPoint.objects.get(pk=location_point.pk).device_id
+            == gps_device.pk
+        )
         """
     )
     environment = {

@@ -9,6 +9,8 @@ All device routes are under `/api/v1/` and use JSON.
 Consumes a six-digit, single-use, 15-minute enrollment code plus Android and
 integrity metadata. Returns a device-specific refresh credential and a one-hour
 access token. The refresh credential must be stored with Android Keystore.
+In production, the submitted `app_version` must match the configured release
+version; older versions cannot obtain an enrollment challenge.
 
 `POST devices/token/`
 
@@ -24,6 +26,9 @@ Returns server time and one of:
 - `play`: immutable playlist manifest and expiring media URLs
 - `fallback`: bundled DUDU media should play
 - `maintenance`: advertising must stop and maintenance state must persist
+
+In production, an enrolled device whose reported release version no longer
+matches `REQUIRED_APP_VERSION` receives `maintenance` rather than advertising.
 
 `POST devices/heartbeat/`
 
@@ -57,6 +62,31 @@ Duplicate batch IDs are acknowledged without creating duplicate evidence.
 The Android player sends the exact JSON document with
 `Content-Type: application/json` and `Content-Encoding: gzip`; retries retain
 the same batch and event IDs. Disabled devices cannot submit playback.
+
+`POST devices/location-batches/`
+
+Accepts a gzip-compressed JSON object with optional `current` state and up to 500
+`points`. The current-state fields are `state`, `reported_at`, and optional
+`planned_gap_until`. Valid states are `initializing`, `fresh`, `stale`,
+`unavailable`, `planned_gap`, `shutdown`, `permission_disabled`,
+`location_disabled`, and `mock`. A planned gap must include an end time and is
+limited to ten minutes; the Android foreground shutdown/reacquisition pause is
+seven minutes. Device timestamps may be at most five minutes ahead of server
+time, except for that planned-gap end time.
+
+Each point contains an idempotent UUID `id`, `recorded_at`,
+`device_recorded_at`, `latitude`, `longitude`, `accuracy_m`, `provider` (`gps`
+or `network`), and `source` (`location_manager`). Points older than 30 days,
+outside the coordinate/accuracy bounds, or with an unsupported provider/source
+are rejected per point. A current `mock` state is accepted for alerting but is
+not treated as a valid location. Replaying the same point acknowledges it
+without creating a second row; reusing its UUID for different data is rejected.
+The server derives the historical device assignment from the point timestamp
+and never accepts a client-supplied assignment.
+
+Location points are retained for 30 days. Dashboard location and history
+routes are authenticated and expose driver internal IDs only; they do not
+expose driver names.
 
 ## Security
 

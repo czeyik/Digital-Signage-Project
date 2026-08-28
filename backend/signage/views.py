@@ -636,9 +636,12 @@ def location_history(request):
 def _parse_location_query_datetime(value, default):
     if not value:
         return default
-    parsed = parse_datetime(value)
-    if parsed and timezone.is_naive(parsed):
-        parsed = timezone.make_aware(parsed)
+    try:
+        parsed = parse_datetime(value)
+        if parsed and timezone.is_naive(parsed):
+            parsed = timezone.make_aware(parsed)
+    except (OverflowError, TypeError, ValueError):
+        return None
     return parsed
 
 
