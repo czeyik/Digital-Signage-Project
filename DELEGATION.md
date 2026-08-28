@@ -403,4 +403,4 @@ only a non-sensitive path or identifier here.
 | Timestamp (MYT) | Wave | Status | Commit/release | Evidence | Note / next input |
 |---|---|---|---|---|---|
 | 2026-08-28 | Framework | Complete | `4be6e7a0cdef` baseline | `DELEGATION.md` | Wave 1 is next. |
-| 2026-08-28 12:35 | 1 | Complete | local reviewed Wave 1 commit | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh` and the Wave 1 register above | Source-only recovery repair verified; no production or external evidence used. |
+| 2026-08-28 12:35 | 1 | Complete | `9bb2c5f` | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh` and the Wave 1 register above | Source-only recovery repair verified; no production or external evidence used. |
