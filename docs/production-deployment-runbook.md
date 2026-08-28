@@ -87,21 +87,27 @@ broad authorization never permits an unexpected plan.
    DUDU unit/container stopped. Its
    `RecoveryFromOperationId` and `FailedActivationCommandId` must record that
    operator-supplied audit correlation; the command ID is not host-verifiable
-   proof. Validation repeats the remote-backup, disk, memory, and snapshot gates while
-   omitting only the impossible public HTTPS probe; it also sends and clears an
-   operation-scoped Operations SNS alert to prove alert publication. It changes
-   no service or container state.
+   proof. The failed-existing preflight first checks the stopped state and the
+   operation-correlated remote receipt. If that receipt is stale, missing, or
+   belongs to another operation, it starts only the credential broker and
+   PostgreSQL, runs a private one-shot backend backup runner with no published
+   ports, then stops and verifies cleanup. Caddy, the web service, timers, and
+   workers remain off throughout. Validation repeats the remote-backup, disk,
+   memory, and snapshot gates while omitting only the impossible public HTTPS
+   probe; it also sends and clears an operation-scoped Operations SNS alert to
+   prove alert publication. Temporary backup components are cleaned up before
+   validation succeeds; no production stack is activated.
    Then use `Mode=arm-failed-existing` with the exact phrase
    `ARM <new-operation-id> FROM <failed-operation-id>`; it repeats those gates
-   and writes a root-only authorization valid for 15 minutes, without starting
-   anything.
+   and writes a root-only authorization valid for 15 minutes, without leaving
+   any service or container running.
 5. Only after a fresh approval type exactly `ACTIVATE <operation-id>` and send a
    separate activation command with `Mode=activate` and that exact
    `Confirmation`; every other input and the document version/hash must be
    unchanged. A reviewed `failed-existing` recovery instead requires the
    distinct exact phrase `RECOVER <new-operation-id> FROM <failed-operation-id>`
-   after the separate arm step; it atomically consumes that authorization and
-   repeats its stopped-state and non-public preflight immediately before it acts. This is
+   after the separate arm step; it repeats its stopped-state and non-public
+   preflight immediately before atomically consuming that authorization. This is
    the sole deploy path: it verifies remote backup, completed DLM snapshot and
    host health,
    stops timers/systemd, starts the scoped broker, deploys with public Caddy

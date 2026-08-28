@@ -8,6 +8,7 @@ from io import StringIO
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.db import IntegrityError
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -118,7 +119,9 @@ def provisioned_device():
         "A-very-long-password-123",
         role=User.Role.OWNER,
     )
-    device = Device.objects.create(label="PILOT-01", status=Device.Status.ACTIVE)
+    device = Device.objects.create(
+        label="PILOT-01", status=Device.Status.ACTIVE, app_version="0.1.0"
+    )
     driver = Driver.objects.create(internal_id="D001", name="Example Driver")
     vehicle = Vehicle.objects.create(registration="WXY1234")
     DeviceAssignment.objects.create(
@@ -186,10 +189,16 @@ def test_location_batch_binds_historical_assignment_and_is_idempotent(
     assert device.location_state == "fresh"
     assert device.last_location_reported_at is not None
 
-    replay = post_location_batch(client, access, payload)
+    old_reported_at = timezone.now() - timedelta(minutes=11)
+    Device.objects.filter(pk=device.pk).update(
+        last_location_reported_at=old_reported_at
+    )
+    replay = post_location_batch(client, access, {"points": [point]})
     assert replay.status_code == 200
     assert replay.json()["acknowledged_ids"] == [point["id"]]
     assert DeviceLocationPoint.objects.filter(pk=point["id"]).count() == 1
+    device.refresh_from_db()
+    assert device.last_location_reported_at == old_reported_at
 
 
 @pytest.mark.django_db
@@ -229,16 +238,15 @@ def test_location_batch_planned_gap_suppresses_alert_until_reacquisition(
     client, provisioned_device
 ):
     device, _, _, access = provisioned_device
+    now = timezone.now().replace(microsecond=0)
     response = post_location_batch(
         client,
         access,
         {
             "current": {
                 "state": "planned_gap",
-                "reported_at": timezone.now().isoformat(),
-                "planned_gap_until": (
-                    timezone.now() + timedelta(minutes=2)
-                ).isoformat(),
+                "reported_at": now.isoformat(),
+                "planned_gap_until": (now + timedelta(minutes=7)).isoformat(),
             },
             "points": [],
         },
@@ -248,6 +256,43 @@ def test_location_batch_planned_gap_suppresses_alert_until_reacquisition(
     device.refresh_from_db()
     assert device.location_state == "planned_gap"
     assert device.location_planned_gap_until is not None
+
+
+@pytest.mark.django_db
+def test_location_batch_handles_a_concurrent_point_collision_without_aborting(
+    client, provisioned_device, monkeypatch
+):
+    _, _, _, access = provisioned_device
+    point_id = str(uuid.uuid4())
+
+    def raise_collision(**kwargs):
+        raise IntegrityError("simulated concurrent insert")
+
+    monkeypatch.setattr(DeviceLocationPoint.objects, "create", raise_collision)
+    now = timezone.now().replace(microsecond=0)
+    response = post_location_batch(
+        client,
+        access,
+        {
+            "points": [
+                {
+                    "id": point_id,
+                    "recorded_at": now.isoformat(),
+                    "device_recorded_at": now.isoformat(),
+                    "latitude": 3.139,
+                    "longitude": 101.6869,
+                    "accuracy_m": 18.5,
+                    "provider": "gps",
+                    "source": "location_manager",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["rejected"] == [
+        {"id": point_id, "reason": "id_collision"}
+    ]
 
 
 @pytest.mark.django_db
@@ -331,6 +376,12 @@ def test_production_sync_requires_a_current_enrollment_eligible_hardware_record(
     qualified = client.get(reverse("device-sync"), **headers)
     assert qualified.status_code == 200
     assert qualified.json()["mode"] == "play"
+
+    Device.objects.filter(pk=device.pk).update(app_version="0.1.0-legacy")
+    outdated = client.get(reverse("device-sync"), **headers)
+    assert outdated.status_code == 200
+    assert outdated.json()["mode"] == "maintenance"
+    Device.objects.filter(pk=device.pk).update(app_version="0.1.0")
 
     assert not qualification.approved_for_pilot
     qualification.measured_display_diagonal_inches = Decimal("12.01")

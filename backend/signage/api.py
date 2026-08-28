@@ -55,6 +55,7 @@ from .services import (
 logger = logging.getLogger(__name__)
 
 MAX_DEVICE_TIMESTAMP_FUTURE_SKEW = timedelta(minutes=5)
+MAX_PLANNED_GAP_FUTURE_SKEW = timedelta(minutes=10)
 MAX_LOCATION_AGE = timedelta(days=30)
 MAX_LOCATION_POINTS_PER_BATCH = 500
 LOCATION_STATES = frozenset(
@@ -208,7 +209,9 @@ def exception_handler(exc, context):
     return response
 
 
-def parse_required_datetime(value, field):
+def parse_required_datetime(
+    value, field, *, max_future_skew=MAX_DEVICE_TIMESTAMP_FUTURE_SKEW
+):
     try:
         parsed = parse_datetime(value) if isinstance(value, str) else None
         if parsed and timezone.is_naive(parsed):
@@ -217,7 +220,7 @@ def parse_required_datetime(value, field):
         parsed = None
     if not parsed:
         raise serializers.ValidationError({field: "Use an ISO-8601 timestamp."})
-    if parsed > timezone.now() + MAX_DEVICE_TIMESTAMP_FUTURE_SKEW:
+    if parsed > timezone.now() + max_future_skew:
         raise serializers.ValidationError(
             {field: "Timestamp is too far ahead of server time."}
         )
@@ -402,6 +405,16 @@ def enrollment_device_details(data, *, require_hardware=False):
     )
 
 
+def require_current_app_version(app_version):
+    if (
+        settings.DEPLOYMENT_ENV == "production"
+        and app_version != settings.REQUIRED_APP_VERSION
+    ):
+        raise exceptions.PermissionDenied(
+            "This application version is not approved for the pilot."
+        )
+
+
 def device_matches_qualification(
     device,
     *,
@@ -438,6 +451,7 @@ def enrollment_challenge(request):
         request.data,
         require_hardware=settings.DEPLOYMENT_ENV == "production",
     )
+    require_current_app_version(app_version)
     enrollment = (
         EnrollmentCode.objects.select_related("device__hardware_qualification")
         .filter(code_hash=token_hash(code))
@@ -500,6 +514,7 @@ def _issue_device_credentials(
     device = enrollment.device
     if device.status == Device.Status.DISABLED or not device.kiosk_pin_hash:
         raise exceptions.AuthenticationFailed("Invalid or expired enrollment code.")
+    require_current_app_version(app_version)
     if settings.DEPLOYMENT_ENV == "production" and not device_matches_qualification(
         device,
         hardware_model=hardware_model,
@@ -713,15 +728,20 @@ def sync_manifest(request):
             security_patch_level=device.hardware_security_patch,
         )
     )
+    outdated_app = (
+        settings.DEPLOYMENT_ENV == "production"
+        and device.app_version != settings.REQUIRED_APP_VERSION
+    )
     if device.status == Device.Status.DISABLED:
         # Authentication normally rejects this before the view; keep the
         # defense-in-depth path aligned with credential revocation.
         raise exceptions.AuthenticationFailed("Invalid or expired device token.")
     app_update = configured_app_update(device)
-    if missing_enrollment_eligible_hardware:
+    if missing_enrollment_eligible_hardware or outdated_app:
         # Keep an active device in maintenance when its exact, attested hardware
-        # identity becomes ineligible. Physical checklist completion remains a
-        # pilot-approval gate but does not control this enrollment/sync path.
+        # identity or release identity becomes ineligible. Physical checklist
+        # completion remains a pilot-approval gate but does not control this
+        # enrollment/sync path.
         mark_successful_sync()
         return Response(
             {
@@ -1028,9 +1048,11 @@ def location_batch(request):
         planned_gap_until = None
         if current.get("planned_gap_until"):
             planned_gap_until = parse_required_datetime(
-                current["planned_gap_until"], "planned_gap_until"
+                current["planned_gap_until"],
+                "planned_gap_until",
+                max_future_skew=MAX_PLANNED_GAP_FUTURE_SKEW,
             )
-            if planned_gap_until > now + timedelta(minutes=10):
+            if planned_gap_until > now + MAX_PLANNED_GAP_FUTURE_SKEW:
                 raise serializers.ValidationError(
                     {"planned_gap_until": "Planned gaps may not exceed ten minutes."}
                 )
@@ -1128,6 +1150,7 @@ def location_batch(request):
         accepted_points.append(normalized)
 
     acknowledged = []
+    new_points_accepted = False
     with transaction.atomic():
         locked_device = Device.objects.select_for_update().get(pk=device.pk)
         for point in accepted_points:
@@ -1145,18 +1168,19 @@ def location_batch(request):
                 continue
             assignment = _location_assignment(locked_device, point["recorded_at"])
             try:
-                DeviceLocationPoint.objects.create(
-                    id=point["id"],
-                    device=locked_device,
-                    assignment=assignment,
-                    recorded_at=point["recorded_at"],
-                    device_recorded_at=point["device_recorded_at"],
-                    latitude=point["latitude"],
-                    longitude=point["longitude"],
-                    accuracy_m=point["accuracy_m"],
-                    provider=point["provider"],
-                    source=point["source"],
-                )
+                with transaction.atomic():
+                    DeviceLocationPoint.objects.create(
+                        id=point["id"],
+                        device=locked_device,
+                        assignment=assignment,
+                        recorded_at=point["recorded_at"],
+                        device_recorded_at=point["device_recorded_at"],
+                        latitude=point["latitude"],
+                        longitude=point["longitude"],
+                        accuracy_m=point["accuracy_m"],
+                        provider=point["provider"],
+                        source=point["source"],
+                    )
             except IntegrityError:
                 existing = DeviceLocationPoint.objects.filter(pk=point["id"]).first()
                 if (
@@ -1171,6 +1195,7 @@ def location_batch(request):
                     rejected.append({"id": str(point["id"]), "reason": "id_collision"})
             else:
                 acknowledged.append(str(point["id"]))
+                new_points_accepted = True
 
         update_fields = []
         state_is_newer = (
@@ -1194,7 +1219,7 @@ def location_batch(request):
                     "location_planned_gap_until",
                 ]
             )
-        if state_is_newer or acknowledged:
+        if state_is_newer or new_points_accepted:
             locked_device.last_location_reported_at = now
             update_fields.append("last_location_reported_at")
         if update_fields:

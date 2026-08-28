@@ -14,6 +14,7 @@ from signage.models import (
     DeviceAccessToken,
     DeviceAssignment,
     DeviceCredential,
+    DeviceLocationPoint,
     Driver,
     EnrollmentChallenge,
     EnrollmentCode,
@@ -150,6 +151,41 @@ def test_retention_deletes_expired_auth_artifacts():
     assert not LoginThrottle.objects.filter(pk=login.pk).exists()
     assert not ApiThrottle.objects.filter(pk=api.pk).exists()
     assert not Session.objects.filter(pk=session.pk).exists()
+
+
+@pytest.mark.django_db
+def test_retention_deletes_location_points_after_30_days():
+    now = timezone.now()
+    device = Device.objects.create(label="RETENTION-LOCATIONS")
+    expired = DeviceLocationPoint.objects.create(
+        id=uuid.uuid4(),
+        device=device,
+        recorded_at=now - timedelta(days=30, seconds=1),
+        device_recorded_at=now - timedelta(days=30, seconds=1),
+        latitude="3.139000",
+        longitude="101.686900",
+        accuracy_m="12.50",
+        provider="gps",
+        source="location_manager",
+    )
+    retained = DeviceLocationPoint.objects.create(
+        id=uuid.uuid4(),
+        device=device,
+        recorded_at=now - timedelta(days=29),
+        device_recorded_at=now - timedelta(days=29),
+        latitude="3.140000",
+        longitude="101.687900",
+        accuracy_m="12.50",
+        provider="gps",
+        source="location_manager",
+    )
+
+    call_command("apply_retention", verbosity=0)
+
+    assert not DeviceLocationPoint.objects.filter(pk=expired.pk).exists()
+    assert DeviceLocationPoint.objects.filter(pk=retained.pk).exists()
+    retention_audit = AuditEvent.objects.filter(action="retention.apply").first()
+    assert retention_audit.metadata["location_points_deleted"] == 1
 
 
 @pytest.mark.django_db

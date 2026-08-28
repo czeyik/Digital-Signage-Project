@@ -124,6 +124,33 @@ def test_production_challenge_requires_enrollment_eligible_hardware(client):
 @override_settings(
     DEPLOYMENT_ENV="production",
     PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
+    REQUIRED_APP_VERSION="1.0.3",
+)
+def test_production_challenge_rejects_an_old_application_version(client):
+    device, raw_code = enrollment_fixture()
+
+    response = client.post(
+        reverse("device-enrollment-challenge"),
+        {
+            "code": raw_code,
+            "android_id": "old-application-device",
+            "android_version": "12",
+            "app_version": "1.0.2",
+            **HARDWARE_DETAILS,
+        },
+        content_type="application/json",
+    )
+
+    assert response.status_code == 403
+    assert not EnrollmentChallenge.objects.exists()
+    device.refresh_from_db()
+    assert device.status == Device.Status.PENDING
+
+
+@pytest.mark.django_db
+@override_settings(
+    DEPLOYMENT_ENV="production",
+    PLAY_INTEGRITY_PROJECT_NUMBER="123456789",
 )
 def test_production_challenge_rejects_out_of_range_hardware_record(client):
     device, raw_code = enrollment_fixture()

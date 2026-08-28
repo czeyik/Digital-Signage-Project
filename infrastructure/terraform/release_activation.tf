@@ -37,7 +37,7 @@ resource "aws_ssm_document" "ec2_release_activation" {
       ActivationKind = {
         type          = "String"
         default       = "existing"
-        description   = "Existing requires fresh remote logical-backup, snapshot, and host-health checks. failed-existing is a distinct recovery path for a fully stopped prior fail-closed attempt; it rechecks non-public host gates before restore and public HTTPS after it. initial-empty refuses any PostgreSQL data."
+        description   = "Existing requires fresh remote logical-backup, snapshot, and host-health checks. failed-existing is a distinct recovery path for a fully stopped prior fail-closed attempt; it refreshes a stale backup with only the credential broker, PostgreSQL, and a private one-shot runner, leaves Caddy/web/timers/workers off, rechecks non-public host gates before restore and public HTTPS after it. initial-empty refuses any PostgreSQL data."
         allowedValues = ["existing", "failed-existing", "initial-empty"]
       }
       RecoveryFromOperationId = {

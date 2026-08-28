@@ -9,7 +9,7 @@ Production-oriented pilot platform for the DUDU Car in-vehicle signage service:
 
 Current production uses the pilot-scale AWS Malaysia design in the
 [architecture](docs/architecture.md) and targets USD 30 per month. Start live
-work with the [current handoff](HANDOFF.md) and
+work with the [delegation framework](DELEGATION.md) and
 [production runbook](docs/production-deployment-runbook.md); use the
 [infrastructure guide](infrastructure/README.md) for operator commands and the
 [recovery runbook](docs/backup-restore.md) for backup/restore controls.

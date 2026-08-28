@@ -38,10 +38,11 @@ before changing it:
   signup; dashboard accounts require `@duducar.co`; only owners view/enter
   driver names.
 - Pilot scope: dashboard, Android 12+ kiosk, media/playlists, device lifecycle,
-  offline sync, proof-of-play, alerts/audit, and 30-day backups.
-- Deferred unless explicitly approved: news/weather, GPS/location, passenger
-  interaction, audio/camera/mic, PDF/GIF/APNG, advertiser/approval workflows,
-  remote updates, advanced fleet/shifts, MFA, independently audited evidence.
+  offline sync, GPS/location with self-hosted OpenMapTiles, proof-of-play,
+  alerts/audit, and 30-day backups.
+- Deferred unless explicitly approved: news/weather, passenger interaction,
+  audio/camera/mic, PDF/GIF/APNG, advertiser/approval workflows, remote
+  updates, advanced fleet/shifts, MFA, independently audited evidence.
 - Collect no passenger data/unneeded permissions. Store only driver name,
   internal ID, registration; reports use IDs only. Never log PII, secrets,
   tokens, or raw media URLs. Anonymize name/registration one year after final

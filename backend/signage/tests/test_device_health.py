@@ -166,6 +166,61 @@ def test_newly_activated_device_uses_latest_credential_for_heartbeat_grace(
 
 
 @pytest.mark.django_db
+def test_location_health_uses_three_and_ten_minute_boundaries(monkeypatch):
+    now = timezone.now().replace(microsecond=0)
+    device = active_device("HEALTH-LOCATION-BOUNDARIES", now, last_seen_at=now)
+    Device.objects.filter(pk=device.pk).update(
+        location_state="fresh",
+        last_location_reported_at=now - timedelta(minutes=2, seconds=59),
+    )
+
+    run_health(monkeypatch, now)
+    assert not device.alerts.filter(code__startswith="location_").exists()
+
+    Device.objects.filter(pk=device.pk).update(
+        last_location_reported_at=now - timedelta(minutes=3)
+    )
+    run_health(monkeypatch, now)
+    stale = Alert.objects.get(device=device, code="location_stale")
+    assert stale.severity == Alert.Severity.WARNING
+
+    Device.objects.filter(pk=device.pk).update(
+        last_location_reported_at=now - timedelta(minutes=10)
+    )
+    run_health(monkeypatch, now)
+    unavailable = Alert.objects.get(device=device, code="location_unavailable")
+    assert unavailable.severity == Alert.Severity.CRITICAL
+
+
+@pytest.mark.django_db
+def test_location_health_suppresses_planned_gap_and_escalates_disabled_state(
+    monkeypatch,
+):
+    now = timezone.now().replace(microsecond=0)
+    planned = active_device("HEALTH-LOCATION-GAP", now, last_seen_at=now)
+    Device.objects.filter(pk=planned.pk).update(
+        location_state="planned_gap",
+        location_planned_gap_until=now + timedelta(minutes=1),
+        last_location_reported_at=now - timedelta(hours=1),
+    )
+    run_health(monkeypatch, now)
+    assert not planned.alerts.filter(code__startswith="location_").exists()
+
+    disabled_permission = active_device(
+        "HEALTH-LOCATION-PERMISSION", now, last_seen_at=now
+    )
+    Device.objects.filter(pk=disabled_permission.pk).update(
+        location_state="permission_disabled",
+        last_location_reported_at=now,
+    )
+    run_health(monkeypatch, now)
+    alert = Alert.objects.get(
+        device=disabled_permission, code="location_permission_disabled"
+    )
+    assert alert.severity == Alert.Severity.CRITICAL
+
+
+@pytest.mark.django_db
 def test_repeated_abnormal_exits_use_received_time_and_exclude_planned_shutdown(
     monkeypatch,
 ):

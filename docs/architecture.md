@@ -89,7 +89,8 @@ three-year shape for the 10-device pilot.
   certificate, verifies the exact SHA-256/size, installs through the device-owner
   PackageInstaller path, and keeps the current app playing until the update is
   staged. The first updater-enabled APK still requires the existing post-Setup
-  Wizard ADB install; later releases use the OTA path.
+  Wizard ADB install; later OTA delivery requires separate authorization and all
+  OTA release configuration remains disabled for this framework.
 - Media scanning requires ClamAV in the deployed processing environment.
 - The current EC2 host contains both Django and PostgreSQL and is therefore a
   single-host failure domain. Daily logical backups, DLM snapshots, and tested
