@@ -9,6 +9,7 @@ import android.content.pm.ApplicationInfo
 import android.os.UserManager
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -187,7 +188,7 @@ class PlayerSecurityInstrumentationTest {
             .put("daily_sync_local_time", "00:00:00")
             .put(
                 "items",
-                listOf(
+                JSONArray().put(
                     JSONObject()
                         .put("entry_id", entryId)
                         .put("media_id", mediaId)
@@ -244,7 +245,7 @@ class PlayerSecurityInstrumentationTest {
         assertFalse(store.preparePlannedShutdown(marker, event))
 
         assertTrue(store.markPlannedShutdownOrderly(1_500))
-        assertEquals(1_500, store.plannedShutdownMarker()?.orderlyShutdownAtEpochMs)
+        assertEquals(1_500L, store.plannedShutdownMarker()?.orderlyShutdownAtEpochMs)
         store.acknowledgeOperationalEvent(marker.id)
         store.clearPlannedShutdownMarker()
         store.clearRecentOrderlyPlannedShutdownMarker()
@@ -276,8 +277,8 @@ class PlayerSecurityInstrumentationTest {
         assertFalse(store.hasPlannedShutdownMarker())
         assertTrue(ShutdownPreparationPolicy.shouldResumeAutomatically(false))
         val retained = store.recentOrderlyPlannedShutdownMarker(2_001)
-        assertEquals(2_000, retained?.orderlyShutdownAtEpochMs)
-        assertTrue((retained?.resumedAtEpochMs ?: 0) >= 2_000)
+        assertEquals(2_000L, retained?.orderlyShutdownAtEpochMs)
+        assertTrue((retained?.resumedAtEpochMs ?: 0L) >= 2_000L)
         assertTrue(
             retained != null &&
                 ShutdownPreparationPolicy.shouldSuppressAbnormalExit(

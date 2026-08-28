@@ -78,8 +78,10 @@ downstream gate; do not patch across wave boundaries.
 
 This is the 2026-08-28 audit snapshot, not standing authorization:
 
-- `main` and `origin/main` were clean at
-  `4be6e7a0cdef96aa6cd4e1509210454db130fc52`; CI run `33108079168` passed.
+- The Wave 3 APK was built from clean `main`/`origin/main` at
+  `901ac09495a20b4a66de01722fa0a9dc5a7e8fd3`; this local handoff records the
+  result and has not been pushed. The Wave 2 server candidate is recorded at
+  `e0d3f01fc36e9669ed2670d291aa48430cea58bf`.
 - Current source contains the updater, GPS, OpenMapTiles, container-policy, and
   hardware-policy changes, with Django migrations through `0015`.
 - The production EC2 host and SSM were healthy, but the DUDU stack was stopped
@@ -90,9 +92,10 @@ This is the 2026-08-28 audit snapshot, not standing authorization:
   refresh that starts only the credential broker and PostgreSQL, then returns
   the host to its stopped state; production remains untouched and any live
   recovery still requires a new reviewed operation and current live gates.
-- No current-main production image set, signed GPS APK, MBTiles installation,
-  reviewed Terraform plan/apply, release-config install, migration, or
-  activation had been completed.
+- No current-main production image set, MBTiles installation, reviewed
+  Terraform plan/apply, release-config install, migration, or activation has
+  been completed. Wave 3's signed GPS APK and release manifest are retained at
+  `dspvault/duducar-signing/wave-3-release/`.
 - The staged 1.0.2/code-3 APK predates GPS. Wave 2 intake confirms that all
   enrolled devices have been factory-reset and their apps uninstalled; no
   code-2/code-3 identity needs to be retained, and the next installs will use
@@ -118,9 +121,9 @@ decisions above govern and Wave 2 must reconcile the documentation.
 |---|---|---|---|---|
 | 1 | Stopped-state backup/recovery path | None | Complete | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh`; `infrastructure/terraform/ec2/runtime/test-stopped-backup-refresh.sh`; `infrastructure/terraform/ec2/runtime/test-activation-recovery.sh`; `docs/production-deployment-runbook.md`; `docs/backup-restore.md` |
 | 2 | Server-side GPS/OpenMapTiles release candidate | Wave 1 | Complete | `e0d3f01` on local `main` (target `origin/main`); backend location/health/retention/map tests; `docs/device-api.md`; `OVERVIEW.md` |
-| 3 | Signed GPS Android code-4+ artifact | Wave 2 | Waiting | — |
-| 4 | Exact hardware, GPS, integrity, and privacy qualification | Wave 3 | Waiting | — |
-| 5 | Immutable release package, MBTiles, cost, and Terraform plan | Wave 4 | Waiting | — |
+| 3 | Signed GPS Android code-4+ artifact | Wave 2 | Complete | `dspvault/duducar-signing/wave-3-release/manifest/release-manifest.json`; `dspvault/duducar-signing/wave-3-release/checksums/SHA256SUMS` |
+| 4 | Exact hardware, GPS, integrity, and privacy qualification | Wave 3 | Complete | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-4-qualification/` |
+| 5 | Immutable release package, MBTiles, cost, and Terraform plan | Wave 4 | Complete | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-5-release/manifest/release-manifest.json` |
 | 6 | Accounts, communications, content, and launch approvals | Wave 5 | Waiting | — |
 | 7 | Production infrastructure recovery and activation | Wave 6 | Waiting | — |
 | 8 | Current isolated recovery proof within 24 hours | Wave 7 | Waiting | — |
@@ -214,10 +217,10 @@ separate external owner decision for pilot eligibility.
 and the Android verification/signing docs.
 
 **Ask Cze Yik for:** physical/ADB access to the primary and spare tablets,
-displays, chargers, mounts, SIMs and a safe field-test route; exact purchase/OEM
-records; secure Play Integrity access; the driver-notice text or business facts
-needed to draft it; the evidence destination; and availability to make the
-external `approved_for_pilot` decision after reviewing evidence.
+displays, chargers, mounts, SIMs and a safe field-test route; secure Play
+Integrity access; the driver-notice text or business facts needed to draft it;
+the evidence destination; and availability to make the external
+`approved_for_pilot` decision after reviewing evidence.
 
 **Work:** Record exact model, firmware, API, platform/vendor patch, verified
 boot, display measurement, and per-device integrity; exercise device owner,
@@ -408,3 +411,20 @@ only a non-sensitive path or identifier here.
 | 2026-08-28 | Framework | Complete | `4be6e7a0cdef` baseline | `DELEGATION.md` | Wave 1 is next. |
 | 2026-08-28 12:35 | 1 | Complete | `9bb2c5f` | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh` and the Wave 1 register above | Source-only recovery repair verified; no production or external evidence used. |
 | 2026-08-28 13:39 | 2 | Complete | `e0d3f01` | Wave 2 register above; backend test suite and isolated migration rehearsal | 268 passed, 2 skipped; no non-production copy was available, so synthetic local data was used; prior devices were reset/apps removed and no code-2/code-3 identity is retained. No AWS mutation or Android build/signing was performed. |
+| 2026-08-28 14:27 | 3 | Complete | `4.0.1` / code `4` from `901ac09` | Wave 3 register above; signed APK, R8 mapping, checksum, and reproducible manifest in the approved vault | Development unit/lint/build/instrumentation compilation and production compile/R8/lint/signature checks passed; OTA remained disabled and no device or production system was touched. |
+| 2026-08-28 16:07 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Primary and spare are identified and provisioned; display measurement, field GPS, decoded Integrity verdicts, media/offline field exercise, notice approval, and owner eligibility value remain open. |
+| 2026-08-28 16:09 | 4 | Blocked | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Awaiting physical measurements, open-sky GPS, scoped Integrity decoding, operator field observations, notice approval, and the explicit `approved_for_pilot` value. |
+| 2026-08-28 16:34 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Physical glass measurements and the explicit owner approval were supplied; open-sky GPS, decoded Integrity verdicts, and media/offline/power field observations remain open. |
+| 2026-08-28 18:06 | 4 | In progress | `4.0.1-diagnostic` / code `5` temporary same-certificate field build | Wave 4 secure qualification index in the vault | Disposable GPS diagnostic staged on both tablets for an offline open-sky run; driver notice approved at 18:06:43 MYT; exact code-4 release must be restored afterward. |
+| 2026-08-28 18:31 | 4 | In progress | `4.0.1-diagnostic` / code `5` temporary same-certificate field build | Wave 4 secure qualification index in the vault | Operator reports the open-sky GPS procedure passed on both. Spare exact readback recorded: GPS, mock false, 20.693 m, location `2026-08-28T10:28:23.252Z`, received `2026-08-28T10:28:34.942633Z` UTC; spare restored to code 4. Primary ADB is unauthorized, so exact readback and code-4 restoration remain pending. |
+| 2026-08-28 19:03 | 4 | In progress | `4.0.1-diagnostic` / code `5` temporary same-certificate field build | Wave 4 secure qualification index in the vault | User-authorized factory reset cleared the primary diagnostic result, DUDU package data, and device-owner state; post-reset identity is Android 15/API 35, firmware `ZUI_17.0.31.023`. Diagnostic was restaged with clean data and granted location permissions; post-reset GPS run, code-4 restoration, device-owner re-provisioning, and kiosk rechecks remain pending. |
+| 2026-08-28 19:11 | 4 | In progress | `4.0.1-diagnostic` / code `5` temporary same-certificate field build | Wave 4 secure qualification index in the vault | Primary post-reset GPS field procedure operator-confirmed passed. GNSS corroboration showed repeated GPS deliveries, final horizontal accuracy `3.7 m`, and `13` satellites. The diagnostic's final saved XML was a later network fix, so exact GPS display timestamps were not retained; code-4 restoration, device-owner re-provisioning, and remaining Wave 4 gates are still pending. |
+| 2026-08-28 19:12 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Primary disposable diagnostic was cleared and removed after the post-reset field pass; exact code-4 APK hash/bytes verified, device owner re-established, and lock-task state verified `LOCKED` with MainActivity focused. Visible shutdown/API rechecks, fresh current Integrity/decode, media/offline, and battery/thermal gates remain open. |
+| 2026-08-28 19:21 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Correct Play Integrity Cloud project confirmed as project ID `healthy-wares-506910-g5`, project number `552923442234`; Play Integrity API is enabled. Historical Wave 3 records retain `132918389760` as their original build input; the fresh probe/decode must use the corrected project. |
+| 2026-08-28 19:27 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Fresh post-reset signed-certificate Standard Integrity probe passed with project number `552923442234`; the token was not retained. REST decode reached Google but the active user credential returned `ACCESS_TOKEN_SCOPE_INSUFFICIENT`; a playintegrity-scoped decoder credential remains required. Exact release, owner, and lock-task state were restored afterward. |
+| 2026-08-28 19:35 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Fresh post-reset token decoded successfully with the service-account-derived `playintegrity` scope. Request package/hash matched; device verdict was `MEETS_DEVICE_INTEGRITY`; app verdict was `UNRECOGNIZED_VERSION`, licensing `UNEVALUATED`, code `4`, and the expected signing certificate digest was returned. The temporary target was removed and the exact release, owner, and lock-task state were restored. |
+| 2026-08-28 22:39 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Fresh HONOR spare token acquired and decoded successfully with project number `552923442234`. Request package/hash matched; device verdict was `MEETS_DEVICE_INTEGRITY`; app verdict was `UNRECOGNIZED_VERSION`, licensing `UNEVALUATED`, code `4`, and the expected signing certificate digest was returned. Temporary target/test package and token were removed; exact release, Device Owner, and lock-task state were restored and verified. |
+| 2026-08-29 00:29 | 4 | In progress | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Primary Lenovo short media qualification passed: validated 1920x1080 image and H.264 video completed offline loops, queued with `captured_offline=true`, and drained through a localhost-only reconnect endpoint. Fixture, credentials, and reverse port were removed; exact code-4 hash, Device Owner, and locked-task state were restored. HONOR fixture cleanup awaits ADB reauthorization; extended 12-hour, battery/runtime, thermal-under-load, and physical power observations remain open. |
+| 2026-08-29 00:41 | 4 | Closed by owner direction; remaining gates waived | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Owner directed that Wave 4 stop here and that no further qualification be performed. The final disposable run left the DUDU kiosk in device-owner lock-task with the RSA prompt not visually accessible; Safe Mode did not provide an exit. The operator will factory-reset Lenovo `HA259E36` and HONOR `AKWJ9X4B09G02667` before handoff. Next agent must verify both resets and treat prior app, Device Owner, credentials, fixtures, and kiosk state as invalid. Wave 5 was not started in this chat. |
+| 2026-08-29 00:59 | 4 | Complete | `4.0.1` / code `4` from `901ac09` | Wave 4 secure qualification index in the vault | Owner confirmed Wave 4 complete and final; remaining qualification work is intentionally skipped. Wave 5 may begin. |
+| 2026-08-29 02:29 | 5 | Complete | `6cb57fe` / `4.0.1` code `4` | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-5-release/manifest/release-manifest.json` | Geofabrik MBTiles, corrected signed APK, clean ARM64 ECR digests/scans, cost review, and fresh unapplied Terraform plan are checksum-bound in the secure vault; no production apply or activation performed. |
