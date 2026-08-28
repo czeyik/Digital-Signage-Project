@@ -78,8 +78,10 @@ downstream gate; do not patch across wave boundaries.
 
 This is the 2026-08-28 audit snapshot, not standing authorization:
 
-- `main` and `origin/main` were clean at
-  `4be6e7a0cdef96aa6cd4e1509210454db130fc52`; CI run `33108079168` passed.
+- The Wave 3 APK was built from clean `main`/`origin/main` at
+  `901ac09495a20b4a66de01722fa0a9dc5a7e8fd3`; this local handoff records the
+  result and has not been pushed. The Wave 2 server candidate is recorded at
+  `e0d3f01fc36e9669ed2670d291aa48430cea58bf`.
 - Current source contains the updater, GPS, OpenMapTiles, container-policy, and
   hardware-policy changes, with Django migrations through `0015`.
 - The production EC2 host and SSM were healthy, but the DUDU stack was stopped
@@ -90,9 +92,10 @@ This is the 2026-08-28 audit snapshot, not standing authorization:
   refresh that starts only the credential broker and PostgreSQL, then returns
   the host to its stopped state; production remains untouched and any live
   recovery still requires a new reviewed operation and current live gates.
-- No current-main production image set, signed GPS APK, MBTiles installation,
-  reviewed Terraform plan/apply, release-config install, migration, or
-  activation had been completed.
+- No current-main production image set, MBTiles installation, reviewed
+  Terraform plan/apply, release-config install, migration, or activation has
+  been completed. Wave 3's signed GPS APK and release manifest are retained at
+  `dspvault/duducar-signing/wave-3-release/`.
 - The staged 1.0.2/code-3 APK predates GPS. Wave 2 intake confirms that all
   enrolled devices have been factory-reset and their apps uninstalled; no
   code-2/code-3 identity needs to be retained, and the next installs will use
@@ -118,7 +121,7 @@ decisions above govern and Wave 2 must reconcile the documentation.
 |---|---|---|---|---|
 | 1 | Stopped-state backup/recovery path | None | Complete | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh`; `infrastructure/terraform/ec2/runtime/test-stopped-backup-refresh.sh`; `infrastructure/terraform/ec2/runtime/test-activation-recovery.sh`; `docs/production-deployment-runbook.md`; `docs/backup-restore.md` |
 | 2 | Server-side GPS/OpenMapTiles release candidate | Wave 1 | Complete | `e0d3f01` on local `main` (target `origin/main`); backend location/health/retention/map tests; `docs/device-api.md`; `OVERVIEW.md` |
-| 3 | Signed GPS Android code-4+ artifact | Wave 2 | Waiting | — |
+| 3 | Signed GPS Android code-4+ artifact | Wave 2 | Complete | `dspvault/duducar-signing/wave-3-release/manifest/release-manifest.json`; `dspvault/duducar-signing/wave-3-release/checksums/SHA256SUMS` |
 | 4 | Exact hardware, GPS, integrity, and privacy qualification | Wave 3 | Waiting | — |
 | 5 | Immutable release package, MBTiles, cost, and Terraform plan | Wave 4 | Waiting | — |
 | 6 | Accounts, communications, content, and launch approvals | Wave 5 | Waiting | — |
@@ -408,3 +411,4 @@ only a non-sensitive path or identifier here.
 | 2026-08-28 | Framework | Complete | `4be6e7a0cdef` baseline | `DELEGATION.md` | Wave 1 is next. |
 | 2026-08-28 12:35 | 1 | Complete | `9bb2c5f` | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh` and the Wave 1 register above | Source-only recovery repair verified; no production or external evidence used. |
 | 2026-08-28 13:39 | 2 | Complete | `e0d3f01` | Wave 2 register above; backend test suite and isolated migration rehearsal | 268 passed, 2 skipped; no non-production copy was available, so synthetic local data was used; prior devices were reset/apps removed and no code-2/code-3 identity is retained. No AWS mutation or Android build/signing was performed. |
+| 2026-08-28 14:27 | 3 | Complete | `4.0.1` / code `4` from `901ac09` | Wave 3 register above; signed APK, R8 mapping, checksum, and reproducible manifest in the approved vault | Development unit/lint/build/instrumentation compilation and production compile/R8/lint/signature checks passed; OTA remained disabled and no device or production system was touched. |
