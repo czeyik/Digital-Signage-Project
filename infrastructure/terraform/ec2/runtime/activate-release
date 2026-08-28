@@ -18,6 +18,34 @@ failed_activation_command_id=${11:-}
 manifest_dir=${12:-}
 runtime_manager=${13:-}
 
+host_config=/etc/duducar/host.env
+release_config=/etc/duducar/release.env
+postgres_data_dir=/srv/duducar/postgres
+stack_command=/usr/local/sbin/duducar-stack
+command_command=/usr/local/sbin/duducar-command
+backup_verify_command=/usr/local/sbin/duducar-backup-verify
+host_health_command=/usr/local/sbin/duducar-host-health
+render_runtime_env=/usr/local/sbin/render-duducar-runtime-env
+alert_command=/usr/local/sbin/duducar-alert
+recovery_state_dir=/var/lib/duducar-recovery
+
+if [ -n "${DUDUCAR_ACTIVATION_TEST_ROOT:-}" ]; then
+  [[ "$DUDUCAR_ACTIVATION_TEST_ROOT" =~ ^/tmp/duducar-activation-test\.[A-Za-z0-9]{6,}$ ]] || {
+    echo "Activation test root is outside the permitted temporary path." >&2
+    exit 2
+  }
+  host_config="$DUDUCAR_ACTIVATION_TEST_ROOT/etc/duducar/host.env"
+  release_config="$DUDUCAR_ACTIVATION_TEST_ROOT/etc/duducar/release.env"
+  postgres_data_dir="$DUDUCAR_ACTIVATION_TEST_ROOT/srv/duducar/postgres"
+  stack_command="$DUDUCAR_ACTIVATION_TEST_ROOT/usr/local/sbin/duducar-stack"
+  command_command="$DUDUCAR_ACTIVATION_TEST_ROOT/usr/local/sbin/duducar-command"
+  backup_verify_command="$DUDUCAR_ACTIVATION_TEST_ROOT/usr/local/sbin/duducar-backup-verify"
+  host_health_command="$DUDUCAR_ACTIVATION_TEST_ROOT/usr/local/sbin/duducar-host-health"
+  render_runtime_env="$DUDUCAR_ACTIVATION_TEST_ROOT/usr/local/sbin/render-duducar-runtime-env"
+  alert_command="$DUDUCAR_ACTIVATION_TEST_ROOT/usr/local/sbin/duducar-alert"
+  recovery_state_dir="$DUDUCAR_ACTIVATION_TEST_ROOT/var/lib/duducar-recovery"
+fi
+
 if [ "$(id -u)" -ne 0 ]; then
   echo "Release activation must run as root." >&2
   exit 2
@@ -50,12 +78,10 @@ if [ "$activation_kind" = failed-existing ] && [ "$recovery_from_operation_id" =
   echo "Failed-existing recovery must use a different prior operation ID." >&2
   exit 2
 fi
-recovery_state_dir=/var/lib/duducar-recovery
 recovery_state_max_age=900
 recovery_state_file="$recovery_state_dir/$operation_id"
 recovery_claim_dir="$recovery_state_dir/.claim-$operation_id"
 
-release_config=/etc/duducar/release.env
 if ! test -f "$release_config" || test -L "$release_config" || \
   [ "$(stat -c '%U:%G' "$release_config")" != root:root ] || \
   [ $((8#$(stat -c '%a' "$release_config") & 0022)) -ne 0 ]; then
@@ -78,7 +104,7 @@ assignment_value() {
 [ "$(assignment_value CADDY_CONFIG)" = /etc/duducar/Caddyfile.post-cutover ]
 
 "$runtime_manager" assert "$commit" "$operation_id" "$manifest_dir" "$caddy_image"
-/usr/local/sbin/render-duducar-runtime-env
+"$render_runtime_env"
 
 timers=(
   duducar-health.timer
@@ -90,8 +116,49 @@ timers=(
 
 source_host_config() {
   set -a
-  source /etc/duducar/host.env
+  source "$host_config"
   set +a
+}
+
+backup_receipt_is_current() {
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 \
+    DUDUCAR_BACKUP_EXPECTED_OPERATION_ID="$operation_id" \
+    "$backup_verify_command" check
+}
+
+refresh_stopped_backup() (
+  set -Eeuo pipefail
+  cleanup() {
+    original_status=$?
+    status=$original_status
+    set +e
+    "$stack_command" stop || status=1
+    systemctl stop duducar-credential-broker.service || status=1
+
+    running_duducar_containers=$(docker ps --format '{{.Names}}' 2>/dev/null) || status=1
+    if grep -Eq '^duducar-' <<< "$running_duducar_containers"; then
+      status=1
+    fi
+    public_listeners=$(ss -ltnH '( sport = :80 or sport = :443 )' 2>/dev/null) || status=1
+    if [ -n "$public_listeners" ]; then
+      status=1
+    fi
+    exit "$status"
+  }
+  trap cleanup EXIT
+
+  systemctl start duducar-credential-broker.service
+  "$stack_command" backup-start
+  "$command_command" backup-refresh "$operation_id"
+  backup_receipt_is_current
+)
+
+ensure_failed_existing_backup() {
+  if backup_receipt_is_current; then
+    return
+  fi
+  refresh_stopped_backup
+  backup_receipt_is_current
 }
 
 existing_preflight() {
@@ -100,8 +167,8 @@ existing_preflight() {
   # render-duducar-runtime-env above verified this root-owned configuration;
   # export its backup bucket for the verifier's direct preflight invocation.
   source_host_config
-  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check
-  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 "$backup_verify_command" check
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 "$host_health_command"
 }
 
 write_recovery_state() {
@@ -151,15 +218,18 @@ consume_recovery_state() {
     echo "Failed-existing recovery authorization has already been claimed." >&2
     return 1
   fi
-  assert_recovery_state
+  if ! assert_recovery_state; then
+    rmdir -- "$recovery_claim_dir" 2>/dev/null || true
+    return 1
+  fi
   rm -f -- "$recovery_state_file"
 }
 
 verify_recovery_alert_delivery() {
   recovery_alert="duducar-recovery-sns-${operation_id}-${mode}"
-  /usr/local/sbin/duducar-alert --problem "$recovery_alert" \
+  "$alert_command" --problem "$recovery_alert" \
     "Recovery activation $operation_id is validating Operations SNS delivery."
-  /usr/local/sbin/duducar-alert --clear "$recovery_alert" \
+  "$alert_command" --clear "$recovery_alert" \
     "Recovery activation $operation_id verified Operations SNS delivery."
 }
 
@@ -195,10 +265,12 @@ failed_existing_preflight() {
   fi
 
   source_host_config
-  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check
+  ensure_failed_existing_backup
   # Public HTTPS is necessarily unavailable while the fail-closed stack is
   # stopped. The unskipped check below is mandatory after systemd restores it.
-  DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health --skip-public-https
+  DUDUCAR_BACKUP_ASSUME_ROLE=1 \
+    DUDUCAR_BACKUP_EXPECTED_OPERATION_ID="$operation_id" \
+    "$host_health_command" --skip-public-https
   verify_recovery_alert_delivery
   printf 'Failed-existing recovery is correlated with operation %s and SSM command %s.\n' \
     "$recovery_from_operation_id" "$failed_activation_command_id"
@@ -212,7 +284,7 @@ if [ "$mode" = validate ]; then
   if [ "$activation_kind" = failed-existing ]; then
     failed_existing_preflight
   fi
-  echo "Release activation validation passed; no service or container state changed."
+  echo "Release activation validation passed; temporary backup components were cleaned up and no production stack was activated."
   exit 0
 fi
 
@@ -227,7 +299,7 @@ if [ "$mode" = arm-failed-existing ]; then
   }
   failed_existing_preflight
   write_recovery_state
-  echo "Failed-existing recovery authorization is armed; no service or container state changed."
+  echo "Failed-existing recovery authorization is armed; temporary backup components were cleaned up and no production stack is active."
   exit 0
 fi
 
@@ -239,18 +311,14 @@ fi
   echo "Activation requires the exact operation-bound confirmation phrase for its activation kind." >&2
   exit 2
 }
-if [ "$activation_kind" = failed-existing ]; then
-  consume_recovery_state
-fi
-
 traffic_changed=0
 cleanup() {
   status=$?
   set +e
   if [ "$status" -ne 0 ] && [ "$traffic_changed" -eq 1 ]; then
     systemctl stop "${timers[@]}" duducar.service duducar-credential-broker.service
-    /usr/local/sbin/duducar-stack stop || true
-    /usr/local/sbin/duducar-alert duducar-activation \
+    "$stack_command" stop || true
+    "$alert_command" duducar-activation \
       "Release activation $operation_id failed after traffic shutdown; the stack remains stopped." || true
   fi
   exit "$status"
@@ -265,30 +333,37 @@ case "$activation_kind" in
     failed_existing_preflight
     ;;
   initial-empty)
-    if find /srv/duducar/postgres -mindepth 1 -print -quit | grep -q .; then
+    if find "$postgres_data_dir" -mindepth 1 -print -quit | grep -q .; then
       echo "Initial-empty activation requires an empty PostgreSQL data directory." >&2
       exit 1
     fi
     ;;
 esac
 
+if [ "$activation_kind" = failed-existing ]; then
+  # Do not consume the arm until every stopped-state preflight, including a
+  # possible backup refresh, has passed. A failed preflight remains retryable;
+  # once this claim succeeds, any later failure is fail-closed.
+  consume_recovery_state
+fi
+
 traffic_changed=1
 systemctl stop "${timers[@]}" duducar.service duducar-credential-broker.service
-/usr/local/sbin/render-duducar-runtime-env
+"$render_runtime_env"
 systemctl start duducar-credential-broker.service
-/usr/local/sbin/duducar-stack deploy
-/usr/local/sbin/duducar-command migrate
-/usr/local/sbin/duducar-command grant-runtime
-/usr/local/sbin/duducar-command migration-check
+"$stack_command" deploy
+"$command_command" migrate
+"$command_command" grant-runtime
+"$command_command" migration-check
 systemctl enable duducar-credential-broker.service duducar.service "${timers[@]}"
 systemctl start duducar.service "${timers[@]}"
-/usr/local/sbin/duducar-command readiness
-/usr/local/sbin/duducar-stack assert-release
+"$command_command" readiness
+"$stack_command" assert-release
 systemctl is-active --quiet duducar-credential-broker.service duducar.service "${timers[@]}"
 systemctl is-enabled --quiet duducar-credential-broker.service duducar.service "${timers[@]}"
-/usr/local/sbin/duducar-command backup
-/usr/local/sbin/duducar-host-health
-/usr/local/sbin/duducar-alert --clear duducar-activation \
+"$command_command" backup
+"$host_health_command"
+"$alert_command" --clear duducar-activation \
   "Release activation $operation_id completed and its remote backup was verified."
 traffic_changed=0
 echo "Release activation completed with reviewed image, version, service, timer, and remote-backup assertions."

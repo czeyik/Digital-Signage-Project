@@ -33,6 +33,24 @@ page is the required control sequence.
   backups permanently into PostgreSQL/expose ports; lifecycle deletion is a
   separate explicit release decision.
 
+### Stopped-state activation refresh
+
+When `failed-existing` recovery finds no current operation-correlated receipt,
+the activation document performs the refresh before arming or consuming the
+recovery authorization. It starts only the credential broker and PostgreSQL,
+then runs a one-shot backend backup runner on the private Docker network. The
+runner has no published port and is not `duducar-web`; Caddy, the web service,
+all timers, and workers remain off. After the archive, sidecar, KMS/checksum,
+version, and remote receipt checks pass, the broker and database are stopped
+and the host verifies that no DUDU container or public port is running.
+
+The host receipt records the 32-hex activation operation ID. Repeating the same
+preflight reuses that fresh verified receipt; a failed refresh cleans up and
+can be retried with the same operation. The recovery authorization is consumed
+only after this preflight succeeds, so a preflight failure cannot strand the
+arm. Once activation shutdown begins, failures remain fail-closed and require
+a new reviewed operation.
+
 ## Snapshot clone rules
 
 - A completed DLM snapshot must match the recorded source data volume, tags,

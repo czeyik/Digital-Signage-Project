@@ -36,10 +36,14 @@ bash -n \
   "$runtime_dir/manage-runtime-assets" \
   "$runtime_dir/manage-release-config" \
   "$activation" \
-  "$host_health"
+  "$host_health" \
+  "$runtime_dir/test-stopped-backup-refresh.sh" \
+  "$runtime_dir/test-activation-recovery.sh"
 python3 "$runtime_dir/test-credential-broker.py"
 python3 "$runtime_dir/test-backup-verifier.py"
 bash "$runtime_dir/test-duducar-stack.sh"
+bash "$runtime_dir/test-stopped-backup-refresh.sh"
+bash "$runtime_dir/test-activation-recovery.sh"
 
 invalid_host_health_output=$(bash "$host_health" --not-a-valid-option 2>&1 || true)
 if [[ "$invalid_host_health_output" != *'Usage: duducar-host-health [--skip-public-https]'* ]]; then
@@ -101,6 +105,9 @@ require_literal 'monitor_stack()' "$stack"
 require_literal 'assert_release()' "$stack"
 require_literal 'start_container_if_stopped duducar-postgres' "$stack"
 require_literal 'start_container_if_stopped duducar-web' "$stack"
+require_literal 'start_database false' "$stack"
+require_literal 'backup-start' "$stack"
+require_literal 'backup-stop' "$stack"
 if [ "$(grep -Fc '/run/duducar/backend-secrets:ro' "$stack")" -ne 1 ]; then
   echo "Only the web container may receive the application secret/token mount." >&2
   exit 1
@@ -138,8 +145,19 @@ require_literal 'hmac.compare_digest' "$broker"
 require_literal '"sts",' "$broker"
 require_literal 'ProxyHandler({})' "$backup_verifier"
 reject_literal 'urllib.request.urlopen' "$backup_verifier"
+require_literal 'DUDUCAR_BACKUP_OPERATION_ID' "$backup_verifier"
+require_literal 'DUDUCAR_BACKUP_EXPECTED_OPERATION_ID' "$backup_verifier"
 require_literal 'exit "$status"' "$runtime_dir/duducar-host-health"
 require_literal '--skip-public-https' "$host_health"
+require_literal 'run_backup_refresh' "$runtime_dir/duducar-command"
+require_literal 'duducar-recovery-backup-' "$runtime_dir/duducar-command"
+require_literal '--env DEPLOYMENT_COMPONENT=scheduled' "$runtime_dir/duducar-command"
+require_literal '--network duducar' "$runtime_dir/duducar-command"
+backup_runner=$(sed -n '/^run_backup_refresh()/,/^)$/p' "$runtime_dir/duducar-command")
+if grep -Fq -- '--publish' <<< "$backup_runner"; then
+  echo "Stopped-state backup runner must not publish a host port." >&2
+  exit 1
+fi
 require_literal 'failed-existing' "$activation"
 require_literal 'RECOVER $operation_id FROM $recovery_from_operation_id' "$activation"
 require_literal 'ARM $operation_id FROM $recovery_from_operation_id' "$activation"
@@ -147,10 +165,17 @@ require_literal 'failed_activation_command_id' "$activation"
 require_literal 'recovery_state_max_age=900' "$activation"
 require_literal 'consume_recovery_state' "$activation"
 require_literal 'mkdir -m 0700 "$recovery_claim_dir"' "$activation"
-require_literal 'duducar-host-health --skip-public-https' "$activation"
+require_literal 'ensure_failed_existing_backup' "$activation"
+require_literal 'refresh_stopped_backup' "$activation"
+require_literal '"$stack_command" backup-start' "$activation"
+require_literal '"$command_command" backup-refresh "$operation_id"' "$activation"
+require_literal 'DUDUCAR_BACKUP_EXPECTED_OPERATION_ID="$operation_id"' "$activation"
+require_literal 'Do not consume the arm until' "$activation"
+require_literal 'rmdir -- "$recovery_claim_dir"' "$activation"
+require_literal '--skip-public-https' "$activation"
 require_literal 'systemctl is-enabled "$unit"' "$activation"
 require_literal "ss -ltnH '( sport = :80 or sport = :443 )'" "$activation"
-require_literal '/usr/local/sbin/duducar-stack stop || true' "$activation"
+require_literal '"$stack_command" stop || status=1' "$activation"
 require_literal 'verify_recovery_alert_delivery' "$activation"
 require_literal 'duducar-recovery-sns-${operation_id}-${mode}' "$activation"
 
@@ -181,18 +206,12 @@ assert_before() {
     exit 1
   }
 }
-assert_before '/usr/local/sbin/duducar-stack deploy' '/usr/local/sbin/duducar-command migrate' "$activation"
-assert_before '/usr/local/sbin/duducar-command migrate' '/usr/local/sbin/duducar-command grant-runtime' "$activation"
-assert_before '/usr/local/sbin/duducar-command grant-runtime' 'systemctl start duducar.service' "$activation"
-assert_before 'systemctl start duducar.service' '/usr/local/sbin/duducar-stack assert-release' "$activation"
-assert_before 'set -a' 'source /etc/duducar/host.env' "$activation"
-assert_before 'source /etc/duducar/host.env' 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' "$activation"
-assert_before 'source /etc/duducar/host.env' 'set +a' "$activation"
-assert_before 'set +a' 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' "$activation"
-assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-backup-verify check' 'systemctl start duducar-credential-broker.service' "$activation"
-assert_before 'DUDUCAR_BACKUP_ASSUME_ROLE=1 /usr/local/sbin/duducar-host-health' 'systemctl start duducar-credential-broker.service' "$activation"
-post_backup=$(sed -n '/\/usr\/local\/sbin\/duducar-command backup/,$p' "$activation")
-if ! grep -Fq '/usr/local/sbin/duducar-host-health' <<< "$post_backup"; then
+assert_before '"$stack_command" deploy' '"$command_command" migrate' "$activation"
+assert_before '"$command_command" migrate' '"$command_command" grant-runtime' "$activation"
+assert_before '"$command_command" grant-runtime' 'systemctl start duducar.service' "$activation"
+assert_before 'systemctl start duducar.service' '"$stack_command" assert-release' "$activation"
+post_backup=$(sed -n '/"$command_command" backup/,$p' "$activation")
+if ! grep -Fq '"$host_health_command"' <<< "$post_backup"; then
   echo "Activation must verify public host health after its post-cutover backup." >&2
   exit 1
 fi

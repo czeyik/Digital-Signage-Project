@@ -97,12 +97,41 @@ with tempfile.TemporaryDirectory() as directory:
             assumed_credentials = verifier.application_credentials()
         assert assumed_credentials["AWS_ACCESS_KEY_ID"] == "assumed-access-key"
         assert assumed_credentials["AWS_EC2_METADATA_DISABLED"] == "true"
-        verifier.record("backup-bucket", {})
+        operation_id = "b" * 32
+        with mock.patch.dict(
+            os.environ, {"DUDUCAR_BACKUP_OPERATION_ID": operation_id}, clear=False
+        ):
+            verifier.record("backup-bucket", {})
         document = json.loads(receipt.read_text(encoding="utf-8"))
         assert document["archive_version_id"] == "archive-version"
         assert document["sidecar_version_id"] == "sidecar-version"
         assert document["sha256"] == digest
+        assert document["operation_id"] == operation_id
         verifier.check("backup-bucket", {})
+        with mock.patch.dict(
+            os.environ,
+            {"DUDUCAR_BACKUP_EXPECTED_OPERATION_ID": operation_id},
+            clear=False,
+        ):
+            verifier.check("backup-bucket", {})
+        with mock.patch.dict(
+            os.environ,
+            {"DUDUCAR_BACKUP_EXPECTED_OPERATION_ID": "c" * 32},
+            clear=False,
+        ):
+            try:
+                verifier.check("backup-bucket", {})
+                raise AssertionError("Verifier accepted a receipt for another operation.")
+            except RuntimeError as error:
+                assert "not correlated" in str(error)
+        with mock.patch.dict(
+            os.environ, {"HOST_BACKUP_MAX_AGE_SECONDS": "0"}, clear=False
+        ):
+            try:
+                verifier.check("backup-bucket", {})
+                raise AssertionError("Verifier accepted a stale remote receipt.")
+            except RuntimeError as error:
+                assert "receipt is stale" in str(error)
 
         corrupt_metadata = True
         try:

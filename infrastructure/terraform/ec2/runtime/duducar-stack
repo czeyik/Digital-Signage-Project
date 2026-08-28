@@ -108,7 +108,9 @@ pull_images() {
 }
 
 create_database() {
-  docker run -d \
+  publish_database=${1:-true}
+  docker_args=(
+    docker run -d \
     --name duducar-postgres \
     --network "$network" \
     --ip "$database_ip" \
@@ -118,7 +120,6 @@ create_database() {
     --memory 640m \
     --cpus 1.0 \
     --env-file "$runtime_dir/postgres.env" \
-    --publish 5432:5432 \
     --volume /srv/duducar/postgres:/var/lib/postgresql/data \
     --volume /srv/duducar/postgres-secrets:/run/postgres-local-secrets:ro \
     --volume /srv/duducar/postgres-tls:/run/postgres-tls:ro \
@@ -131,6 +132,11 @@ create_database() {
     --health-interval 10s \
     --health-timeout 5s \
     --health-retries 12 \
+  )
+  if [ "$publish_database" = true ]; then
+    docker_args+=(--publish 5432:5432)
+  fi
+  docker_args+=(
     "$POSTGRES_IMAGE" \
     -c ssl=on \
     -c ssl_cert_file=/run/postgres-tls/server.crt \
@@ -140,7 +146,9 @@ create_database() {
     -c listen_addresses=* \
     -c password_encryption=scram-sha-256 \
     -c shared_buffers=128MB \
-    -c max_connections=50 >/dev/null
+    -c max_connections=50
+  )
+  "${docker_args[@]}" >/dev/null
 }
 
 wait_for_database() {
@@ -231,7 +239,9 @@ remove_database_container() {
   if docker container inspect duducar-postgres >/dev/null 2>&1; then
     # PostgreSQL receives SIGTERM and completes a fast, clean shutdown before
     # its container metadata is removed. A failed stop aborts the deployment.
-    docker stop --time 120 duducar-postgres >/dev/null
+    if [ "$(docker inspect --format '{{.State.Running}}' duducar-postgres 2>/dev/null || true)" = true ]; then
+      docker stop --time 120 duducar-postgres >/dev/null
+    fi
     docker rm duducar-postgres >/dev/null
   fi
 }
@@ -282,17 +292,33 @@ start_container_if_stopped() {
   fi
 }
 
+database_port_published() {
+  [ "$(docker inspect --format '{{with index .HostConfig.PortBindings "5432/tcp"}}{{(index . 0).HostPort}}{{end}}' duducar-postgres 2>/dev/null || true)" = 5432 ]
+}
+
+start_database() {
+  publish_database=${1:-true}
+  ensure_network
+
+  if docker container inspect duducar-postgres >/dev/null 2>&1; then
+    assert_container_config duducar-postgres "$POSTGRES_IMAGE" "$database_ip"
+    if [ "$publish_database" = true ] && ! database_port_published; then
+      remove_database_container
+      create_database true
+    else
+      start_container_if_stopped duducar-postgres
+    fi
+  else
+    create_database "$publish_database"
+  fi
+  wait_for_database
+}
+
 start_stack() {
   ensure_network
   ensure_openmaptiles_dir
 
-  if docker container inspect duducar-postgres >/dev/null 2>&1; then
-    assert_container_config duducar-postgres "$POSTGRES_IMAGE" "$database_ip"
-    start_container_if_stopped duducar-postgres
-  else
-    create_database
-  fi
-  wait_for_database
+  start_database
 
   if docker container inspect duducar-web >/dev/null 2>&1; then
     assert_container_config duducar-web "$BACKEND_IMAGE" "$web_ip"
@@ -310,6 +336,19 @@ start_stack() {
   fi
 }
 
+backup_start() {
+  # The stopped-state refresh has no public listener and no web service. The
+  # one-shot backend runner only needs PostgreSQL and the credential broker.
+  start_database false
+}
+
+backup_stop() {
+  if docker container inspect duducar-postgres >/dev/null 2>&1 &&
+    [ "$(docker inspect --format '{{.State.Running}}' duducar-postgres 2>/dev/null || true)" = true ]; then
+    docker stop --time 30 duducar-postgres >/dev/null
+  fi
+}
+
 deploy_stack() {
   ensure_network
   ensure_openmaptiles_dir
@@ -319,7 +358,8 @@ deploy_stack() {
   remove_container duducar-web
 
   if docker container inspect duducar-postgres >/dev/null 2>&1; then
-    if ! container_config_matches duducar-postgres "$POSTGRES_IMAGE" "$database_ip"; then
+    if ! container_config_matches duducar-postgres "$POSTGRES_IMAGE" "$database_ip" ||
+      ! database_port_published; then
       remove_database_container
     fi
   fi
@@ -380,7 +420,8 @@ assert_release() {
 
 stop_stack() {
   for name in duducar-caddy duducar-web duducar-postgres; do
-    if docker container inspect "$name" >/dev/null 2>&1; then
+    if docker container inspect "$name" >/dev/null 2>&1 &&
+      [ "$(docker inspect --format '{{.State.Running}}' "$name" 2>/dev/null || true)" = true ]; then
       docker stop --time 30 "$name" >/dev/null
     fi
   done
@@ -392,6 +433,12 @@ case "${1:-start}" in
     ;;
   start)
     start_stack
+    ;;
+  backup-start)
+    backup_start
+    ;;
+  backup-stop)
+    backup_stop
     ;;
   deploy)
     deploy_stack
@@ -409,7 +456,7 @@ case "${1:-start}" in
     docker ps --filter name=duducar- --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
     ;;
   *)
-    echo "Usage: duducar-stack {prepare|start|deploy|monitor|assert-release|stop|status}" >&2
+    echo "Usage: duducar-stack {prepare|start|backup-start|backup-stop|deploy|monitor|assert-release|stop|status}" >&2
     exit 2
     ;;
 esac

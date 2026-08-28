@@ -4,6 +4,20 @@ set -euo pipefail
 runtime_dir=/run/duducar
 host_config=/etc/duducar/host.env
 release_config=/etc/duducar/release.env
+backup_root=/srv/duducar/backups
+backup_verify=/usr/local/sbin/duducar-backup-verify
+
+if [ -n "${DUDUCAR_COMMAND_TEST_ROOT:-}" ]; then
+  [[ "$DUDUCAR_COMMAND_TEST_ROOT" =~ ^/tmp/duducar-backup-refresh-test\.[A-Za-z0-9]{6,}$ ]] || {
+    echo "Command test root is outside the permitted temporary path." >&2
+    exit 2
+  }
+  runtime_dir="$DUDUCAR_COMMAND_TEST_ROOT/run/duducar"
+  host_config="$DUDUCAR_COMMAND_TEST_ROOT/etc/duducar/host.env"
+  release_config="$DUDUCAR_COMMAND_TEST_ROOT/etc/duducar/release.env"
+  backup_root="$DUDUCAR_COMMAND_TEST_ROOT/srv/duducar/backups"
+  backup_verify="$DUDUCAR_COMMAND_TEST_ROOT/usr/local/sbin/duducar-backup-verify"
+fi
 
 if [ ! -r "$host_config" ]; then
   echo "Missing production host configuration: $host_config" >&2
@@ -43,11 +57,76 @@ run_owner_command() {
     python manage.py "$@"
 }
 
+run_backup_refresh() (
+  set -Eeuo pipefail
+  operation_id=$1
+  backup_container="duducar-recovery-backup-$operation_id"
+  container_owned=0
+
+  cleanup_backup_container() {
+    if [ "$container_owned" -eq 1 ] &&
+      docker container inspect "$backup_container" >/dev/null 2>&1; then
+      docker rm -f "$backup_container" >/dev/null 2>&1 || true
+    fi
+  }
+  trap cleanup_backup_container EXIT
+
+  if docker container inspect "$backup_container" >/dev/null 2>&1; then
+    echo "A stopped-state backup runner already exists for this operation." >&2
+    exit 1
+  fi
+  if [ ! -r "$release_config" ]; then
+    echo "Missing reviewed release configuration: $release_config" >&2
+    exit 1
+  fi
+  set -a
+  source "$release_config"
+  set +a
+
+  container_owned=1
+  docker run --rm \
+    --name "$backup_container" \
+    --label "duducar.operation=$operation_id" \
+    --label duducar.purpose=stopped-backup-refresh \
+    --network duducar \
+    --log-driver journald \
+    --read-only \
+    --cap-drop ALL \
+    --security-opt no-new-privileges:true \
+    --pids-limit 256 \
+    --memory 768m \
+    --cpus 1.5 \
+    --env-file "$runtime_dir/application.env" \
+    --env DEPLOYMENT_COMPONENT=scheduled \
+    --tmpfs /tmp:rw,nosuid,nodev,noexec,size=256m \
+    --volume "$backup_root:/backups" \
+    --volume "$runtime_dir/backend-secrets:/run/duducar/backend-secrets:ro" \
+    "$BACKEND_IMAGE" \
+    python manage.py create_postgres_backup --output-dir /backups
+
+  DUDUCAR_BACKUP_OPERATION_ID="$operation_id" \
+    "$backup_verify" record
+  find "$backup_root" \
+    -maxdepth 1 \
+    -type f \
+    -name 'duducar-signage-postgres-*' \
+    -mtime +30 \
+    -delete
+)
+
 command_name=${1:-}
-database_name=${2:-signage}
-if ! [[ "$database_name" =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
-  echo "Database name must be a lowercase PostgreSQL identifier." >&2
-  exit 2
+if [ "$command_name" = backup-refresh ]; then
+  operation_id=${2:-}
+  [[ "$operation_id" =~ ^[0-9a-f]{32}$ ]] || {
+    echo "Backup refresh requires a 32-hex operation ID." >&2
+    exit 2
+  }
+else
+  database_name=${2:-signage}
+  if ! [[ "$database_name" =~ ^[a-z][a-z0-9_]{0,62}$ ]]; then
+    echo "Database name must be a lowercase PostgreSQL identifier." >&2
+    exit 2
+  fi
 fi
 case "$command_name" in
   health)
@@ -66,6 +145,10 @@ case "$command_name" in
     ;;
   backup)
     args=(create_postgres_backup --output-dir /backups)
+    ;;
+  backup-refresh)
+    run_backup_refresh "$operation_id"
+    exit
     ;;
   migrate)
     run_owner_command "$database_name" migrate --noinput
@@ -105,8 +188,8 @@ fi
 docker exec duducar-web python manage.py "${args[@]}"
 
 if [ "$command_name" = "backup" ]; then
-  /usr/local/sbin/duducar-backup-verify record
-  find /srv/duducar/backups \
+  "$backup_verify" record
+  find "$backup_root" \
     -maxdepth 1 \
     -type f \
     -name 'duducar-signage-postgres-*' \

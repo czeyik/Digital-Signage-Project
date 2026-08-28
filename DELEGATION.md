@@ -1,0 +1,406 @@
+# Production Pilot Delegation
+
+**Last updated:** 2026-08-28 (Asia/Kuala_Lumpur)
+**Owner and authority for every role:** Cze Yik
+
+This file is the durable handoff for bringing DUDU production live and launching
+the 10-vehicle pilot. Execute the waves in order. One fresh Codex chat owns one
+wave from intake through verification; it must not use sub-agents or begin the
+next wave.
+
+## Start a wave
+
+Cze Yik should open a fresh chat in this repository and paste:
+
+> Read `AGENTS.md` and `DELEGATION.md`. Execute Wave N only. First inspect the
+> current repository and the wave's named sources, then ask me for all missing
+> intake as one concise bundle. After I answer, use Codex Goal with the exact
+> Wave N goal, work continuously until its exit criteria are evidenced, update
+> `DELEGATION.md`, and complete the goal. Do not use sub-agents or start another
+> wave.
+
+The wave agent must:
+
+1. Read `AGENTS.md`, this file, and only the canonical documents named by the
+   wave.
+2. Confirm every prerequisite wave is `Complete`, then revalidate the current
+   repository and any live facts relevant to its wave.
+3. Ask Cze Yik for the wave's missing intake before creating the goal. Request
+   access through an approved vault or local authenticated session; never ask
+   for secrets, signing keys, tokens, PINs, driver PII, or recovery codes in
+   chat, Git, logs, or this file.
+4. After intake, create one goal using the wave's exact **Goal** text. Do not set
+   a token budget unless Cze Yik explicitly provides one. If Goal is unavailable,
+   ask Cze Yik to enable it instead of silently substituting another workflow.
+5. Stay inside the wave's scope. Follow the goal tool's status rules and do not
+   mark it complete until every exit criterion has evidence.
+6. Before completing the goal, update the Wave register with the status and
+   evidence location, update any changed baseline fact, and append one concise
+   entry to the Completion log. Do not put sensitive evidence in this file.
+7. Stop after the wave. Cze Yik starts the next wave in a new chat.
+
+If a later wave finds a defect that invalidates an earlier completed wave, mark
+the current wave `Blocked`, mark the earliest affected wave `Reopened`, record
+the reason, and let Cze Yik restart from that wave. Replay every invalidated
+downstream gate; do not patch across wave boundaries.
+
+## Fixed decisions
+
+- Release path: GPS-capable Android version code **4 or higher**.
+- GPS and self-hosted OpenMapTiles are included in the first pilot.
+- The first updater-capable installation is manual. Keep every OTA release
+  configuration field disabled throughout this framework unless Cze Yik later
+  authorizes a separate OTA release.
+- `approved_for_pilot` is an external owner decision by Cze Yik. Code, test
+  results, or physical observations must not set or infer it automatically.
+- Target production activation and one-device launch window:
+  **2026-08-28 11:00 through 2026-08-29 23:59 MYT (UTC+8)**. If it has expired
+  before a production mutation, obtain and record a replacement window.
+- That window can contain activation and canary start, not necessarily the
+  complete 24-hour acceptance period. A canary started inside it can qualify no
+  earlier than 2026-08-29 11:00 MYT and no later than
+  2026-08-30 23:59 MYT.
+- Canary success: the one-device application runs smoothly for 24 consecutive
+  hours. There are no additional user-defined quantitative stop
+  thresholds. Do not invent any. Existing security, integrity, backup,
+  readiness, and fail-closed technical gates still apply. An interruption means
+  the 24-hour success condition has not yet been met; after remediation, the
+  24-hour clock restarts unless Cze Yik decides otherwise.
+- Accepted operating limits: USD 30/month target, 24-hour RPO/RTO, one-host
+  failure domain, and local-only host journals.
+- Cze Yik fills every personnel and authority role, including owner, budget
+  owner, privacy owner, hardware approver, release approver, operator, rollback
+  contact, support contact, and pilot lead. Record separately timed approvals
+  where the runbook requires separate decisions, even though the person is the
+  same.
+
+## Planning baseline — revalidate before relying on it
+
+This is the 2026-08-28 audit snapshot, not standing authorization:
+
+- `main` and `origin/main` were clean at
+  `4be6e7a0cdef96aa6cd4e1509210454db130fc52`; CI run `33108079168` passed.
+- Current source contains the updater, GPS, OpenMapTiles, container-policy, and
+  hardware-policy changes, with Django migrations through `0015`.
+- The production EC2 host and SSM were healthy, but the DUDU stack was stopped
+  fail-closed; public ports 80/443 refused connections. Production was still on
+  the older 1.0.1/code-2-era release state.
+- The latest logical backup was older than the 30-hour freshness gate. Wave 1
+  clears the source recovery deadlock with a private, operation-correlated
+  refresh that starts only the credential broker and PostgreSQL, then returns
+  the host to its stopped state; production remains untouched and any live
+  recovery still requires a new reviewed operation and current live gates.
+- No current-main production image set, signed GPS APK, MBTiles installation,
+  reviewed Terraform plan/apply, release-config install, migration, or
+  activation had been completed.
+- The staged 1.0.2/code-3 APK predates GPS. Current backend location-health
+  behavior can falsely alert for such clients. The chosen code-4+ path therefore
+  requires proof that no old enrolled client remains in the pilot path.
+- No Android 12+/API 31 primary-and-spare tablet pair had completed exact-device,
+  display, Play Integrity, and GPS qualification.
+- AWS secrets and private-bucket structure appeared sound; controlled worker
+  failure notification, SMTP delivery, current recovery evidence, content/UAT,
+  and external pilot approval remained open.
+- Every old SSM command ID, activation operation ID, recovery authorization,
+  plan, and dated health result is audit history only. Never resume or reuse it.
+
+The canonical production authority is `docs/production-deployment-runbook.md`.
+Where older docs still say GPS is deferred, OTA is staff-sideload-only, a
+72-hour canary is sufficient, or name an older commit/artifact, the fixed
+decisions above govern and Wave 2 must reconcile the documentation.
+
+## Production gate map
+
+| Wave | Gate cleared | Prerequisite | Status | Evidence / handoff |
+|---|---|---|---|---|
+| 1 | Stopped-state backup/recovery path | None | Complete | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh`; `infrastructure/terraform/ec2/runtime/test-stopped-backup-refresh.sh`; `infrastructure/terraform/ec2/runtime/test-activation-recovery.sh`; `docs/production-deployment-runbook.md`; `docs/backup-restore.md` |
+| 2 | Server-side GPS/OpenMapTiles release candidate | Wave 1 | Waiting | — |
+| 3 | Signed GPS Android code-4+ artifact | Wave 2 | Waiting | — |
+| 4 | Exact hardware, GPS, integrity, and privacy qualification | Wave 3 | Waiting | — |
+| 5 | Immutable release package, MBTiles, cost, and Terraform plan | Wave 4 | Waiting | — |
+| 6 | Accounts, communications, content, and launch approvals | Wave 5 | Waiting | — |
+| 7 | Production infrastructure recovery and activation | Wave 6 | Waiting | — |
+| 8 | Current isolated recovery proof within 24 hours | Wave 7 | Waiting | — |
+| 9 | Production rehearsal and one-device canary start | Wave 8 | Waiting | — |
+| 10 | 24-hour canary acceptance and 10-vehicle pilot launch | Wave 9 | Waiting | — |
+
+Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`, `Reopened`,
+and `Complete`. Only one wave may be `In progress`.
+
+## Wave 1 — Repair the stopped-state recovery path
+
+**Goal:** Make the stopped `failed-existing` production recovery path capable
+of creating and remotely verifying a fresh logical backup without exposing
+public traffic, then prove the behavior with tests and an updated runbook.
+
+**Read:** `infrastructure/terraform/ec2/runtime/activate-release`, its runtime
+tests, `infrastructure/terraform/release_activation.tf`,
+`docs/production-deployment-runbook.md`, and `docs/backup-restore.md`.
+
+**Ask Cze Yik for:** the redacted location of the failed activation and stale
+backup evidence; the intended release branch/PR destination; permission to
+change the activation/runtime scripts, tests, and runbook; and, only if a
+non-production AWS validation is needed, its account access, time window, and
+one-off cost limit.
+
+**Work:** Trace the shared activation flow; implement the minimum replay-safe,
+operation-correlated backup refresh that keeps Caddy, web, timers, and workers
+off and starts only what the backup needs; guarantee cleanup back to the stopped
+state; test failure, retry, freshness, remote receipt, and no-public-traffic
+boundaries; update the operator sequence. Do not touch production.
+
+**Complete when:** the root-cause test fails on the old flow and passes on the
+new flow, all relevant runtime/Terraform checks pass, the documented sequence is
+unambiguous, and the clean reviewed commit/evidence is recorded.
+
+## Wave 2 — Freeze the server release candidate
+
+**Goal:** Produce a clean, tested server-side release candidate for the first
+GPS/OpenMapTiles pilot, including safe migrations and compatibility behavior
+for a code-4+ fleet.
+
+**Read:** `OVERVIEW.md`, `docs/architecture.md`, `docs/device-api.md`,
+`docs/openmaptiles.md`, `docs/deployment-readiness.md`, and backend location,
+health, retention, map, migration, and test code.
+
+**Ask Cze Yik for:** secure access to a representative sanitized/restored data
+copy; the authoritative inventory of enrolled device app versions; confirmation
+whether any code-2/code-3 device identity must be retained; and the desired
+release branch/PR destination.
+
+**Work:** Reconcile canonical docs with the fixed GPS, OpenMapTiles, manual-OTA,
+and 24-hour canary decisions; test or minimally fix location ingestion/health,
+30-day retention, privacy boundaries, authenticated map routes, and old-client
+behavior; rehearse migrations `0009`–`0015` on the representative copy; run the
+relevant backend and migration checks. Do not build/sign Android or mutate AWS.
+
+**Complete when:** no code-2/code-3 client can enter the pilot path unnoticed,
+the migration rehearsal and server suites pass, privacy/map behavior is
+verified, and a clean release commit is recorded.
+
+## Wave 3 — Build and verify the Android release
+
+**Goal:** Produce and securely retain one production-signed GPS-capable DUDU APK
+at version code 4 or higher, with a complete reproducible release manifest.
+
+**Read:** `docs/android-build-verification.md`,
+`docs/android-release-signing.md`, `docs/device-api.md`, and `android-player/`.
+
+**Ask Cze Yik for:** the exact version name and version code (minimum 4); the
+Wave-2 release commit; secure signing-vault access and backup confirmation;
+Play Integrity project/decode access; approved build environment; and secure
+APK, mapping, checksum, and evidence destinations.
+
+**Work:** Build from a clean pinned commit; run unit, instrumentation where
+available, lint, production/development compile, and release verification;
+verify package name, version, minimum API 31, certificate continuity, SHA-256,
+byte size, R8 mapping, GPS permissions/behavior, and updater safeguards; retain
+artifacts outside Git. Do not enable OTA, enroll a device, or touch production.
+
+**Complete when:** the signed APK and recovery artifacts are independently
+verifiable from the recorded manifest, use the approved certificate and
+code-4+ identity, and all required Android checks pass.
+
+## Wave 4 — Qualify the physical pilot platform
+
+**Goal:** Qualify the exact primary and spare Android 12+ pilot hardware for
+display, kiosk, integrity, GPS, offline replay, and privacy use, and obtain the
+separate external owner decision for pilot eligibility.
+
+**Read:** `docs/hardware-qualification.md`, `OVERVIEW.md`, `docs/device-api.md`,
+and the Android verification/signing docs.
+
+**Ask Cze Yik for:** physical/ADB access to the primary and spare tablets,
+displays, chargers, mounts, SIMs and a safe field-test route; exact purchase/OEM
+records; secure Play Integrity access; the driver-notice text or business facts
+needed to draft it; the evidence destination; and availability to make the
+external `approved_for_pilot` decision after reviewing evidence.
+
+**Work:** Record exact model, firmware, API, platform/vendor patch, verified
+boot, display measurement, and per-device integrity; exercise device owner,
+lock task, media, recovery, battery/thermal, GPS cadence/accuracy, permission
+denial, mock rejection, offline queue/reconnect, and location-disabled paths;
+finalize the driver notice covering purpose, access, and 30-day retention.
+Physical observations support but never auto-set `approved_for_pilot`.
+
+**Complete when:** both planned devices have traceable qualification evidence,
+the signed code-4+ build passes real integrity and GPS field checks, the notice
+is approved, and Cze Yik's separately timestamped external eligibility decision
+is recorded. Do not enroll a production device.
+
+## Wave 5 — Prepare the immutable production release
+
+**Goal:** Produce a fully pinned, scanned, costed production release package and
+fresh reviewed Terraform plan without applying it or activating production.
+
+**Read:** `infrastructure/README.md`, `docs/openmaptiles.md`,
+`docs/aws-cost-estimate.md`, `docs/production-deployment-runbook.md`, and the
+Terraform/image definitions.
+
+**Ask Cze Yik for:** AWS account/region and SSO role; protected backend/tfvars
+access; ECR and private artifact-store access; the approved Malaysia MBTiles
+source, license/custodian and transfer location; the Wave-2 commit and Wave-3
+APK manifest; artifact/evidence destinations; and authorization plus cost limit
+for builds, scans, uploads, refresh, and planning.
+
+**Work:** Run protected CI/release checks; build and scan immutable ARM64
+backend, PostgreSQL, and Caddy images; record their digests; independently
+verify and stage the MBTiles extract; securely stage the APK if required; set
+the exact required app version while keeping all OTA fields empty/zero; review
+state and create a fresh saved Terraform plan; reject unexpected topology,
+public access, destructive retention, or projected cost above USD 30/month.
+
+**Complete when:** one manifest binds commit, three image digests, APK identity,
+MBTiles checksum, migration set, runtime/release document versions, disabled OTA
+values, cost review, CI evidence, and the exact unapplied plan.
+
+## Wave 6 — Close external launch prerequisites
+
+**Goal:** Assemble and verify the complete human, account, communications,
+content, privacy, support, and authorization packet required to enter the
+production change window.
+
+**Read:** `OVERVIEW.md`, `docs/aws-cost-estimate.md`, the runbook's “Before any
+change” and rehearsal sections, and the Wave-4 notice/qualification evidence.
+
+**Ask Cze Yik for:** secure evidence of root/SSO MFA, contacts and budget alerts;
+DNS/TLS ownership; SMTP sender plus SPF/DKIM/DMARC and two test inboxes; SNS
+subscription endpoint; owner/marketing test accounts; approved pilot media and
+rights; the secure driver/vehicle roster; the UAT/support schedule; and a valid
+activation/canary window replacing the fixed window if it has expired.
+
+**Work:** Verify contacts and account controls; prove SMTP and SNS subscription
+readiness without the deliberate production failure test; prepare approved
+media/playlists and the UAT script; bind the notice, qualification, privacy,
+support, rollback, budget, and one-device scope into a launch packet; record
+Cze Yik's distinct release, cost, privacy, hardware, and change-window
+approvals. Do not deploy application code or enroll a device.
+
+**Complete when:** every runbook owner prerequisite has current evidence, the
+content/UAT/roster/support packet is ready, and a still-valid production window
+and rollback authority are recorded.
+
+## Wave 7 — Recover and activate production
+
+**Goal:** Apply the exact reviewed release and recover the stopped host through
+the supported SSM activation path until the pinned GPS/OpenMapTiles production
+stack is live, ready, backed up, and OTA-disabled.
+
+**Read:** the complete production runbook, `infrastructure/README.md`,
+`docs/deployment-readiness.md`, Wave-1 recovery changes, and the Wave-5 manifest.
+
+**Ask Cze Yik for before creating the goal:** a valid maintenance window; AWS
+SSO and approved vault access; the reviewed plan/manifest/evidence locations;
+current change, cost, rollback, and operator authorization; and availability
+to issue the exact just-in-time confirmations. Never collect the confirmations
+in advance.
+
+**Work:** Recheck live state, backup age, snapshot, drift, secrets schema, and
+plan freshness; obtain separate approval before applying the exact plan;
+transfer verified MBTiles and install the pinned runtime/release config through
+SSM only; use the Wave-1 stopped-state backup refresh; create a new operation
+and command IDs; validate, obtain the exact ARM and RECOVER confirmations at
+their decision points, and run the sole supported `failed-existing` activation
+path; migrate through `0015`; verify digests, version, units, timers, public
+readiness, map data, fresh remote backup/receipt, and completed DLM snapshot.
+
+**Complete when:** production is live on the exact manifest, migrations and
+readiness pass, public routes and authenticated maps work, backups are current,
+all required units/timers are active, no secret leaked, and every OTA field is
+still disabled. Do not enroll a tablet.
+
+## Wave 8 — Prove current recovery
+
+**Goal:** Demonstrate isolated logical, snapshot, and exact-media recovery from
+the newly activated production release within the accepted 24-hour RPO/RTO and
+destroy all temporary recovery resources.
+
+**Read:** `docs/backup-restore.md`, `infrastructure/recovery-smoke/README.md`,
+the production runbook recovery gate, the Wave-5 manifest, and Wave-7 backup
+and snapshot evidence.
+
+**Ask Cze Yik for:** AWS SSO access; the authorized current logical archive,
+DLM snapshot, media versions, and expected records; isolated test credentials;
+temporary-resource region/window/cost approval; secure evidence destination;
+and teardown authorization.
+
+**Work:** Confirm the selected sources satisfy the 24-hour RPO; create a fresh
+operation; restore the logical archive and DLM clone in isolation using the
+pinned release; verify exact media, owner login, readiness, reports and CSV
+without fabricated data; measure RTO; capture non-secret evidence; and destroy
+the isolated stack. Never reuse an old operation or production identity and
+never route recovery through production.
+
+**Complete when:** source freshness, all three recovery layers, and evidence
+checks pass within 24 hours, cleanup is independently verified, and no temporary
+billable resource remains.
+
+## Wave 9 — Rehearse production and start the canary
+
+**Goal:** Pass the production rehearsal, manually install and enroll exactly
+one externally approved code-4+ tablet, and establish the timestamped start of
+the 24-hour canary.
+
+**Read:** the runbook's hardware/rehearsal/canary sections,
+`docs/deployment-readiness.md`, `docs/hardware-qualification.md`, and the Wave-3,
+Wave-4, Wave-7, and Wave-8 evidence.
+
+**Ask Cze Yik for:** secure access to production owner/marketing accounts and
+two test inboxes; the approved content/UAT package; the selected qualified
+tablet and signed APK; secure driver/vehicle assignment data; authorization for
+the deliberate isolated-worker failure; availability to set/confirm the
+external `approved_for_pilot` gate; and the exact one-device enrollment window.
+
+**Work:** Verify DNS/TLS, authorization/privacy, private media, processing,
+playlist, backup/alarms/budget, OpenMapTiles and GPS endpoints; deliberately
+fail one isolated worker and prove EventBridge/SNS delivery; require Cze Yik's
+external approval; perform clean setup/device-owner assignment and the first
+manual updater-capable APK install; prove integrity, enroll only that device,
+exercise playback/sync/offline/evidence/location/map behavior, reconfirm OTA is
+disabled, and record the canary start time and baseline.
+
+**Complete when:** every rehearsal gate passes, exactly one approved device is
+healthy in production with GPS and content working, alert delivery is proven,
+OTA remains disabled, and the 24-hour observation interval has an explicit
+MYT start timestamp.
+
+## Wave 10 — Accept the canary and launch the fleet
+
+**Goal:** Accumulate 24 consecutive hours of smooth one-device production
+operation, obtain Cze Yik's separate expansion approval, and launch the
+remaining qualified devices up to the 10-vehicle pilot scope.
+
+**Read:** Wave-9 baseline, production runbook decision rules, dashboard/alert
+evidence, and the current release manifest. Keep this goal narrowly limited to
+monitoring, acceptance, and approved expansion.
+
+**Ask Cze Yik for:** monitoring/dashboard/log access; the observation checkpoint
+and support schedule; physical access to the canary; secure details and current
+qualification evidence for the remaining devices/assignments; and availability
+to issue expansion approval only after the 24-hour evidence is complete.
+
+**Work:** Keep one goal active across the observation period and record
+checkpoint evidence for application availability, heartbeats, sync/playback,
+proof, GPS ingestion/map, alerts, backups, worker behavior, and cost. Do not
+invent stop thresholds. If operation is interrupted, preserve evidence,
+remediate only within the current approved release/runbook, and restart the
+24-hour clock; a source, artifact, hardware, or infrastructure change reopens
+the corresponding earlier wave. After 24 hours pass, obtain a separate Cze Yik
+decision, then manually install, externally approve, integrity-check, enroll,
+and smoke-test remaining qualified devices one at a time, never exceeding 10
+total. Keep OTA disabled.
+
+**Complete when:** the timestamped record proves 24 consecutive smooth hours,
+Cze Yik has approved expansion, every launched device is qualified and healthy,
+the fleet count is at most 10, production gates remain green, and the pilot
+launch record and support handoff are complete.
+
+## Completion log
+
+Append one line per status change. Keep evidence in its secure store and link
+only a non-sensitive path or identifier here.
+
+| Timestamp (MYT) | Wave | Status | Commit/release | Evidence | Note / next input |
+|---|---|---|---|---|---|
+| 2026-08-28 | Framework | Complete | `4be6e7a0cdef` baseline | `DELEGATION.md` | Wave 1 is next. |
+| 2026-08-28 12:35 | 1 | Complete | local reviewed Wave 1 commit | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh` and the Wave 1 register above | Source-only recovery repair verified; no production or external evidence used. |
