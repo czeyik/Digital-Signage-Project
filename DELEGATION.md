@@ -93,9 +93,12 @@ This is the 2026-08-28 audit snapshot, not standing authorization:
 - No current-main production image set, signed GPS APK, MBTiles installation,
   reviewed Terraform plan/apply, release-config install, migration, or
   activation had been completed.
-- The staged 1.0.2/code-3 APK predates GPS. Current backend location-health
-  behavior can falsely alert for such clients. The chosen code-4+ path therefore
-  requires proof that no old enrolled client remains in the pilot path.
+- The staged 1.0.2/code-3 APK predates GPS. Wave 2 intake confirms that all
+  enrolled devices have been factory-reset and their apps uninstalled; no
+  code-2/code-3 identity needs to be retained, and the next installs will use
+  code-4+.
+- No non-production database copy is available. Wave 2 migration evidence uses
+  isolated synthetic SQLite data and does not use production data.
 - No Android 12+/API 31 primary-and-spare tablet pair had completed exact-device,
   display, Play Integrity, and GPS qualification.
 - AWS secrets and private-bucket structure appeared sound; controlled worker
@@ -114,7 +117,7 @@ decisions above govern and Wave 2 must reconcile the documentation.
 | Wave | Gate cleared | Prerequisite | Status | Evidence / handoff |
 |---|---|---|---|---|
 | 1 | Stopped-state backup/recovery path | None | Complete | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh`; `infrastructure/terraform/ec2/runtime/test-stopped-backup-refresh.sh`; `infrastructure/terraform/ec2/runtime/test-activation-recovery.sh`; `docs/production-deployment-runbook.md`; `docs/backup-restore.md` |
-| 2 | Server-side GPS/OpenMapTiles release candidate | Wave 1 | Waiting | — |
+| 2 | Server-side GPS/OpenMapTiles release candidate | Wave 1 | Complete | `e0d3f01` on local `main` (target `origin/main`); backend location/health/retention/map tests; `docs/device-api.md`; `OVERVIEW.md` |
 | 3 | Signed GPS Android code-4+ artifact | Wave 2 | Waiting | — |
 | 4 | Exact hardware, GPS, integrity, and privacy qualification | Wave 3 | Waiting | — |
 | 5 | Immutable release package, MBTiles, cost, and Terraform plan | Wave 4 | Waiting | — |
@@ -404,3 +407,4 @@ only a non-sensitive path or identifier here.
 |---|---|---|---|---|---|
 | 2026-08-28 | Framework | Complete | `4be6e7a0cdef` baseline | `DELEGATION.md` | Wave 1 is next. |
 | 2026-08-28 12:35 | 1 | Complete | `9bb2c5f` | `infrastructure/terraform/ec2/runtime/test-runtime-guardrails.sh` and the Wave 1 register above | Source-only recovery repair verified; no production or external evidence used. |
+| 2026-08-28 13:39 | 2 | Complete | `e0d3f01` | Wave 2 register above; backend test suite and isolated migration rehearsal | 268 passed, 2 skipped; no non-production copy was available, so synthetic local data was used; prior devices were reset/apps removed and no code-2/code-3 identity is retained. No AWS mutation or Android build/signing was performed. |
