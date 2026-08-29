@@ -417,6 +417,8 @@ start_database() {
     create_database
   fi
   wait_for_database
+  docker exec duducar-recovery-postgres \
+    /docker-entrypoint-initdb.d/010-roles.sh
 }
 
 create_web() {
