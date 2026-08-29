@@ -139,7 +139,8 @@ artifacts. The checked-in runtime helper refuses to use them.
 
 Never hand-edit or copy `/etc/duducar/release.env`. The dedicated
 `production_release_config_document` is the only reviewed path to change
-the backend, PostgreSQL, Caddy, Caddy-config, and required-app selections.
+the backend, PostgreSQL, Caddy, Caddy-config, required-app, and Play Integrity
+project selections.
 Every image and the semantic Android version must exactly match the Terraform
 values embedded in the document. New hosts receive that exact initial file from
 reviewed bootstrap user data; later changes are atomic, root-only, backed up,
