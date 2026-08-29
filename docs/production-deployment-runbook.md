@@ -60,6 +60,9 @@ broad authorization never permits an unexpected plan.
    version must match the signed APK. The application secret must already have
    `WORKER_DB_PASSWORD` and comma-separated canonical lowercase 64-hex
    `PLAY_INTEGRITY_APP_CERTIFICATE_SHA256`; never record their values.
+   The runtime renderer must leave `aws-credentials-token` as exactly 64
+   lowercase hexadecimal bytes with no line ending; it normalizes only the
+   known legacy 64-hex-plus-LF value and refuses other existing forms.
 2. Generate one fresh 32-hex operation ID. Send the pinned runtime document with
    `Mode=validate`, the clean 40-hex commit, operation ID, and exact Caddy digest.
    Review its complete staged manifest, then send `Mode=install` with identical
