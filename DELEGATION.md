@@ -1,6 +1,6 @@
 # Production Pilot Delegation
 
-**Last updated:** 2026-08-29 (Asia/Kuala_Lumpur)
+**Last updated:** 2026-08-30 (Asia/Kuala_Lumpur)
 **Owner and authority for every role:** Cze Yik
 
 This file is the durable handoff for bringing DUDU production live and launching
@@ -54,12 +54,12 @@ downstream gate; do not patch across wave boundaries.
 - `approved_for_pilot` is an external owner decision by Cze Yik. Code, test
   results, or physical observations must not set or infer it automatically.
 - Target production activation and one-device launch window:
-  **2026-08-28 11:00 through 2026-08-29 23:59 MYT (UTC+8)**. If it has expired
+  **2026-08-28 11:00 through 2026-08-30 18:00 MYT (UTC+8)**. If it has expired
   before a production mutation, obtain and record a replacement window.
 - That window can contain activation and canary start, not necessarily the
   complete 24-hour acceptance period. A canary started inside it can qualify no
   earlier than 2026-08-29 11:00 MYT and no later than
-  2026-08-30 23:59 MYT.
+  2026-08-30 18:00 MYT.
 - Canary success: the one-device application runs smoothly for 24 consecutive
   hours. There are no additional user-defined quantitative stop
   thresholds. Do not invent any. Existing security, integrity, backup,
@@ -127,7 +127,7 @@ decisions above govern and Wave 2 must reconcile the documentation.
 | 6 | Accounts, communications, content, and launch approvals | Wave 5 | Complete | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-6-launch-replay-20260829-r2/launch-packet.md`; evidence checksum and revalidation record beside it | Rebound the corrected Wave 5 r2 manifest and exact unapplied plan; current account, DNS/TLS, communications, budget, content, privacy, roster, approvals, window, rollback, and one-device gates remain recorded. No production deployment or enrollment performed. |
 | 7 | Production infrastructure recovery and activation | Wave 6 | Complete | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-5-release-replay-20260829-r2/manifest/release-manifest.json`; plan `0bf954d82c33ff3dc63157a26e1d5e1ef71c1c785c422215f89728ff2a583c92`; RECOVER SSM `0b17ff70-2055-4ef7-b8d7-c93b06850141`; final audit SSM `a3f47b8c-993c-4cd1-b7bf-467936cd3a4e`; secure evidence directory `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-7-activation-replay-20260829/evidence/` | Applied the exact reviewed 0-add/2-change/0-destroy plan; installed the pinned runtime and release; verified the existing exact MBTiles; completed failed-existing validation, JIT ARM and RECOVER, migrations through `0015`, readiness, HTTPS health, authenticated map routes, operation-bound backup/receipt, encrypted DLM snapshot, active services/timers, and OTA-disabled state. No tablet was enrolled. |
 | 8 | Current isolated recovery proof within 24 hours | Wave 7 | Complete | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-8-recovery-2f2b27eb02698522c37be533d7a7697d/` | Snapshot clone, logical archive, exact media, TLS/loopback, owner dashboard/report/CSV/logout, RPO/RTO, source revalidation, and cleanup checks passed. Temporary resources were destroyed. |
-| 9 | Production rehearsal and one-device canary start | Wave 8 | Blocked | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-rehearsal-20260829/wave9-prerequisite-readback.md` | Preflight stopped before production mutation because the selected Lenovo's current firmware/build and security patch differ from its Wave 4 qualification record. |
+| 9 | Production rehearsal and one-device canary start | Wave 8 | In progress | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-rehearsal-20260829/wave9-prerequisite-readback.md`; current WIF worktree | Wave 4 exact-identity requalification is complete. Wave 9 resumed with the owner-authorized AWS–GCP federation repair; no production secret mutation, enrollment, or canary start has occurred yet. |
 | 10 | 24-hour canary acceptance and 10-vehicle pilot launch | Wave 9 | Waiting | — |
 
 Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`, `Reopened`,
@@ -448,3 +448,6 @@ only a non-sensitive path or identifier here.
 | 2026-08-29 19:11 | 9 | Blocked | `3d77340` / current Wave 5 r2 package | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-rehearsal-20260829/wave9-prerequisite-readback.md` | Production rehearsal stopped before the authorized worker failure, APK install, device-owner provisioning, enrollment, and canary start because the selected tablet no longer matches Wave 4's exact firmware/build and security-patch identity. |
 | 2026-08-29 19:24 | 4 | In progress | current Lenovo `TB311XU` / Android 15 / code-4 release | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-4-requalification-20260829/` | Owner directed a minimal fresh exact-identity record for current firmware/build and security patch; retained 10.05-inch display evidence is used and all optional waived exercises remain excluded. |
 | 2026-08-29 19:29 | 4 | Complete | current Lenovo `TB311XU` / Android 15 / code-4 release | `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-4-requalification-20260829/` | Owner approval persisted as production qualification record `1`; exact artifact, install hash, device owner, and alarm-policy readbacks pass. Optional waived exercises were not repeated. |
+| 2026-08-29 20:59 | 9 | Blocked | current code-4 release | SSM `2a37c043-eb79-4d9d-8669-ce2a0c478a2e`; final state readback `6713f701-0bb6-4351-8dc9-a409a31bff66` | Packet reassembly found the real enrollment request and token, but the live decoder rejected it because all stored production secret versions retain the obsolete Play Integrity identity. Lenovo `HA259E36` remains pending with zero active credentials; no canary was started. Restore the approved decoder key or its GCP IAM access before retrying. Optional waived exercises were not repeated. |
+| 2026-08-30 01:18 | 9 | In progress | current code-4 release | AWS SSO caller verification; approved GCP project/service-account access and impersonation verification | Owner extended the production and maintenance window through `2026-08-30 06:00 MYT`; AWS and GCP access now pass. Decoder key creation remains blocked by the enforced service-account-key policy, so no production mutation or canary start has occurred. |
+| 2026-08-30 02:18 | 9 | In progress | current code-4 release; AWS–GCP WIF | GCP WIF pool/provider and backend federation implementation | Owner extended the production and maintenance window through `2026-08-30 18:00 MYT` and selected option 3. The dedicated AWS provider is restricted to the production application role; static-key creation is no longer required. No production secret mutation, enrollment, or canary start has occurred. |
