@@ -175,7 +175,9 @@ class MainActivity : Activity() {
     private fun configureAdminControls() {
         binding.exitDuduButton.setOnClickListener {
             if (hasActiveAdminSession()) {
-                startActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME))
+                startActivity(
+                    Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
                 finishAndRemoveTask()
             }
         }
