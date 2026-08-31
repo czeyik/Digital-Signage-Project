@@ -66,9 +66,9 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
 
 ## Planning baseline — revalidate before relying on it
 
-- The remediation is committed on local `main` at `e8d2559`. Wave 2 must review
-  that commit and either accept it as the release candidate or create a focused
-  follow-up commit; it has not been pushed or cleared as a release.
+- The remediated server candidate is committed on local `main` at `43845d5`.
+  It includes the reviewed `e8d2559` remediation, canonical rule reconciliation,
+  and populated migration rehearsal through `0016`; it has not been pushed.
 - Wave 1's stopped-state recovery repair remains accepted at `16cc6fe`; it is
   not affected by the current remediation and does not need replay.
 - The last recorded production/canary release was `8087380`, Android code 4,
@@ -106,7 +106,7 @@ the decisions above, reconcile it in the wave that owns the affected source.
 | Wave | Gate | Prerequisite | Status | Current handoff |
 |---|---|---|---|---|
 | 1 | Stopped-state recovery repair | None | Complete | `16cc6fe`; retained runtime and recovery evidence |
-| 2 | Remediated server release candidate | Wave 1 | Reopened | Local commit `e8d2559`; migration `0016`; gate review pending |
+| 2 | Remediated server release candidate | Wave 1 | Complete | `43845d5`; 278 passed, 2 skipped; populated `0015` → `0016` rehearsal; migration/system/Ruff checks |
 | 3 | Signed replacement Android artifact | Wave 2 | Waiting | Must be code 5+ and built from the Wave 2 commit |
 | 5 | Immutable deployment package and plan | Wave 3 | Waiting | Rebind only changed release inputs; reuse verified unchanged assets |
 | 6 | Current launch authorization packet | Wave 5 | Waiting | Refresh expired approvals/window and bind the replacement release |
@@ -331,8 +331,8 @@ it to the replacement release.
 - Defective canary evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-replay-20260830/`.
 
-Current state: Wave 1 is `Complete`; Wave 2 is `Reopened`; Wave 3 and Waves 5–9
-are `Waiting`; Wave 4 is removed by final owner decision; Wave 10 is `Blocked`.
+Current state: Waves 1–2 are `Complete`; Wave 3 and Waves 5–9 are `Waiting`;
+Wave 4 is removed by final owner decision; Wave 10 is `Blocked`.
 Production and the enrolled tablet have not been changed by the local
 remediation. No fleet expansion is recorded.
 
@@ -344,3 +344,4 @@ remediation. No fleet expansion is recorded.
 | 2026-08-31 | Framework | Updated | Canary acceptance changed to one consecutive hour; 24-hour recovery objectives remain unchanged. |
 | 2026-08-31 | Framework | Redesigned | Resolved chronology was condensed and active Waves 2–3 and 5–10 were refocused on the current remediation and replay. |
 | 2026-08-31 | 4 | Removed | Cze Yik made the final decision to remove pre-production physical qualification; Wave 9 now owns the first physical proof. |
+| 2026-08-31 | 2 | Complete | `43845d5`; full server suite and populated migration rehearsal passed; no AWS or Android build/signing action occurred. |
