@@ -356,7 +356,7 @@ resource "aws_iam_role_policy" "ec2_target_media_dispatch" {
       {
         Sid      = "InspectIsolatedMediaTaskCapacity"
         Effect   = "Allow"
-        Action   = ["ecs:ListTasks"]
+        Action   = ["ecs:DescribeTasks", "ecs:ListTasks"]
         Resource = ["*"]
       },
       {

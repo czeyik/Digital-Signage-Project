@@ -887,6 +887,7 @@ resource "aws_iam_role_policy" "web_media_dispatch" {
     Version = "2012-10-17"
     Statement = [
       { Effect = "Allow", Action = ["ecs:RunTask"], Resource = [aws_ecs_task_definition.worker[0].arn] },
+      { Effect = "Allow", Action = ["ecs:DescribeTasks", "ecs:ListTasks"], Resource = ["*"] },
       {
         Effect   = "Allow"
         Action   = ["iam:PassRole"]
@@ -914,6 +915,7 @@ resource "aws_iam_role_policy" "scheduled_media_dispatch" {
     Version = "2012-10-17"
     Statement = [
       { Effect = "Allow", Action = ["ecs:RunTask"], Resource = [aws_ecs_task_definition.worker[0].arn] },
+      { Effect = "Allow", Action = ["ecs:DescribeTasks", "ecs:ListTasks"], Resource = ["*"] },
       {
         Effect   = "Allow"
         Action   = ["iam:PassRole"]
@@ -1058,7 +1060,7 @@ locals {
   scheduled_tasks = local.legacy_ecs_runtime_enabled && local.legacy_ecs_task_definitions_enabled ? {
     fleet-health    = { expression = "rate(1 minute)", command = ["python", "manage.py", "evaluate_device_health"] },
     playlists       = { expression = "rate(6 hours)", command = ["python", "manage.py", "evaluate_playlists"] },
-    media-reconcile = { expression = "rate(15 minutes)", command = ["python", "manage.py", "reconcile_media_processing"] },
+    media-reconcile = { expression = "rate(2 minutes)", command = ["python", "manage.py", "reconcile_media_processing"] },
     retention       = { expression = "cron(30 17 * * ? *)", command = ["python", "manage.py", "apply_retention"] },
     backup          = { expression = "cron(0 18 * * ? *)", command = ["python", "manage.py", "create_postgres_backup", "--output-dir", "/tmp/backups"] }
   } : {}

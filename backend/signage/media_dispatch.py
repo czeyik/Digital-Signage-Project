@@ -88,7 +88,7 @@ def _task_definition_family(task_definition):
     return task_definition.rsplit("/", 1)[-1].split(":", 1)[0]
 
 
-def _active_ecs_task_count(client, ecs):
+def _active_ecs_tasks(client, ecs):
     task_arns = set()
     family = _task_definition_family(ecs["task_definition"])
     # ECS tasks whose last status is PENDING already have desiredStatus=RUNNING.
@@ -105,11 +105,16 @@ def _active_ecs_task_count(client, ecs):
             response = client.list_tasks(**arguments)
             task_arns.update(response.get("taskArns", []))
             if len(task_arns) >= settings.MEDIA_DISPATCH_MAX_CONCURRENT_TASKS:
-                return len(task_arns)
+                return len(task_arns), set()
             next_token = response.get("nextToken")
             if not next_token:
                 break
-    return len(task_arns)
+    if not task_arns:
+        return 0, set()
+    response = client.describe_tasks(cluster=ecs["cluster"], tasks=sorted(task_arns))
+    return len(task_arns), {
+        task["startedBy"] for task in response.get("tasks", []) if task.get("startedBy")
+    }
 
 
 def _lock_hourly_dispatch_budget(now):
@@ -319,7 +324,7 @@ def dispatch_media_processing(asset_id, *, bypass_backoff=False):
             return False
 
         try:
-            active_task_count = _active_ecs_task_count(client, ecs)
+            active_task_count, active_asset_ids = _active_ecs_tasks(client, ecs)
         except ClientError as exc:
             attempt = _reserve_dispatch_attempt(normalized_id, bypass_backoff)
             if attempt is None:
@@ -338,18 +343,21 @@ def dispatch_media_processing(asset_id, *, bypass_backoff=False):
             _handle_dispatch_failure(normalized_id, attempt, "aws_transport_error")
             return False
 
-        recently_dispatched_count = MediaAsset.objects.filter(
-            dispatched_at__gte=now
-            - timedelta(seconds=settings.MEDIA_DISPATCH_STARTUP_GRACE_SECONDS)
-        ).exclude(pk=normalized_id).count()
-        # Sum both signals conservatively. ECS is eventually consistent, so a
-        # recent database reservation may be a different task not yet returned
-        # by ListTasks. Temporary double-counting is safer than exceeding the
-        # pilot's two-task budget cap.
-        if (
-            active_task_count + recently_dispatched_count
-            >= settings.MEDIA_DISPATCH_MAX_CONCURRENT_TASKS
-        ):
+        recently_dispatched_ids = {
+            str(asset_id)
+            for asset_id in MediaAsset.objects.filter(
+                dispatched_at__gte=now
+                - timedelta(seconds=settings.MEDIA_DISPATCH_STARTUP_GRACE_SECONDS)
+            )
+            .exclude(pk=normalized_id)
+            .values_list("id", flat=True)
+        }
+        # Recent reservations cover tasks ECS has not made visible yet. A visible
+        # task with the same startedBy value is the same slot, not a second one.
+        used_capacity = active_task_count + len(
+            recently_dispatched_ids - active_asset_ids
+        )
+        if used_capacity >= settings.MEDIA_DISPATCH_MAX_CONCURRENT_TASKS:
             _record_dispatch_deferred(normalized_id, "concurrency_limit")
             return False
 
@@ -384,6 +392,7 @@ def dispatch_media_processing(asset_id, *, bypass_backoff=False):
             launchType="FARGATE",
             count=1,
             clientToken=f"media-{normalized_id.hex}-{attempt}",
+            startedBy=str(normalized_id),
             enableECSManagedTags=True,
             propagateTags="TASK_DEFINITION",
             networkConfiguration={

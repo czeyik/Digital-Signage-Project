@@ -1,9 +1,9 @@
 [Unit]
-Description=Reconcile isolated DUDU media tasks every 15 minutes
+Description=Reconcile isolated DUDU media tasks every 2 minutes
 
 [Timer]
-OnBootSec=7min
-OnUnitActiveSec=15min
+OnBootSec=2min
+OnUnitActiveSec=2min
 AccuracySec=1min
 Unit=duducar-command@media-reconcile.service
 
