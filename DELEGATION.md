@@ -110,7 +110,7 @@ the decisions above, reconcile it in the wave that owns the affected source.
 | 2 | Remediated server release candidate | Wave 1 | Complete | `43845d5`; 278 passed, 2 skipped; populated `0015` → `0016` rehearsal; migration/system/Ruff checks |
 | 3 | Signed replacement Android artifact | Wave 2 | Complete | `wave-3-remediation-20260831`; 4.1.0/code 5; source `43845d5`; checksum/signature/certificate/build checks passed |
 | 5 | Immutable deployment package and plan | Wave 3 | Complete | `wave-5-remediation-20260831`; code 5 APK, migration `0016`, scanned ARM64 images, maps, cost review, and unapplied refreshed plan are checksum-bound |
-| 6 | Current launch authorization packet | Wave 5 | Waiting | Refresh expired approvals/window and bind the replacement release |
+| 6 | Current launch authorization packet | Wave 5 | Complete | `wave-6-remediation-20260831`; exact package, account, communications, cost, privacy, rollback, UAT media, support, and window are current |
 | 7 | Production upgrade | Wave 6 | Waiting | Deploy backend/migration first; do not enroll or disable a tablet |
 | 8 | Current isolated recovery proof | Wave 7 | Waiting | Prove the upgraded schema and exact release recover within 24 hours |
 | 9 | Focused rehearsal and one-device canary start | Wave 8 | Waiting | Prove all four fixes in production, then start the one-hour clock |
@@ -331,13 +331,15 @@ it to the replacement release.
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-3-remediation-20260831/`.
 - Remediated immutable deployment package and unapplied plan:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-5-remediation-20260831/`.
+- Current remediated launch authorization packet:
+  `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-6-remediation-20260831/`.
 - Prior recovery proof:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-8-recovery-2f2b27eb02698522c37be533d7a7697d/`.
 - Defective canary evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-replay-20260830/`.
 
-Current state: Waves 1–3 and 5 are `Complete`; Waves 6–9 are `Waiting`; Wave 4
-is removed by final owner decision; Wave 10 is `Blocked`.
+Current state: Waves 1–3 and 5–6 are `Complete`; Waves 7–9 are `Waiting`; Wave
+4 is removed by final owner decision; Wave 10 is `Blocked`.
 The production stack and enrolled tablet have not been changed by the
 remediation replay. The new backend image is staged in ECR and the reviewed
 plan remains unapplied. No fleet expansion is recorded.
@@ -353,3 +355,4 @@ plan remains unapplied. No fleet expansion is recorded.
 | 2026-08-31 | 2 | Complete | `43845d5`; full server suite and populated migration rehearsal passed; no AWS or Android build/signing action occurred. |
 | 2026-08-31 | 3 | Complete | `wave-3-remediation-20260831`; signed 4.1.0/code-5 APK from `43845d5` passed build, lint, checksum, payload reproduction, and certificate-continuity checks. |
 | 2026-08-31 | 5 | Complete | `wave-5-remediation-20260831`; rebuilt backend and retained base images passed ARM64/runtime/scan checks; exact code-5 APK, migration `0016`, maps, costs, and refreshed unapplied plan were checksum-bound. |
+| 2026-08-31 | 6 | Complete | `wave-6-remediation-20260831`; current account, production, DNS/TLS, communications, budget, privacy, support, rollback, four-format UAT media, and the 2026-08-31 14:00 through 2026-09-01 23:59 MYT window were bound to the Wave 5 package. |
