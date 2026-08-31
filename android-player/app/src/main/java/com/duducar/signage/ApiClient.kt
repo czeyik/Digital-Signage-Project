@@ -58,6 +58,7 @@ class ApiClient(private val credentials: CredentialStore) {
         if (!credentials.saveEnrollmentCredentials(
                 refreshToken = response.getString("refresh_token"),
                 kioskPinVerifier = response.getString("kiosk_pin_verifier"),
+                managementToken = response.getString("management_token"),
             )
         ) {
             throw CredentialPersistenceException()
@@ -91,6 +92,43 @@ class ApiClient(private val credentials: CredentialStore) {
 
     fun uploadOperationalEvent(body: JSONObject): JSONObject =
         authenticatedRequest("devices/operational-events/", "POST", body)
+
+    fun bootstrapManagement(): Boolean {
+        if (credentials.hasManagementToken()) return true
+        val response = authenticatedRequest("devices/management/bootstrap/", "POST")
+        return credentials.saveManagementToken(response.getString("management_token"))
+    }
+
+    fun managementCommand(): JSONObject? {
+        val token = credentials.managementToken() ?: return null
+        return try {
+            request(
+                "devices/management/commands/",
+                "GET",
+                authenticated = false,
+                authorizationToken = token,
+            ).optJSONObject("command")
+        } catch (_: UnauthorizedException) {
+            credentials.clearManagementToken()
+            null
+        }
+    }
+
+    fun acknowledgeManagementCommand(commandId: String): Boolean {
+        val token = credentials.managementToken() ?: return false
+        return try {
+            request(
+                "devices/management/commands/",
+                "POST",
+                JSONObject().put("command_id", commandId),
+                authenticated = false,
+                authorizationToken = token,
+            ).getBoolean("acknowledged")
+        } catch (_: UnauthorizedException) {
+            credentials.clearManagementToken()
+            false
+        }
+    }
 
     private fun authenticatedRequest(
         path: String,
@@ -137,6 +175,7 @@ class ApiClient(private val credentials: CredentialStore) {
         body: JSONObject? = null,
         authenticated: Boolean,
         compressBody: Boolean = false,
+        authorizationToken: String? = null,
     ): JSONObject {
         val connection = URL(BuildConfig.API_BASE_URL + path).openConnection() as HttpURLConnection
         connection.requestMethod = method
@@ -144,7 +183,8 @@ class ApiClient(private val credentials: CredentialStore) {
         connection.readTimeout = 30_000
         connection.setRequestProperty("Accept", "application/json")
         connection.setRequestProperty("Content-Type", PlaybackBatchTransport.CONTENT_TYPE)
-        if (authenticated) connection.setRequestProperty("Authorization", "Bearer $accessToken")
+        val bearer = authorizationToken ?: accessToken.takeIf { authenticated }
+        if (bearer != null) connection.setRequestProperty("Authorization", "Bearer $bearer")
         if (body != null) {
             connection.doOutput = true
             val payload = if (compressBody) {

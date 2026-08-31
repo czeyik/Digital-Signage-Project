@@ -1,3 +1,4 @@
+import hashlib
 import subprocess
 from io import BytesIO
 from pathlib import Path
@@ -14,6 +15,7 @@ from signage.services import (
     run_ffprobe,
     sniff_image_mime,
     sniff_video_mime,
+    validate_ready_media_delivery,
 )
 
 
@@ -248,6 +250,37 @@ def test_jpeg_is_fully_decoded_and_reencoded_as_bounded_jpeg(tmp_path, settings)
         assert normalized.format == "JPEG"
         assert normalized.mode == "RGB"
         assert normalized.size == (1920, 1080)
+
+
+@pytest.mark.django_db
+def test_ready_image_delivery_rejects_wave_9_oversized_dimensions(tmp_path, settings):
+    settings.MEDIA_ROOT = tmp_path
+    user = User.objects.create_user(
+        "delivered-image@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    image = Image.new("RGB", (2842, 1396), color="white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    asset = MediaAsset.objects.create(
+        business_name="DUDU",
+        title="Oversized delivery",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=ContentFile(payload, name="source.png"),
+        normalized_file=ContentFile(payload, name="delivered.png"),
+        sha256=hashlib.sha256(payload).hexdigest(),
+        file_size=len(payload),
+        mime_type="image/png",
+        width=1920,
+        height=1080,
+        uploaded_by=user,
+    )
+
+    with pytest.raises(ValidationError, match="dimensions are invalid"):
+        validate_ready_media_delivery(asset)
 
 
 def test_ffprobe_has_a_bounded_timeout(tmp_path, settings, monkeypatch):

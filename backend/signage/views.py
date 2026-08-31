@@ -43,6 +43,7 @@ from .models import (
     Alert,
     AuditEvent,
     Device,
+    DeviceCommand,
     DeviceLocationPoint,
     EnrollmentCode,
     LoginThrottle,
@@ -958,8 +959,8 @@ def device_disable(request, device_id):
     disable_device(device, request.user)
     messages.success(
         request,
-        "Device disabled and all credentials revoked. Reactivate and re-enroll it "
-        "only after owner review.",
+        "Playback disabled and playback credentials revoked. The management "
+        "channel remains available for Admin mode.",
     )
     return redirect("device-list")
 
@@ -977,15 +978,42 @@ def device_reactivate(request, device_id):
 @login_required
 @require_POST
 @transaction.atomic
+def device_admin_mode(request, device_id):
+    require_owner(request)
+    device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
+    now = timezone.now()
+    existing = DeviceCommand.objects.filter(
+        device=device,
+        kind=DeviceCommand.Kind.ADMIN_MODE,
+        acknowledged_at__isnull=True,
+        expires_at__gt=now,
+    ).first()
+    if existing is None:
+        command = DeviceCommand.objects.create(
+            device=device,
+            kind=DeviceCommand.Kind.ADMIN_MODE,
+            requested_by=request.user,
+            expires_at=now + timedelta(minutes=10),
+        )
+        audit(request.user, "device.admin_mode.request", command)
+        messages.success(request, "Admin mode requested for the next device check-in.")
+    else:
+        messages.info(request, "An Admin mode request is already pending.")
+    return redirect("device-list")
+
+
+@login_required
+@require_POST
+@transaction.atomic
 def device_credentials_revoke(request, device_id):
     require_owner(request)
     device = get_object_or_404(Device.objects.select_for_update(), pk=device_id)
     _, credential_count = revoke_device_credentials(device, request.user)
     messages.success(
         request,
-        f"Revoked {credential_count} active device credential(s) and expired any "
-        "unused enrollment code. Re-enrollment is required before this player can "
-        "reconnect.",
+        f"Revoked {credential_count} active playback credential(s), revoked the "
+        "management credential, and expired any unused enrollment code. "
+        "Re-enrollment is required before this player can reconnect.",
     )
     return redirect("device-list")
 

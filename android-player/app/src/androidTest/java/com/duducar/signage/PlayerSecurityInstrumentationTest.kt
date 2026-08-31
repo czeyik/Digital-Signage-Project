@@ -21,6 +21,27 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class PlayerSecurityInstrumentationTest {
     @Test
+    fun testManagementCredentialSurvivesPlaybackCredentialClear() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val credentials = CredentialStore(context)
+        credentials.clearEnrollment()
+        credentials.clearManagementToken()
+
+        assertTrue(
+            credentials.saveEnrollmentCredentials(
+                refreshToken = "playback-secret",
+                kioskPinVerifier = "pin-verifier",
+                managementToken = "management-secret",
+            ),
+        )
+        credentials.clearEnrollment()
+
+        assertFalse(credentials.hasRefreshToken())
+        assertEquals("management-secret", credentials.managementToken())
+        credentials.clearManagementToken()
+    }
+
+    @Test
     @Suppress("DEPRECATION")
     fun testMergedApplicationDisablesBackup() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

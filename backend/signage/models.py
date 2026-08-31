@@ -799,6 +799,46 @@ class DeviceCredential(TimeStampedModel):
         return credential, raw
 
 
+class DeviceManagementCredential(TimeStampedModel):
+    device = models.OneToOneField(
+        Device, on_delete=models.CASCADE, related_name="management_credential"
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+
+    @classmethod
+    def issue(cls, device):
+        raw = secrets.token_urlsafe(48)
+        cls.objects.update_or_create(
+            device=device,
+            defaults={"token_hash": token_hash(raw)},
+        )
+        return raw
+
+
+class DeviceCommand(TimeStampedModel):
+    class Kind(models.TextChoices):
+        ADMIN_MODE = "admin_mode", "Admin mode"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    device = models.ForeignKey(
+        Device, on_delete=models.CASCADE, related_name="commands"
+    )
+    kind = models.CharField(max_length=32, choices=Kind)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    expires_at = models.DateTimeField()
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(
+                fields=["device", "acknowledged_at", "expires_at"],
+                name="signage_cmd_pending_idx",
+            )
+        ]
+
+
 class DeviceAccessToken(models.Model):
     credential = models.ForeignKey(
         DeviceCredential, on_delete=models.CASCADE, related_name="access_tokens"

@@ -526,6 +526,7 @@ def test_valid_gzip_playback_batch_is_idempotent(client, provisioned_device):
         "app_restart_or_unexpected_exit",
         "credential_rejected",
         "server_forbidden",
+        "scheduled_playlist_replacement",
     ],
 )
 def test_playback_batch_accepts_a_known_interruption_category(

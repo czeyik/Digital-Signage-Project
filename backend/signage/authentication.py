@@ -1,7 +1,12 @@
 from django.utils import timezone
 from rest_framework import authentication, exceptions
 
-from .models import Device, DeviceAccessToken, token_hash
+from .models import (
+    Device,
+    DeviceAccessToken,
+    DeviceManagementCredential,
+    token_hash,
+)
 
 
 class DevicePrincipal:
@@ -54,3 +59,24 @@ class DeviceAccessTokenAuthentication(authentication.BaseAuthentication):
         if access.credential.revoked_at:
             raise exceptions.AuthenticationFailed("Invalid or expired device token.")
         return DevicePrincipal(access.credential.device), access
+
+
+class DeviceManagementTokenAuthentication(authentication.BaseAuthentication):
+    keyword = "Bearer"
+
+    def authenticate_header(self, request):
+        return self.keyword
+
+    def authenticate(self, request):
+        authorization = request.headers.get("Authorization", "")
+        parts = authorization.split()
+        if len(parts) != 2 or parts[0] != self.keyword:
+            raise exceptions.AuthenticationFailed("Invalid management authorization.")
+        credential = (
+            DeviceManagementCredential.objects.select_related("device")
+            .filter(token_hash=token_hash(parts[1]))
+            .first()
+        )
+        if credential is None:
+            raise exceptions.AuthenticationFailed("Invalid management credential.")
+        return DevicePrincipal(credential.device), credential

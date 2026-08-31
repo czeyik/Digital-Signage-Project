@@ -11,7 +11,11 @@ from django.urls import reverse
 from django.utils import timezone
 
 from signage.models import MediaAsset, MediaDeletion, Playlist, PlaylistItem, User
-from signage.services import delete_media_binary, publish_playlist
+from signage.services import (
+    delete_media_binary,
+    next_playlist_transition_at,
+    publish_playlist,
+)
 
 TEST_STATICFILES_STORAGES = {
     "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
@@ -19,6 +23,16 @@ TEST_STATICFILES_STORAGES = {
         "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage"
     },
 }
+
+
+@pytest.fixture(autouse=True)
+def ready_media_delivery_is_valid(monkeypatch):
+    """Scheduling tests use intentionally minimal ready-media records."""
+
+    monkeypatch.setattr(
+        "signage.services.validate_ready_media_delivery",
+        lambda asset: None,
+    )
 
 
 def next_monday_noon():
@@ -39,6 +53,27 @@ def current_playlist_window_start():
     if now < start:
         start -= timedelta(days=7)
     return start
+
+
+@pytest.mark.django_db
+def test_next_playlist_transition_exposes_the_scheduled_boundary():
+    owner = User.objects.create_user(
+        "transition-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    starts_at = next_monday_noon()
+    Playlist.objects.create(
+        name="Next scheduled week",
+        version=1,
+        status=Playlist.Status.PUBLISHED,
+        published_at=timezone.now(),
+        starts_at=starts_at,
+        ends_at=starts_at + timedelta(days=7),
+        created_by=owner,
+    )
+
+    assert next_playlist_transition_at() == starts_at
 
 
 @pytest.mark.django_db

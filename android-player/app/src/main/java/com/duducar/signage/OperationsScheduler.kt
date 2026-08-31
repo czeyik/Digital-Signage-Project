@@ -19,9 +19,40 @@ class OperationsScheduler(context: Context) {
 
     fun scheduleSync() = schedule(ACTION_SYNC, SYNC_INTERVAL_MS)
 
+    fun scheduleManagement() = schedule(ACTION_MANAGEMENT, MANAGEMENT_INTERVAL_MS)
+
+    fun schedulePlaylistTransition(delayMs: Long): Boolean = try {
+        alarmManager.setExactAndAllowWhileIdle(
+            AlarmManager.ELAPSED_REALTIME_WAKEUP,
+            SystemClock.elapsedRealtime() + delayMs.coerceAtLeast(0),
+            pendingIntent(ACTION_PLAYLIST_TRANSITION, PLAYLIST_TRANSITION_REQUEST_CODE),
+        )
+        true
+    } catch (_: SecurityException) {
+        false
+    }
+
     fun cancel() {
+        cancelPlayback()
+        cancelManagement()
+    }
+
+    fun cancelPlayback() {
         alarmManager.cancel(pendingIntent(ACTION_HEARTBEAT, HEARTBEAT_REQUEST_CODE))
         alarmManager.cancel(pendingIntent(ACTION_SYNC, SYNC_REQUEST_CODE))
+        alarmManager.cancel(
+            pendingIntent(ACTION_PLAYLIST_TRANSITION, PLAYLIST_TRANSITION_REQUEST_CODE),
+        )
+    }
+
+    fun cancelManagement() {
+        alarmManager.cancel(pendingIntent(ACTION_MANAGEMENT, MANAGEMENT_REQUEST_CODE))
+    }
+
+    fun cancelPlaylistTransition() {
+        alarmManager.cancel(
+            pendingIntent(ACTION_PLAYLIST_TRANSITION, PLAYLIST_TRANSITION_REQUEST_CODE),
+        )
     }
 
     private fun schedule(action: String, delayMs: Long) {
@@ -30,7 +61,11 @@ class OperationsScheduler(context: Context) {
             SystemClock.elapsedRealtime() + delayMs,
             pendingIntent(
                 action,
-                if (action == ACTION_HEARTBEAT) HEARTBEAT_REQUEST_CODE else SYNC_REQUEST_CODE,
+                when (action) {
+                    ACTION_HEARTBEAT -> HEARTBEAT_REQUEST_CODE
+                    ACTION_SYNC -> SYNC_REQUEST_CODE
+                    else -> MANAGEMENT_REQUEST_CODE
+                },
             ),
         )
     }
@@ -47,9 +82,15 @@ class OperationsScheduler(context: Context) {
     companion object {
         const val ACTION_HEARTBEAT = "com.duducar.signage.action.PERIODIC_HEARTBEAT"
         const val ACTION_SYNC = "com.duducar.signage.action.PERIODIC_SYNC"
+        const val ACTION_MANAGEMENT = "com.duducar.signage.action.PERIODIC_MANAGEMENT"
+        const val ACTION_PLAYLIST_TRANSITION =
+            "com.duducar.signage.action.PLAYLIST_TRANSITION"
         const val HEARTBEAT_INTERVAL_MS = 30L * 60 * 1000
         const val SYNC_INTERVAL_MS = 60L * 60 * 1000
+        const val MANAGEMENT_INTERVAL_MS = 60L * 1000
         private const val HEARTBEAT_REQUEST_CODE = 7105
         private const val SYNC_REQUEST_CODE = 7106
+        private const val MANAGEMENT_REQUEST_CODE = 7107
+        private const val PLAYLIST_TRANSITION_REQUEST_CODE = 7108
     }
 }

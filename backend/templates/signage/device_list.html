@@ -26,6 +26,7 @@
           <form method="post" action="{% url 'device-pin-reset' device.id %}">{% csrf_token %}<button>Reset kiosk PIN</button></form>
           <form method="post" action="{% url 'issue-enrollment' device.id %}">{% csrf_token %}<button>Generate one-time code</button></form>
           <form method="post" action="{% url 'device-credentials-revoke' device.id %}">{% csrf_token %}<button>Revoke credentials</button></form>
+          <form method="post" action="{% url 'device-admin-mode' device.id %}">{% csrf_token %}<button>Admin mode</button></form>
           {% endif %}
           {% if user.is_owner and device.status == "disabled" %}
           <form method="post" action="{% url 'device-reactivate' device.id %}">{% csrf_token %}<button>Reactivate</button></form>
