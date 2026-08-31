@@ -10,8 +10,8 @@ evidence remains in its recorded vault locations and is not duplicated here.
 
 ## Execution rules
 
-1. Execute one wave at a time in numeric order. Do not start a wave until every
-   prerequisite is `Complete`.
+1. Execute one listed wave at a time in numeric order. Do not start a wave until
+   every prerequisite is `Complete`.
 2. Start each wave by reading `AGENTS.md`, this file, and only the sources named
    by that wave. Revalidate repository and live facts; historical evidence is
    not standing authorization.
@@ -57,15 +57,18 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
   additional quantitative canary thresholds.
 - `approved_for_pilot` and fleet expansion are separate, explicit Cze Yik
   decisions. Tests and operators must not infer either decision.
+- Wave 4 and its pre-production physical qualification gate are removed by
+  final owner decision. The first physical proof of the replacement APK and the
+  four remediated behaviors occurs in the Wave 9 production rehearsal.
 - Any expired production or canary window must be replaced before a live
   mutation. Old plans, SSM commands, recovery operations, approvals, and health
   results are audit history and must never be resumed.
 
 ## Planning baseline — revalidate before relying on it
 
-- The repository is on local `main` at `0061988` with the remediation and this
-  handoff still uncommitted. Wave 2 owns review and creation of the replacement
-  release commit.
+- The remediation is committed on local `main` at `e8d2559`. Wave 2 must review
+  that commit and either accept it as the release candidate or create a focused
+  follow-up commit; it has not been pushed or cleared as a release.
 - Wave 1's stopped-state recovery repair remains accepted at `16cc6fe`; it is
   not affected by the current remediation and does not need replay.
 - The last recorded production/canary release was `8087380`, Android code 4,
@@ -82,8 +85,8 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
 - Local verification currently records 278 backend tests passed, 2 skipped;
   Django migration/system checks and Ruff passed; Android development unit
   tests, instrumentation compilation, and lint passed.
-- The remediation has not been committed as a release, production has not been
-  upgraded, no replacement APK has been signed, and no new canary has started.
+- Production has not been upgraded, no replacement APK has been signed, and no
+  new canary has started.
 - Existing code 4 devices do not have a management credential until the new app
   enrolls or bootstraps one while its playback credential is still valid. A
   never-enrolled installation has no dashboard device association and cannot be
@@ -103,10 +106,9 @@ the decisions above, reconcile it in the wave that owns the affected source.
 | Wave | Gate | Prerequisite | Status | Current handoff |
 |---|---|---|---|---|
 | 1 | Stopped-state recovery repair | None | Complete | `16cc6fe`; retained runtime and recovery evidence |
-| 2 | Remediated server release candidate | Wave 1 | Reopened | Uncommitted local remediation; migration `0016`; local checks pass |
+| 2 | Remediated server release candidate | Wave 1 | Reopened | Local commit `e8d2559`; migration `0016`; gate review pending |
 | 3 | Signed replacement Android artifact | Wave 2 | Waiting | Must be code 5+ and built from the Wave 2 commit |
-| 4 | Changed-surface hardware qualification | Wave 3 | Waiting | Requalify the exact replacement artifact and four remediated behaviors |
-| 5 | Immutable deployment package and plan | Wave 4 | Waiting | Rebind only changed release inputs; reuse verified unchanged assets |
+| 5 | Immutable deployment package and plan | Wave 3 | Waiting | Rebind only changed release inputs; reuse verified unchanged assets |
 | 6 | Current launch authorization packet | Wave 5 | Waiting | Refresh expired approvals/window and bind the replacement release |
 | 7 | Production upgrade | Wave 6 | Waiting | Deploy backend/migration first; do not enroll or disable a tablet |
 | 8 | Current isolated recovery proof | Wave 7 | Waiting | Prove the upgraded schema and exact release recover within 24 hours |
@@ -165,32 +167,6 @@ install on production hardware or touch AWS.
 **Complete when:** the signed APK, mapping, checksums, certificate verification,
 and reproducible manifest are independently verifiable in the approved vault.
 
-## Wave 4 — Qualify the remediated device behavior
-
-**Goal:** Qualify the exact code 5+ artifact on the selected canary hardware and
-prove the four Wave 9 fixes without touching production.
-
-**Read:** `docs/hardware-qualification.md`, `docs/device-api.md`, the Android
-verification/signing documents, and the Wave 3 manifest.
-
-**Intake:** Obtain physical/ADB access to the selected canary tablet and any
-devices intended for immediate expansion, the test display/network, a safe
-non-production API endpoint, Play Integrity access, the evidence destination,
-and Cze Yik's availability for the separate qualification decision.
-
-**Work:** Revalidate exact model, firmware, security patch, Device Owner,
-integrity, kiosk lock, GPS, and release identity. Then prove: a scheduled
-playlist replaces at its server boundary; bounded JPG, JPEG, PNG, and MP4 each
-play; disabling playback leaves remote Admin mode reachable from enrollment and
-the enrollment button works again after reactivation; remote Admin mode works
-from playback, fallback, maintenance, and enrollment; only Admin mode exposes
-Exit DUDU and Prepare for shutdown. Reuse still-current prior hardware evidence
-for unaffected checks instead of repeating waived or unrelated exercises.
-
-**Complete when:** the changed surface passes on the exact signed artifact,
-evidence identifies the exact device/build, and Cze Yik records a separate
-`approved_for_pilot` decision. Do not enroll a production device.
-
 ## Wave 5 — Prepare the immutable upgrade package
 
 **Goal:** Produce a pinned, scanned, costed upgrade package and fresh reviewed
@@ -222,7 +198,7 @@ checksum-bound, reviewed, current, non-destructive, and within budget.
 and maintenance-window authorization to the replacement release.
 
 **Read:** the runbook's pre-change and rehearsal sections,
-`docs/aws-cost-estimate.md`, and the Wave 4 and Wave 5 handoffs.
+`docs/aws-cost-estimate.md`, and the Wave 3 and Wave 5 handoffs.
 
 **Intake:** Obtain current account/contact status, owner and marketing access,
 approved remediation-test media and rights, secure driver/vehicle assignment,
@@ -232,8 +208,8 @@ support availability, rollback authority, and a new production/canary window.
 content, roster, and support evidence. Repeat an external exercise only when its
 fact expired, changed, or is required by the replacement release. Prepare a
 focused UAT script for the four remediated behaviors and record Cze Yik's
-distinct release, cost, privacy, hardware, rollback, and change-window
-decisions. Do not deploy or enroll.
+distinct release, cost, privacy, rollback, and change-window decisions. Do not
+deploy or enroll.
 
 **Complete when:** the current launch packet binds the exact Wave 5 package,
 all changed or expired prerequisites are green, and the production window and
@@ -294,11 +270,10 @@ remains.
 tablet and establish the timestamped start of the one-hour canary.
 
 **Read:** the runbook's hardware/rehearsal/canary sections,
-`docs/deployment-readiness.md`, `docs/hardware-qualification.md`, and the Wave
-3–8 handoffs.
+`docs/deployment-readiness.md` and the Wave 3 and Wave 5–8 handoffs.
 
 **Intake:** Obtain production owner/marketing access, approved UAT media,
-selected qualified tablet and APK, secure assignment data, physical/ADB access,
+selected tablet and APK, secure assignment data, physical/ADB access,
 support coverage, external `approved_for_pilot` availability, exact enrollment
 window, and evidence destination.
 
@@ -307,10 +282,9 @@ processing, backups, alerts, budget, maps, and GPS without repeating unrelated
 historical failure drills. Manually install the exact APK. If retained playback
 credentials are valid, bootstrap management; otherwise reactivate and enroll
 the upgraded app so enrollment issues both credentials. Confirm the management
-credential before disabling playback. Enroll exactly one device and run the
-Wave 4 four-fix script using a playlist containing JPG, JPEG, PNG, and MP4.
-Prove scheduled activation, playback, disablement, remote Admin mode from every
-required state, Exit DUDU,
+credential before disabling playback. Enroll exactly one device and use a
+playlist containing JPG, JPEG, PNG, and MP4. Prove scheduled activation,
+playback, disablement, remote Admin mode from every required state, Exit DUDU,
 admin-only shutdown, reactivation, and re-enrollment. Confirm telemetry/evidence
 and OTA-disabled state. Resolve every defect before recording a new MYT canary
 start and baseline.
@@ -322,25 +296,25 @@ the uninterrupted one-hour interval has an explicit MYT start timestamp.
 ## Wave 10 — Accept the canary and expand the fleet
 
 **Goal:** Prove one consecutive hour of smooth one-device production, obtain
-Cze Yik's separate expansion approval, and launch qualified devices one at a
+Cze Yik's separate expansion approval, and launch owner-approved devices one at a
 time without exceeding the 10-vehicle pilot scope.
 
 **Read:** the Wave 9 baseline, current release manifest, production runbook
 decision rules, and current dashboard/alert evidence.
 
 **Intake:** Obtain monitoring/log access, checkpoint/support schedule, physical
-access to the canary, secure assignments and current qualification evidence for
-remaining devices, and Cze Yik's availability for the post-canary decision.
+access to the canary, secure assignments and device inventory for the remaining
+pilot devices, and Cze Yik's availability for the post-canary decision.
 
 **Work:** Record availability, heartbeat, scheduled sync, all media types,
 proof, GPS/map, alerts, backups, worker health, and cost through the hour. An
 interruption restarts the hour; a source, artifact, hardware, or infrastructure
 change reopens its owning wave. After the hour, obtain explicit expansion
-approval. Install, integrity-check, approve, enroll, and smoke-test only devices
-with current qualification evidence, one at a time. Keep OTA disabled.
+approval. Install, integrity-check, approve, enroll, and smoke-test each device
+one at a time. Keep OTA disabled.
 
 **Complete when:** evidence proves one smooth hour, Cze Yik approves expansion,
-every launched device is qualified and healthy, fleet count is at most 10, and
+every launched device is owner-approved and healthy, fleet count is at most 10, and
 the pilot/support handoff is recorded.
 
 ## Retained evidence and status log
@@ -352,21 +326,21 @@ it to the replacement release.
 - Stopped-state recovery repair: commit `16cc6fe`.
 - Prior release/activation package:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-5-release-replay-20260829-r2/`.
-- Prior hardware qualification:
-  `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-4-requalification-20260829/`.
 - Prior recovery proof:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-8-recovery-2f2b27eb02698522c37be533d7a7697d/`.
 - Defective canary evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-replay-20260830/`.
 
-Current state: Wave 1 is `Complete`; Wave 2 is `Reopened`; Waves 3–9 are
-`Waiting`; Wave 10 is `Blocked`. Production and the enrolled tablet have not
-been changed by the local remediation. No fleet expansion is recorded.
+Current state: Wave 1 is `Complete`; Wave 2 is `Reopened`; Wave 3 and Waves 5–9
+are `Waiting`; Wave 4 is removed by final owner decision; Wave 10 is `Blocked`.
+Production and the enrolled tablet have not been changed by the local
+remediation. No fleet expansion is recorded.
 
 | Timestamp (MYT) | Wave(s) | Status | Summary |
 |---|---|---|---|
 | 2026-08-29 | 1, 7, 8 | Complete | Recovery repair, production activation, and isolated recovery passed for the prior release. |
 | 2026-08-30 05:45:56.939 | 9 | Complete, later invalidated | One code 4 Lenovo began the prior canary; the interval later exposed four acceptance defects. |
-| 2026-08-31 13:07 | 2–10 | Reopened / Waiting / Blocked | Local source remediation passed backend and Android checks; production, signing, deployment, physical proof, and a new canary remain pending. |
+| 2026-08-31 13:07 | 2–3, 5–10 | Reopened / Waiting / Blocked | Local source remediation passed backend and Android checks; production, signing, deployment, physical proof, and a new canary remain pending. |
 | 2026-08-31 | Framework | Updated | Canary acceptance changed to one consecutive hour; 24-hour recovery objectives remain unchanged. |
-| 2026-08-31 | Framework | Redesigned | Resolved chronology was condensed and Waves 2–10 were refocused on the current remediation and replay. |
+| 2026-08-31 | Framework | Redesigned | Resolved chronology was condensed and active Waves 2–3 and 5–10 were refocused on the current remediation and replay. |
+| 2026-08-31 | 4 | Removed | Cze Yik made the final decision to remove pre-production physical qualification; Wave 9 now owns the first physical proof. |
