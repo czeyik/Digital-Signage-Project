@@ -85,8 +85,9 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
 - Local verification currently records 278 backend tests passed, 2 skipped;
   Django migration/system checks and Ruff passed; Android development unit
   tests, instrumentation compilation, and lint passed.
-- Production has not been upgraded, no replacement APK has been signed, and no
-  new canary has started.
+- The replacement 4.1.0/code-5 APK is signed and retained under
+  `wave-3-remediation-20260831`; production has not been upgraded and no new
+  canary has started.
 - Existing code 4 devices do not have a management credential until the new app
   enrolls or bootstraps one while its playback credential is still valid. A
   never-enrolled installation has no dashboard device association and cannot be
@@ -107,7 +108,7 @@ the decisions above, reconcile it in the wave that owns the affected source.
 |---|---|---|---|---|
 | 1 | Stopped-state recovery repair | None | Complete | `16cc6fe`; retained runtime and recovery evidence |
 | 2 | Remediated server release candidate | Wave 1 | Complete | `43845d5`; 278 passed, 2 skipped; populated `0015` → `0016` rehearsal; migration/system/Ruff checks |
-| 3 | Signed replacement Android artifact | Wave 2 | Waiting | Must be code 5+ and built from the Wave 2 commit |
+| 3 | Signed replacement Android artifact | Wave 2 | Complete | `wave-3-remediation-20260831`; 4.1.0/code 5; source `43845d5`; checksum/signature/certificate/build checks passed |
 | 5 | Immutable deployment package and plan | Wave 3 | Waiting | Rebind only changed release inputs; reuse verified unchanged assets |
 | 6 | Current launch authorization packet | Wave 5 | Waiting | Refresh expired approvals/window and bind the replacement release |
 | 7 | Production upgrade | Wave 6 | Waiting | Deploy backend/migration first; do not enroll or disable a tablet |
@@ -326,13 +327,15 @@ it to the replacement release.
 - Stopped-state recovery repair: commit `16cc6fe`.
 - Prior release/activation package:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-5-release-replay-20260829-r2/`.
+- Replacement signed Android release:
+  `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-3-remediation-20260831/`.
 - Prior recovery proof:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-8-recovery-2f2b27eb02698522c37be533d7a7697d/`.
 - Defective canary evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-replay-20260830/`.
 
-Current state: Waves 1–2 are `Complete`; Wave 3 and Waves 5–9 are `Waiting`;
-Wave 4 is removed by final owner decision; Wave 10 is `Blocked`.
+Current state: Waves 1–3 are `Complete`; Waves 5–9 are `Waiting`; Wave 4 is
+removed by final owner decision; Wave 10 is `Blocked`.
 Production and the enrolled tablet have not been changed by the local
 remediation. No fleet expansion is recorded.
 
@@ -345,3 +348,4 @@ remediation. No fleet expansion is recorded.
 | 2026-08-31 | Framework | Redesigned | Resolved chronology was condensed and active Waves 2–3 and 5–10 were refocused on the current remediation and replay. |
 | 2026-08-31 | 4 | Removed | Cze Yik made the final decision to remove pre-production physical qualification; Wave 9 now owns the first physical proof. |
 | 2026-08-31 | 2 | Complete | `43845d5`; full server suite and populated migration rehearsal passed; no AWS or Android build/signing action occurred. |
+| 2026-08-31 | 3 | Complete | `wave-3-remediation-20260831`; signed 4.1.0/code-5 APK from `43845d5` passed build, lint, checksum, payload reproduction, and certificate-continuity checks. |
