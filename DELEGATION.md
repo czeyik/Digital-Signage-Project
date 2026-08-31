@@ -39,11 +39,15 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
   higher**.
 - The first installation of the replacement APK is manual. All OTA release
   fields remain disabled unless Cze Yik authorizes a separate OTA release.
-- A scheduled playlist must synchronize at its server-defined boundary and
-  replace the prior playlist only after complete atomic download and validation.
+- A scheduled playlist may use any start and end time where end is after start.
+  Overlapping normal schedules are allowed; the latest start wins, then the
+  latest publication and stable ID. Devices must synchronize at exact start and
+  end boundaries and replace content only after complete atomic download and
+  validation.
 - Supported production media are JPG/JPEG, PNG, and MP4. The stored delivery
   object, not merely its processing precursor, must satisfy the declared hash,
-  size, type, decode, and player-dimension limits before publication.
+  size, type, decode, and player-dimension limits before publication. Images
+  display for 15 seconds; videos retain their measured duration up to 15 seconds.
 - **Disable playback** revokes playback credentials only. The device-specific
   management credential survives so the dashboard can request Admin mode from
   enrollment. The explicit **Revoke credentials** action revokes both channels.
@@ -66,9 +70,9 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
 
 ## Planning baseline — revalidate before relying on it
 
-- The remediated server candidate originated at `43845d5` and is active in
-  production as backend digest `sha256:7894…f24a`, with migration `0016`
-  applied. Local `main` and its Wave 2–8 status commits have not been pushed.
+- Production currently runs backend digest `sha256:b1bf…e024` from the media
+  queue remediation, with migration `0016` applied. Local `main` and its status
+  and remediation commits have not been pushed.
 - Wave 1's stopped-state recovery repair remains accepted at `16cc6fe`; it is
   not affected by the current remediation and does not need replay.
 - The last recorded production/canary release was `8087380`, Android code 4,
@@ -78,16 +82,17 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
 - The Wave 9 report says playback was disabled and re-enrollment then failed.
   Do not assume the tablet's current status or credential state; read both from
   production and the physical device at the owning wave.
-- The local worktree contains the minimum remediation for all four observations:
-  exact scheduled sync, stored JPG/JPEG/PNG validation, reusable enrollment UI,
-  and remote Admin mode backed by a management credential that survives
-  playback disablement. Django migration `0016_device_management` is included.
-- Local verification currently records 278 backend tests passed, 2 skipped;
-  Django migration/system checks and Ruff passed; Android development unit
-  tests, instrumentation compilation, and lint passed.
-- The replacement 4.1.0/code-5 APK is signed and retained under
-  `wave-3-remediation-20260831`. The compatible backend is active, but the APK
-  has not been installed and no new canary has started.
+- Commit `4e314b6` is the next coordinated candidate: Resume DUDU immediately
+  ends the authorizing Admin-mode session, playlists accept arbitrary and
+  overlapping schedules with exact start/end transitions, and migration `0017`
+  changes existing and new image playback from 10 to 15 seconds.
+- Local verification currently records 283 backend tests passed with 2
+  skipped; Django migration/system checks and Ruff passed; Android development
+  unit tests, instrumentation compilation, assembly, and lint passed.
+- The tablet currently runs signed 4.1.0/code 6 from
+  `wave-3-exit-remediation-20260901`, source `b08150a`. The `4e314b6` candidate
+  requires a new code 7 artifact and compatible backend deployment; neither has
+  been produced or deployed yet.
 - Existing code 4 devices do not have a management credential until the new app
   enrolls or bootstraps one while its playback credential is still valid. A
   never-enrolled installation has no dashboard device association and cannot be
@@ -113,7 +118,7 @@ the decisions above, reconcile it in the wave that owns the affected source.
 | 6 | Current launch authorization packet | Wave 5 | Complete | `wave-6-remediation-20260831`; exact package, account, communications, cost, privacy, rollback, UAT media, support, and window are current |
 | 7 | Production upgrade | Wave 6 | Complete | Operation `3a1ab36fe4848b6bb1e1f7e6ec1d56d8`; exact backend active, migration `0016` applied, readiness/backups/OTA-disablement verified, no tablet action |
 | 8 | Current isolated recovery proof | Wave 7 | Complete | Operation `f13686cb03cbad501abbb9d9270ba1f2`; DLM and logical paths recovered migration `0016`, exact media, owner access, reports, and CSV within 24 hours; teardown independently clean |
-| 9 | Focused rehearsal and one-device canary start | Wave 8 | Waiting | Prove all four fixes in production, then start the one-hour clock |
+| 9 | Focused rehearsal and one-device canary start | Wave 8 | In progress | Prior one-hour proof passed, but `4e314b6` requires code 7 packaging, deployment, and affected-gate replay |
 | 10 | Canary acceptance and controlled fleet expansion | Wave 9 | Blocked | No expansion until the new one-hour canary passes |
 
 ## Wave 2 — Freeze the remediated server candidate
@@ -342,11 +347,11 @@ it to the replacement release.
 - Defective canary evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-replay-20260830/`.
 
-Current state: Waves 1–3 and 5–8 are `Complete`; Wave 9 is `Waiting`; Wave 4 is
+Current state: Waves 1–3 and 5–8 are `Complete`; Wave 9 is `In progress`; Wave 4 is
 removed by final owner decision; Wave 10 is `Blocked`.
-Production runs the remediated backend with migration `0016`; OTA remains
-disabled. The enrolled tablet was not enrolled, disabled, or upgraded during
-Waves 2–8. No fleet expansion is recorded.
+Production runs backend digest `sha256:b1bf…e024` with migration `0016`; OTA
+remains disabled. The enrolled tablet runs 4.1.0/code 6. Candidate `4e314b6`
+and migration `0017` remain local. No fleet expansion is recorded.
 
 | Timestamp (MYT) | Wave(s) | Status | Summary |
 |---|---|---|---|
@@ -362,3 +367,4 @@ Waves 2–8. No fleet expansion is recorded.
 | 2026-08-31 | 6 | Complete | `wave-6-remediation-20260831`; current account, production, DNS/TLS, communications, budget, privacy, support, rollback, four-format UAT media, and the 2026-08-31 14:00 through 2026-09-01 23:59 MYT window were bound to the Wave 5 package. |
 | 2026-08-31 23:52 | 7 | Complete | Operation `3a1ab36fe4848b6bb1e1f7e6ec1d56d8`; the checksum-bound plan and guarded SSM flow activated backend `sha256:7894…f24a`, applied `0016`, verified readiness and exact images, created a versioned backup, retained OTA-disabled state, and performed no tablet action. |
 | 2026-09-01 00:33 | 8 | Complete | Operation `f13686cb03cbad501abbb9d9270ba1f2`; isolated DLM-clone and exact logical-archive paths recovered the digest-pinned release, migration `0016`, exact JPEG, owner access, reports, and CSV in under 24 hours; guarded destroy removed all nine temporary resources and independent cleanup passed. |
+| 2026-09-01 04:08 | 9 | In progress | Commit `4e314b6` implements immediate Resume DUDU, arbitrary overlapping schedules with exact start/end transitions, and 15-second images via migration `0017`; local backend and Android checks passed, but no production deployment or code 7 artifact has occurred. |
