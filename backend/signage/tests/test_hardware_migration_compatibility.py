@@ -239,6 +239,38 @@ def test_hardware_qualification_schema_supports_old_image_rollback(tmp_path):
             FinalLocationPoint.objects.get(pk=location_point.pk).device_id
             == gps_device.pk
         )
+
+        management_target = [("signage", "0016_device_management")]
+        executor = MigrationExecutor(connection)
+        executor.migrate(management_target)
+        management_apps = executor.loader.project_state(management_target).apps
+        ManagedDevice = management_apps.get_model("signage", "Device")
+        ManagedUser = management_apps.get_model("signage", "User")
+        ManagementCredential = management_apps.get_model(
+            "signage", "DeviceManagementCredential"
+        )
+        DeviceCommand = management_apps.get_model("signage", "DeviceCommand")
+        migrated_device = ManagedDevice.objects.get(pk=gps_device.pk)
+        migrated_owner = ManagedUser.objects.get(pk=display_owner.pk)
+        management_credential = ManagementCredential.objects.create(
+            device=migrated_device,
+            token_hash="a" * 64,
+        )
+        command = DeviceCommand.objects.create(
+            device=migrated_device,
+            kind="admin_mode",
+            requested_by=migrated_owner,
+            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
+        )
+        assert management_credential.device_id == gps_device.pk
+        assert command.device_id == gps_device.pk
+        assert command.requested_by_id == display_owner.pk
+        assert (
+            management_apps.get_model("signage", "DeviceLocationPoint")
+            .objects.get(pk=location_point.pk)
+            .device_id
+            == gps_device.pk
+        )
         """
     )
     environment = {
