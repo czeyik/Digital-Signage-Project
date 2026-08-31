@@ -649,7 +649,7 @@ def inspect_media(asset, require_malware_scanner=True):
                 output = normalize_image(source, detected)
                 asset.width = settings.MEDIA_NORMALIZED_IMAGE_WIDTH
                 asset.height = settings.MEDIA_NORMALIZED_IMAGE_HEIGHT
-                asset.duration_ms = 10_000
+                asset.duration_ms = 15_000
             else:
                 detected = sniff_video_mime(source)
                 details = run_ffprobe(source)
@@ -764,7 +764,7 @@ def publish_playlist(playlist, actor, urgent=False):
     now = timezone.now()
     if urgent and not (locked.starts_at <= now < locked.ends_at):
         raise ValidationError(
-            "An urgent replacement must cover the current weekly window."
+            "An urgent replacement must cover the current time."
         )
 
     overlapping = (
@@ -785,18 +785,12 @@ def publish_playlist(playlist, actor, urgent=False):
             is_urgent=urgent,
         )
     )
-    conflicts = overlapping.filter(is_urgent=urgent).exclude(
+    if urgent and overlapping.filter(is_urgent=True).exclude(
         pk__in=[previous.pk for previous in superseded]
-    )
-    if conflicts.exists():
-        if urgent:
-            raise ValidationError(
-                "An urgent replacement is already published for this weekly window; "
-                "create its next version to correct it."
-            )
+    ).exists():
         raise ValidationError(
-            "A published scheduled playlist already overlaps this weekly window; "
-            "create its next version to correct it."
+            "An urgent replacement already overlaps this schedule; create its "
+            "next version to correct it."
         )
 
     locked.status = Playlist.Status.PUBLISHED
@@ -840,7 +834,7 @@ def active_playlist():
             starts_at__lte=now,
             ends_at__gt=now,
         )
-        .order_by("-starts_at", "-version")
+        .order_by("-starts_at", "-published_at", "-id")
         .first()
     )
     if scheduled:
@@ -871,7 +865,7 @@ def next_playlist_transition_at():
         .first()
     )
     candidates = [next_start] if next_start else []
-    if current and current.is_urgent and current.ends_at > now:
+    if current and current.ends_at > now:
         candidates.append(current.ends_at)
     return min(candidates, default=None)
 

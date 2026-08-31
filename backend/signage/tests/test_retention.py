@@ -206,7 +206,7 @@ def test_retention_deletes_expired_playback_graphs_by_event_timestamp():
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("retention.png", b"source"),
         normalized_file=SimpleUploadedFile("retention-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
     playlist = Playlist.objects.create(
@@ -222,15 +222,15 @@ def test_retention_deletes_expired_playback_graphs_by_event_timestamp():
         device=device,
         playlist=playlist,
         loop_started_at=old,
-        loop_ended_at=old + timedelta(seconds=10),
+        loop_ended_at=old + timedelta(seconds=15),
     )
     expired_event = PlaybackEvent.objects.create(
         id=uuid.uuid4(),
         batch=expired_batch,
         playlist_item=item,
         started_at=old,
-        ended_at=old + timedelta(seconds=10),
-        duration_ms=10_000,
+        ended_at=old + timedelta(seconds=15),
+        duration_ms=15_000,
         status=PlaybackEvent.Status.COMPLETED,
     )
     expired_correction = PlaybackCorrection.objects.create(
@@ -245,15 +245,15 @@ def test_retention_deletes_expired_playback_graphs_by_event_timestamp():
         device=device,
         playlist=playlist,
         loop_started_at=old,
-        loop_ended_at=old + timedelta(seconds=10),
+        loop_ended_at=old + timedelta(seconds=15),
     )
     corrected_event = PlaybackEvent.objects.create(
         id=uuid.uuid4(),
         batch=corrected_batch,
         playlist_item=item,
         started_at=old,
-        ended_at=old + timedelta(seconds=10),
-        duration_ms=10_000,
+        ended_at=old + timedelta(seconds=15),
+        duration_ms=15_000,
         status=PlaybackEvent.Status.COMPLETED,
     )
     recent_correction = PlaybackCorrection.objects.create(
@@ -267,15 +267,15 @@ def test_retention_deletes_expired_playback_graphs_by_event_timestamp():
         device=device,
         playlist=playlist,
         loop_started_at=recent,
-        loop_ended_at=recent + timedelta(seconds=10),
+        loop_ended_at=recent + timedelta(seconds=15),
     )
     recent_event = PlaybackEvent.objects.create(
         id=uuid.uuid4(),
         batch=recent_batch,
         playlist_item=item,
         started_at=recent,
-        ended_at=recent + timedelta(seconds=10),
-        duration_ms=10_000,
+        ended_at=recent + timedelta(seconds=15),
+        duration_ms=15_000,
         status=PlaybackEvent.Status.COMPLETED,
     )
 

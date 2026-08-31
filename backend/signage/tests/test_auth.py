@@ -113,7 +113,7 @@ def test_marketing_can_mutate_non_pii_content_and_acknowledge_alerts(client):
         kind=MediaAsset.Kind.IMAGE,
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("marketing.png", b"source"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=marketing,
     )
     playlist = Playlist.objects.create(

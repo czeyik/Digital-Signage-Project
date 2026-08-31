@@ -86,7 +86,7 @@ def post_location_batch(client, access, payload):
 
 def playback_payload(playlist, item, **extra):
     ended_at = timezone.now()
-    started_at = ended_at - timedelta(seconds=10)
+    started_at = ended_at - timedelta(seconds=15)
     payload = {
         "id": str(uuid.uuid4()),
         "playlist_id": str(playlist.id),
@@ -99,7 +99,7 @@ def playback_payload(playlist, item, **extra):
                 "playlist_item_id": str(item.id),
                 "started_at": started_at.isoformat(),
                 "ended_at": ended_at.isoformat(),
-                "duration_ms": 10_000,
+                "duration_ms": 15_000,
                 "status": "completed",
             }
         ],
@@ -139,7 +139,7 @@ def provisioned_device():
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("poster.png", b"source"),
         normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
     playlist = Playlist.objects.create(
@@ -491,7 +491,7 @@ def test_valid_gzip_playback_batch_is_idempotent(client, provisioned_device):
     batch_id = str(uuid.uuid4())
     event_id = str(uuid.uuid4())
     ended_at = timezone.now()
-    started_at = ended_at - timedelta(seconds=10)
+    started_at = ended_at - timedelta(seconds=15)
     payload = {
         "id": batch_id,
         "playlist_id": str(playlist.id),
@@ -504,7 +504,7 @@ def test_valid_gzip_playback_batch_is_idempotent(client, provisioned_device):
                 "playlist_item_id": str(item.id),
                 "started_at": started_at.isoformat(),
                 "ended_at": ended_at.isoformat(),
-                "duration_ms": 10_000,
+                "duration_ms": 15_000,
                 "status": "completed",
             }
         ],
@@ -639,7 +639,7 @@ def test_playback_batch_requires_every_completed_event_field(
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "duration_ms",
-    [None, True, 10_000.0, "10000", -1, 2_147_483_648, 10**100],
+    [None, True, 15_000.0, "10000", -1, 2_147_483_648, 10**100],
 )
 def test_playback_batch_rejects_non_integer_or_out_of_range_durations(
     client, provisioned_device, duration_ms
@@ -751,7 +751,7 @@ def test_playback_batch_rejects_internally_inconsistent_evidence(
     payload = playback_payload(playlist, item)
     event = payload["events"][0]
     started_at = timezone.now() - timedelta(seconds=20)
-    ended_at = started_at + timedelta(seconds=10)
+    ended_at = started_at + timedelta(seconds=15)
     payload["loop_started_at"] = started_at.isoformat()
     payload["loop_ended_at"] = ended_at.isoformat()
     event["started_at"] = started_at.isoformat()
@@ -971,7 +971,7 @@ def test_event_identifier_collision_is_not_reported_as_accepted(
     _, playlist, item, access = provisioned_device
     event_id = str(uuid.uuid4())
     ended_at = timezone.now()
-    started_at = ended_at - timedelta(seconds=10)
+    started_at = ended_at - timedelta(seconds=15)
 
     def payload():
         return {
@@ -986,7 +986,7 @@ def test_event_identifier_collision_is_not_reported_as_accepted(
                     "playlist_item_id": str(item.id),
                     "started_at": started_at.isoformat(),
                     "ended_at": ended_at.isoformat(),
-                    "duration_ms": 10_000,
+                    "duration_ms": 15_000,
                     "status": "completed",
                 }
             ],
@@ -1006,7 +1006,7 @@ def test_csv_filters_preserve_driver_privacy_and_finalization_notice(
 ):
     device, playlist, item, access = provisioned_device
     ended_at = timezone.now()
-    started_at = ended_at - timedelta(seconds=10)
+    started_at = ended_at - timedelta(seconds=15)
     response = post_playback_batch(
         client,
         {
@@ -1021,7 +1021,7 @@ def test_csv_filters_preserve_driver_privacy_and_finalization_notice(
                     "playlist_item_id": str(item.id),
                     "started_at": started_at.isoformat(),
                     "ended_at": ended_at.isoformat(),
-                    "duration_ms": 10_000,
+                    "duration_ms": 15_000,
                     "status": "completed",
                 }
             ],
@@ -1097,7 +1097,7 @@ def test_playback_batch_requires_every_playlist_entry(client, provisioned_device
             status=MediaAsset.Status.READY,
             source_file=SimpleUploadedFile(f"poster-{number}.png", b"source"),
             normalized_file=SimpleUploadedFile(f"poster-ready-{number}.png", b"ready"),
-            duration_ms=10_000,
+            duration_ms=15_000,
             uploaded_by=owner,
         )
         for number in (1, 2)
@@ -1115,7 +1115,7 @@ def test_playback_batch_requires_every_playlist_entry(client, provisioned_device
     playlist.published_at = timezone.now()
     playlist.save(update_fields=["status", "published_at"])
     ended_at = timezone.now()
-    started_at = ended_at - timedelta(seconds=10)
+    started_at = ended_at - timedelta(seconds=15)
 
     response = post_playback_batch(
         client,
@@ -1131,7 +1131,7 @@ def test_playback_batch_requires_every_playlist_entry(client, provisioned_device
                     "playlist_item_id": str(item.id),
                     "started_at": started_at.isoformat(),
                     "ended_at": ended_at.isoformat(),
-                    "duration_ms": 10_000,
+                    "duration_ms": 15_000,
                     "status": "completed",
                 }
             ],
@@ -1412,7 +1412,7 @@ def test_stale_heartbeat_cannot_regress_device_aggregate_state(
     device, playlist, _, access = provisioned_device
     newer = timezone.now() - timedelta(minutes=1)
     older = newer - timedelta(minutes=1)
-    newer_sync = newer - timedelta(seconds=10)
+    newer_sync = newer - timedelta(seconds=15)
     newer_playback = newer - timedelta(seconds=5)
 
     assert post_heartbeat(
@@ -1559,7 +1559,7 @@ def test_playback_batch_rejects_future_event_timestamps(client, provisioned_devi
                     "playlist_item_id": str(item.id),
                     "started_at": future.isoformat(),
                     "ended_at": future.isoformat(),
-                    "duration_ms": 10_000,
+                    "duration_ms": 15_000,
                     "status": "completed",
                 }
             ],

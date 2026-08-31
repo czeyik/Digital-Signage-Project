@@ -271,6 +271,38 @@ def test_hardware_qualification_schema_supports_old_image_rollback(tmp_path):
             .device_id
             == gps_device.pk
         )
+
+        LegacyMediaAsset = management_apps.get_model("signage", "MediaAsset")
+        legacy_image = LegacyMediaAsset.objects.create(
+            business_name="Migration rehearsal",
+            title="Existing image",
+            kind="image",
+            status="ready",
+            source_file="quarantine/existing-image.png",
+            normalized_file="validated/existing-image.png",
+            duration_ms=10_000,
+            uploaded_by=migrated_owner,
+        )
+        legacy_video = LegacyMediaAsset.objects.create(
+            business_name="Migration rehearsal",
+            title="Existing video",
+            kind="video",
+            status="ready",
+            source_file="quarantine/existing-video.mp4",
+            normalized_file="validated/existing-video.mp4",
+            duration_ms=4_333,
+            uploaded_by=migrated_owner,
+        )
+
+        image_duration_target = [("signage", "0017_image_duration_15_seconds")]
+        executor = MigrationExecutor(connection)
+        executor.migrate(image_duration_target)
+        image_duration_apps = executor.loader.project_state(
+            image_duration_target
+        ).apps
+        MigratedMediaAsset = image_duration_apps.get_model("signage", "MediaAsset")
+        assert MigratedMediaAsset.objects.get(pk=legacy_image.pk).duration_ms == 15_000
+        assert MigratedMediaAsset.objects.get(pk=legacy_video.pk).duration_ms == 4_333
         """
     )
     environment = {

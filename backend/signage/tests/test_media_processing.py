@@ -64,6 +64,16 @@ def test_video_sniffing_accepts_mp4_container_signature(tmp_path):
     assert sniff_video_mime(video) == "video/mp4"
 
 
+def test_images_require_the_15_second_display_duration():
+    asset = MediaAsset(kind=MediaAsset.Kind.IMAGE, duration_ms=10_000)
+
+    with pytest.raises(ValidationError, match="15 seconds"):
+        asset.clean()
+
+    asset.duration_ms = 15_000
+    asset.clean()
+
+
 @pytest.mark.django_db
 def test_image_processing_does_not_require_storage_path(tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
@@ -92,7 +102,7 @@ def test_image_processing_does_not_require_storage_path(tmp_path, settings):
     assert asset.status == MediaAsset.Status.READY
     assert asset.width == 1920
     assert asset.height == 1080
-    assert asset.duration_ms == 10_000
+    assert asset.duration_ms == 15_000
     assert asset.normalized_file.name.startswith("validated/")
     assert len(asset.normalized_file.name) <= MediaAsset._meta.get_field(
         "normalized_file"

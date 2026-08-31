@@ -5,13 +5,22 @@ from threading import Barrier
 import pytest
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.db import close_old_connections, connection, connections, transaction
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from signage.models import MediaAsset, MediaDeletion, Playlist, PlaylistItem, User
+from signage.models import (
+    Alert,
+    MediaAsset,
+    MediaDeletion,
+    Playlist,
+    PlaylistItem,
+    User,
+)
 from signage.services import (
+    active_playlist,
     delete_media_binary,
     next_playlist_transition_at,
     publish_playlist,
@@ -35,24 +44,30 @@ def ready_media_delivery_is_valid(monkeypatch):
     )
 
 
-def next_monday_noon():
-    now = timezone.localtime()
-    days = (7 - now.weekday()) % 7
-    if days == 0 and now.hour >= 12:
-        days = 7
-    return (now + timedelta(days=days)).replace(
-        hour=12, minute=0, second=0, microsecond=0
-    )
+def next_schedule_start():
+    return (timezone.now() + timedelta(days=1, minutes=7)).replace(microsecond=0)
 
 
-def current_playlist_window_start():
-    now = timezone.localtime()
-    start = (now - timedelta(days=now.weekday())).replace(
-        hour=12, minute=0, second=0, microsecond=0
+def current_schedule_start():
+    return (timezone.now() - timedelta(hours=1, minutes=7)).replace(microsecond=0)
+
+
+@pytest.mark.django_db
+def test_playlist_accepts_arbitrary_schedule_boundaries():
+    owner = User.objects.create_user(
+        "arbitrary-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
     )
-    if now < start:
-        start -= timedelta(days=7)
-    return start
+    playlist = Playlist(
+        name="Arbitrary schedule",
+        version=1,
+        starts_at=timezone.now() + timedelta(minutes=23),
+        ends_at=timezone.now() + timedelta(hours=2, minutes=41),
+        created_by=owner,
+    )
+
+    playlist.full_clean()
 
 
 @pytest.mark.django_db
@@ -62,7 +77,7 @@ def test_next_playlist_transition_exposes_the_scheduled_boundary():
         "A-very-long-password-123",
         role=User.Role.OWNER,
     )
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     Playlist.objects.create(
         name="Next scheduled week",
         version=1,
@@ -74,6 +89,61 @@ def test_next_playlist_transition_exposes_the_scheduled_boundary():
     )
 
     assert next_playlist_transition_at() == starts_at
+
+
+@pytest.mark.django_db
+def test_next_playlist_transition_exposes_the_active_schedule_end():
+    owner = User.objects.create_user(
+        "ending-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    starts_at = timezone.now() - timedelta(hours=1)
+    ends_at = timezone.now() + timedelta(minutes=37)
+    Playlist.objects.create(
+        name="Ending schedule",
+        version=1,
+        status=Playlist.Status.PUBLISHED,
+        published_at=timezone.now(),
+        starts_at=starts_at,
+        ends_at=ends_at,
+        created_by=owner,
+    )
+
+    assert next_playlist_transition_at() == ends_at
+
+
+@pytest.mark.django_db
+def test_schedule_evaluation_accepts_a_replacement_beyond_seven_days():
+    owner = User.objects.create_user(
+        "replacement-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    now = timezone.now()
+    active_end = now + timedelta(days=1)
+    Playlist.objects.create(
+        name="Current arbitrary schedule",
+        version=1,
+        status=Playlist.Status.PUBLISHED,
+        published_at=now,
+        starts_at=now - timedelta(days=1),
+        ends_at=active_end,
+        created_by=owner,
+    )
+    Playlist.objects.create(
+        name="Later arbitrary replacement",
+        version=1,
+        status=Playlist.Status.PUBLISHED,
+        published_at=now,
+        starts_at=active_end + timedelta(days=10),
+        ends_at=active_end + timedelta(days=11, hours=3),
+        created_by=owner,
+    )
+
+    call_command("evaluate_playlists")
+
+    assert not Alert.objects.filter(code="missing_playlist_replacement").exists()
 
 
 @pytest.mark.django_db
@@ -90,7 +160,7 @@ def test_only_ready_media_can_be_published():
         source_file=SimpleUploadedFile("poster.png", b"not-used"),
         uploaded_by=owner,
     )
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     playlist = Playlist.objects.create(
         name="Pilot week",
         version=1,
@@ -118,10 +188,10 @@ def test_published_playlist_items_are_immutable():
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("poster.png", b"source"),
         normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     playlist = Playlist.objects.create(
         name="Pilot week",
         version=1,
@@ -151,12 +221,12 @@ def test_draft_playlist_can_be_reordered_from_dashboard(client):
             status=MediaAsset.Status.READY,
             source_file=SimpleUploadedFile(f"poster-{number}.png", b"source"),
             normalized_file=SimpleUploadedFile(f"ready-{number}.png", b"ready"),
-            duration_ms=10_000,
+            duration_ms=15_000,
             uploaded_by=owner,
         )
         for number in (1, 2)
     ]
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     playlist = Playlist.objects.create(
         name="Reorder week",
         version=1,
@@ -196,12 +266,12 @@ def test_playlist_detail_uses_csp_safe_drag_script(client):
             status=MediaAsset.Status.READY,
             source_file=SimpleUploadedFile(f"poster-{number}.png", b"source"),
             normalized_file=SimpleUploadedFile(f"ready-{number}.png", b"ready"),
-            duration_ms=10_000,
+            duration_ms=15_000,
             uploaded_by=owner,
         )
         for number in (1, 2)
     ]
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     playlist = Playlist.objects.create(
         name="Reorder week",
         version=1,
@@ -238,10 +308,10 @@ def test_playlist_list_marks_current_published_window_active(client):
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("poster.png", b"source"),
         normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
-    starts_at = current_playlist_window_start()
+    starts_at = current_schedule_start()
     playlist = Playlist.objects.create(
         name="Current week",
         version=1,
@@ -274,10 +344,10 @@ def test_corrected_playlist_publish_cancels_prior_version_and_hides_history(clie
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("poster.png", b"source"),
         normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     first = Playlist.objects.create(
         name="Corrected week",
         version=1,
@@ -340,10 +410,10 @@ def test_media_binary_deletion_is_blocked_when_referenced_by_future_playlist():
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("poster.png", b"source"),
         normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     playlist = Playlist.objects.create(
         name="Future week",
         version=1,
@@ -371,7 +441,7 @@ def test_unreferenced_media_binary_deletion_queues_a_durable_outbox_entry():
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("poster.png", b"source"),
         normalized_file=SimpleUploadedFile("poster-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
 
@@ -401,7 +471,7 @@ def test_media_deletion_outbox_rolls_back_with_the_archive_transaction():
         kind=MediaAsset.Kind.IMAGE,
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("rollback.png", b"source"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
 
@@ -416,7 +486,7 @@ def test_media_deletion_outbox_rolls_back_with_the_archive_transaction():
 
 
 @pytest.mark.django_db
-def test_scheduled_publication_rejects_global_window_overlap():
+def test_overlapping_schedules_publish_and_latest_start_takes_precedence():
     owner = User.objects.create_user(
         "overlap-owner@duducar.co",
         "A-very-long-password-123",
@@ -429,10 +499,10 @@ def test_scheduled_publication_rejects_global_window_overlap():
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("overlap.png", b"source"),
         normalized_file=SimpleUploadedFile("overlap-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
-    starts_at = next_monday_noon()
+    starts_at = current_schedule_start()
     first = Playlist.objects.create(
         name="Campaign A",
         version=1,
@@ -443,7 +513,7 @@ def test_scheduled_publication_rejects_global_window_overlap():
     second = Playlist.objects.create(
         name="Campaign B",
         version=1,
-        starts_at=starts_at,
+        starts_at=starts_at + timedelta(minutes=17),
         ends_at=starts_at + timedelta(days=7),
         created_by=owner,
     )
@@ -451,15 +521,17 @@ def test_scheduled_publication_rejects_global_window_overlap():
     PlaylistItem.objects.create(playlist=second, media=media, position=1)
     publish_playlist(first, owner)
 
-    with pytest.raises(ValidationError, match="already overlaps"):
-        publish_playlist(second, owner)
+    publish_playlist(second, owner)
 
+    first.refresh_from_db()
     second.refresh_from_db()
-    assert second.status == Playlist.Status.DRAFT
+    assert first.status == Playlist.Status.PUBLISHED
+    assert second.status == Playlist.Status.PUBLISHED
+    assert active_playlist() == second
 
 
 @pytest.mark.django_db(transaction=True)
-def test_postgres_serializes_concurrent_publications_for_one_window():
+def test_postgres_serializes_concurrent_overlapping_publications():
     if connection.vendor != "postgresql":
         pytest.skip("PostgreSQL-specific publication locking test")
     owner = User.objects.create_user(
@@ -474,10 +546,10 @@ def test_postgres_serializes_concurrent_publications_for_one_window():
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("concurrent.png", b"source"),
         normalized_file=SimpleUploadedFile("concurrent-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
-    starts_at = next_monday_noon()
+    starts_at = next_schedule_start()
     playlist_ids = []
     for name in ("Concurrent A", "Concurrent B"):
         playlist = Playlist.objects.create(
@@ -509,8 +581,8 @@ def test_postgres_serializes_concurrent_publications_for_one_window():
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(publish, playlist_ids))
 
-    assert sorted(outcomes) == ["published", "rejected"]
-    assert Playlist.objects.filter(status=Playlist.Status.PUBLISHED).count() == 1
+    assert outcomes == ["published", "published"]
+    assert Playlist.objects.filter(status=Playlist.Status.PUBLISHED).count() == 2
 
 
 @pytest.mark.django_db
@@ -527,10 +599,10 @@ def test_urgent_replacement_covers_only_current_window_and_preserves_schedules()
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("urgent.png", b"source"),
         normalized_file=SimpleUploadedFile("urgent-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
-    current_start = current_playlist_window_start()
+    current_start = current_schedule_start()
     future_start = current_start + timedelta(days=7)
 
     def playlist(name, starts_at):
@@ -561,7 +633,7 @@ def test_urgent_replacement_covers_only_current_window_and_preserves_schedules()
     assert urgent.status == Playlist.Status.PUBLISHED
     assert urgent.is_urgent is True
 
-    with pytest.raises(ValidationError, match="current weekly window"):
+    with pytest.raises(ValidationError, match="current time"):
         publish_playlist(future_urgent, owner, urgent=True)
 
 
@@ -584,7 +656,7 @@ def test_media_dashboard_requires_explicit_binary_deletion_confirmation(
         status=MediaAsset.Status.READY,
         source_file=SimpleUploadedFile("delete.png", b"source"),
         normalized_file=SimpleUploadedFile("delete-ready.png", b"ready"),
-        duration_ms=10_000,
+        duration_ms=15_000,
         uploaded_by=owner,
     )
     client.force_login(owner)

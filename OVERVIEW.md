@@ -50,13 +50,14 @@ before changing it:
 
 ## Non-negotiable product rules
 
-- Media: JPEG/PNG/MP4 only; images <=10 MB for 10 seconds, video <=50 MB,
+- Media: JPEG/PNG/MP4 only; images <=10 MB for 15 seconds, video <=50 MB,
   <=15 seconds/1080p. Quarantine until scan/type/decode/silent-H.264-normalize
   and test pass; fit without crop on black; private time-limited delivery;
   preview/reuse allowed; do not delete current/future playlist media (retain
   metadata/audit after deletion).
 - Playlist: one fleet-wide list; non-empty, configurable 100 entries/30 min;
-  immutable versions; Monday noon-to-noon Malaysia weeks. Scheduled activation
+  immutable versions; arbitrary start/end times with deterministic overlap
+  precedence. Scheduled activation
   occurs at the server-defined boundary after complete valid download; any
   changed active manifest replaces immediately after validation. Keep the prior
   valid list on any failure or missing change.

@@ -271,6 +271,12 @@ class MainActivity : Activity() {
     private fun resumeAfterPreparedShutdown() {
         store.clearPlannedShutdownMarker()
         shutdownPrepared = false
+        // Explicit resume also closes the session that authorized shutdown;
+        // otherwise synchronization is blocked until its relock timer expires.
+        adminHandler.removeCallbacks(adminRelock)
+        adminRelockScheduler.cancel()
+        credentials.endAdminSession()
+        locationTracker.endAdminSession()
         locationTracker.resumeAfterShutdown()
         binding.shutdownReady.visibility = View.GONE
         if (!enterLockedKiosk()) {
