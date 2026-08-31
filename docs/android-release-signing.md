@@ -13,16 +13,16 @@ DUDU_SIGNING_KEY_PASSWORD
 ```
 
 It also requires the non-secret Google Cloud numeric project number. For the
-current reviewed canary APK, use the retained production code `1` as the prior
-value and build code `2` as version `1.0.1`:
+current remediated pilot APK, use retained production code `4` as the prior
+value and build code `5` as version `4.1.0`:
 
 ```sh
 ./gradlew :app:assembleProductionRelease \
   -PproductionApiBaseUrl=https://api.marketing.duducaradmin.com/api/v1/ \
-  -PplayIntegrityProjectNumber=123456789012 \
-  -PpreviousProductionVersionCode=1 \
-  -PproductionVersionCode=2 \
-  -PproductionVersionName=1.0.1 \
+  -PplayIntegrityProjectNumber=552923442234 \
+  -PpreviousProductionVersionCode=4 \
+  -PproductionVersionCode=5 \
+  -PproductionVersionName=4.1.0 \
   --no-daemon
 ```
 
@@ -54,18 +54,16 @@ code, APK digest, and the installed signing certificate before using Android's
 silent device-owner PackageInstaller flow. A failed or interrupted install is
 retried on a later sync and never replaces the current playback files.
 
-Existing 1.0.1/code-2 tablets do not contain this updater. Install the first
-updater-enabled release manually after Setup Wizard and device-owner assignment;
-subsequent higher-code releases can be delivered OTA. Keep the previous same-key
-APK for rollback, and disable OTA by setting all `app_update_*` values back to
-their zero/empty defaults before selecting a release that should not advertise an
-update.
+The retained 4.0.1/code-4 tablet contains the updater, but the owner requires
+the replacement 4.1.0/code-5 APK to be installed manually. Keep the previous
+same-key APK for rollback and retain every `app_update_*` value at its
+zero/empty default; OTA remains outside this release.
 
-## Current reviewed canary release identity — 2026-08-24
+## Current reviewed remediation release identity — 2026-08-31
 
-The current canary candidate uses previous version code `1`, production version
-code `2`, and production version name `1.0.1`. The reviewed production tfvars
-must explicitly set `required_app_version = "1.0.1"` with the final immutable
+The current candidate uses previous version code `4`, production version code
+`5`, and production version name `4.1.0`. The reviewed production tfvars must
+explicitly set `required_app_version = "4.1.0"` with the final immutable
 backend, PostgreSQL, and Caddy image digests. Do not infer a production release
 from the Terraform default or from a tag.
 
@@ -88,8 +86,8 @@ ignore app recognition. A tablet that is not Play Protect certified is not
 eligible for production enrollment.
 
 The production application also refuses enrollment and playback unless its
-package is the active device owner. Provision only a factory-reset qualified
-tablet, then confirm ownership before opening the app:
+package is the active device owner. Provision only the owner-selected tablet,
+then confirm ownership before opening the app:
 
 ```sh
 adb shell dpm set-device-owner \
@@ -107,19 +105,19 @@ After a reboot it uses the device-owner-protected wall clock only to account for
 powered-off time until the next server synchronization.
 
 Do this before the first player launch applies its kiosk restrictions. If the
-qualified firmware does not support the shown `appops` command, grant DUDU
+selected firmware does not support the shown `appops` command, grant DUDU
 Signage the Android **Alarms & reminders** special access in system settings
 before first launch. Verify `AlarmManager.canScheduleExactAlarms()` through the
-administrator-session test. The player uses it only for the one-shot,
-five-minute relock alarm and refuses to open Android settings when that durable
-relock cannot be scheduled.
+administrator-session test. The player uses it for exact playlist transitions
+and the one-shot five-minute relock alarm, and refuses Admin mode when that
+durable relock cannot be scheduled.
 
 Keep USB debugging under staff control for manual sideloading and recovery.
 Before enrollment, locked kiosk deliberately leaves USB transfer unrestricted so
 a previously authorized staff ADB connection survives device-owner startup.
-After enrollment, locked kiosk blocks USB transfer; a PIN-authenticated
-administrator session temporarily restores it for staff work, and either manual
-or timed relock reapplies the restriction. These paths do not enable USB
+After enrollment, locked kiosk blocks USB transfer; a remotely requested Admin
+mode temporarily restores it for staff work, and timed relock reapplies the
+restriction. These paths do not enable USB
 debugging or accept Android's RSA authorization prompt automatically. Disable
 USB debugging for normal vehicle operation only after the exact model and
 firmware pass the documented recovery and update rehearsal.
