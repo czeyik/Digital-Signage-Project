@@ -44,6 +44,10 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
   latest publication and stable ID. Devices must synchronize at exact start and
   end boundaries and replace content only after complete atomic download and
   validation.
+- Publishing a normal or urgent playlist queues one deduplicated, short-lived
+  `sync_now` command per active enrolled device. The existing one-minute
+  management poll invokes the atomic playlist sync; hourly polling remains the
+  fallback.
 - Supported production media are JPG/JPEG, PNG, and MP4. The stored delivery
   object, not merely its processing precursor, must satisfy the declared hash,
   size, type, decode, and player-dimension limits before publication. Images
@@ -70,8 +74,8 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
 
 ## Planning baseline — revalidate before relying on it
 
-- Production currently runs backend digest `sha256:a4a8…747f0` from clean
-  commit `158bcb3`, with migration `0017` applied. Local `main` and its status
+- Production currently runs backend digest `sha256:8ae7…b02d` from clean
+  commit `c2618ac`, with migration `0018` applied. Local `main` and its status
   and remediation commits have not been pushed.
 - Wave 1's stopped-state recovery repair remains accepted at `16cc6fe`; it is
   not affected by the current remediation and does not need replay.
@@ -86,20 +90,22 @@ Allowed statuses are `Waiting`, `Pending`, `In progress`, `Blocked`,
   ends the authorizing Admin-mode session, playlists accept arbitrary and
   overlapping schedules with exact start/end transitions, and migration `0017`
   changes existing and new image playback from 10 to 15 seconds.
-- Local verification currently records 283 backend tests passed with 2
+- Local verification currently records 285 backend tests passed with 2
   skipped; Django migration/system checks and Ruff passed; Android development
   unit tests, instrumentation compilation, assembly, and lint passed.
-- The tablet currently runs signed 4.1.0/code 7 from
-  `wave-3-schedule-remediation-20260901`, APK SHA-256 `aeeaf8cd…c0b4d`, and
-  remains device owner. Operation `0c7707aa5db9a4bd31143e4f6565c6cf`
-  activated the compatible backend and migration `0017`; the affected Wave 9
-  physical gates and one-hour canary still require replay.
+- The tablet currently runs signed 4.1.0/code 8 from
+  `wave-3-sync-remediation-20260901`, APK SHA-256 `87d83b0a…c1d6`, and remains
+  device owner. Operation `c4a7b6f5f93f23261d523b54525b8d15` activated the
+  compatible backend and migration `0018`; the dashboard-triggered publication
+  path and one-hour canary still require physical replay.
 - Existing code 4 devices do not have a management credential until the new app
   enrolls or bootstraps one while its playback credential is still valid. A
   never-enrolled installation has no dashboard device association and cannot be
   remotely targeted.
-- Backend must be deployed before the replacement APK. The upgraded app must
-  bootstrap its management credential before playback-disable testing.
+- Deployment order must preserve command compatibility. Code 8 was installed
+  before the `sync_now`-producing backend because code 7 cannot acknowledge the
+  new command. The upgraded app must bootstrap its management credential before
+  playback-disable testing.
 - No representative non-production database copy is currently recorded. Never
   use production data locally; if none is supplied, Wave 2 may use an isolated
   synthetic dataset that covers populated legacy migrations.
@@ -119,7 +125,7 @@ the decisions above, reconcile it in the wave that owns the affected source.
 | 6 | Current launch authorization packet | Wave 5 | Complete | `wave-6-remediation-20260831`; exact package, account, communications, cost, privacy, rollback, UAT media, support, and window are current |
 | 7 | Production upgrade | Wave 6 | Complete | Operation `3a1ab36fe4848b6bb1e1f7e6ec1d56d8`; exact backend active, migration `0016` applied, readiness/backups/OTA-disablement verified, no tablet action |
 | 8 | Current isolated recovery proof | Wave 7 | Complete | Operation `f13686cb03cbad501abbb9d9270ba1f2`; DLM and logical paths recovered migration `0016`, exact media, owner access, reports, and CSV within 24 hours; teardown independently clean |
-| 9 | Focused rehearsal and one-device canary start | Wave 8 | In progress | Code 7 and backend `sha256:a4a8…747f0` are deployed; affected physical gates and a new one-hour canary require replay |
+| 9 | Focused rehearsal and one-device canary start | Wave 8 | In progress | Code 8 and backend `sha256:8ae7…b02d` are deployed; triggered sync and a new one-hour canary require physical replay |
 | 10 | Canary acceptance and controlled fleet expansion | Wave 9 | Blocked | No expansion until the new one-hour canary passes |
 
 ## Wave 2 — Freeze the remediated server candidate
@@ -337,12 +343,16 @@ it to the replacement release.
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-3-remediation-20260831/`.
 - Schedule-remediation signed Android release:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-3-schedule-remediation-20260901/`.
+- Triggered-sync signed Android release:
+  `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-3-sync-remediation-20260901/`.
 - Remediated immutable deployment package and unapplied plan:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-5-remediation-20260831/`.
 - Current remediated launch authorization packet:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-6-remediation-20260831/`.
 - Remediated production activation evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-7-remediation-3a1ab36fe4848b6bb1e1f7e6ec1d56d8/`.
+- Triggered-sync production activation evidence:
+  `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-sync-activation-c4a7b6f5f93f23261d523b54525b8d15/`.
 - Remediated upgraded-release recovery evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-8-remediation-f13686cb03cbad501abbb9d9270ba1f2/`.
 - Prior recovery proof:
@@ -352,10 +362,10 @@ it to the replacement release.
 
 Current state: Waves 1–3 and 5–8 are `Complete`; Wave 9 is `In progress`; Wave 4 is
 removed by final owner decision; Wave 10 is `Blocked`.
-Production runs backend digest `sha256:a4a8…747f0` with migration `0017`; OTA
-remains disabled. The enrolled tablet runs 4.1.0/code 7 and remains device
-owner. The affected physical gates and new one-hour canary remain open. No
-fleet expansion is recorded.
+Production runs backend digest `sha256:8ae7…b02d` with migration `0018`; OTA
+remains disabled. The enrolled tablet runs 4.1.0/code 8 and remains device
+owner. Triggered-sync physical proof and the new one-hour canary remain open.
+No fleet expansion is recorded.
 
 | Timestamp (MYT) | Wave(s) | Status | Summary |
 |---|---|---|---|
@@ -373,3 +383,4 @@ fleet expansion is recorded.
 | 2026-09-01 00:33 | 8 | Complete | Operation `f13686cb03cbad501abbb9d9270ba1f2`; isolated DLM-clone and exact logical-archive paths recovered the digest-pinned release, migration `0016`, exact JPEG, owner access, reports, and CSV in under 24 hours; guarded destroy removed all nine temporary resources and independent cleanup passed. |
 | 2026-09-01 04:08 | 9 | In progress | Commit `4e314b6` implements immediate Resume DUDU, arbitrary overlapping schedules with exact start/end transitions, and 15-second images via migration `0017`; local backend and Android checks passed, but no production deployment or code 7 artifact has occurred. |
 | 2026-09-01 11:29 | 9 | In progress | Operation `0c7707aa5db9a4bd31143e4f6565c6cf` activated clean commit `158bcb3` on scanned backend `sha256:a4a8…747f0`, applied migration `0017`, passed readiness and backup assertions, and installed signed 4.1.0/code 7 (`aeeaf8cd…c0b4d`) over ADB while preserving device-owner state. Physical acceptance replay remains open. |
+| 2026-09-01 12:10 | 9 | In progress | Commit `c2618ac` and signed 4.1.0/code 8 (`87d83b0a…c1d6`) add deduplicated dashboard-triggered `sync_now`; operation `c4a7b6f5f93f23261d523b54525b8d15` activated scanned backend `sha256:8ae7…b02d`, applied migration `0018`, and passed readiness, backup, alarm, and device-owner assertions. A real publication-to-tablet transition remains to be observed. |
