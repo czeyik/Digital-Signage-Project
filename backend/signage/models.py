@@ -804,6 +804,7 @@ class DeviceManagementCredential(TimeStampedModel):
 class DeviceCommand(TimeStampedModel):
     class Kind(models.TextChoices):
         ADMIN_MODE = "admin_mode", "Admin mode"
+        SYNC_NOW = "sync_now", "Sync now"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     device = models.ForeignKey(

@@ -13,6 +13,9 @@ from django.utils import timezone
 
 from signage.models import (
     Alert,
+    Device,
+    DeviceCommand,
+    DeviceManagementCredential,
     MediaAsset,
     MediaDeletion,
     Playlist,
@@ -204,6 +207,49 @@ def test_published_playlist_items_are_immutable():
     item.position = 2
     with pytest.raises(ValidationError):
         item.save()
+
+
+@pytest.mark.django_db
+def test_publish_requests_one_immediate_sync_per_active_enrolled_device():
+    owner = User.objects.create_user(
+        "sync-owner@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    active = Device.objects.create(label="SYNC-ACTIVE", status=Device.Status.ACTIVE)
+    disabled = Device.objects.create(
+        label="SYNC-DISABLED", status=Device.Status.DISABLED
+    )
+    Device.objects.create(label="SYNC-NEVER-ENROLLED", status=Device.Status.ACTIVE)
+    DeviceManagementCredential.issue(active)
+    DeviceManagementCredential.issue(disabled)
+    media = MediaAsset.objects.create(
+        business_name="Example",
+        title="Sync poster",
+        kind=MediaAsset.Kind.IMAGE,
+        status=MediaAsset.Status.READY,
+        source_file=SimpleUploadedFile("sync.png", b"source"),
+        normalized_file=SimpleUploadedFile("sync-ready.png", b"ready"),
+        duration_ms=15_000,
+        uploaded_by=owner,
+    )
+    starts_at = next_schedule_start()
+    for version in (1, 2):
+        playlist = Playlist.objects.create(
+            name=f"Sync playlist {version}",
+            version=version,
+            starts_at=starts_at,
+            ends_at=starts_at + timedelta(days=1),
+            created_by=owner,
+        )
+        PlaylistItem.objects.create(playlist=playlist, media=media, position=1)
+        publish_playlist(playlist, owner)
+
+    command = DeviceCommand.objects.get()
+    assert command.device == active
+    assert command.kind == DeviceCommand.Kind.SYNC_NOW
+    assert command.requested_by == owner
+    assert command.expires_at > timezone.now()
 
 
 @pytest.mark.django_db

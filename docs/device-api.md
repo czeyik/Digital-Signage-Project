@@ -32,6 +32,10 @@ Every response also includes `next_playlist_transition_at` when a published
 schedule can change without another dashboard action. The player uses this
 server timestamp to synchronize at the boundary; a changed manifest replaces
 the prior playlist immediately after its atomic download and validation.
+Publishing a normal or urgent playlist queues a short-lived `sync_now` command
+for each active enrolled device. The existing one-minute management poll
+acknowledges that command and starts this same synchronization path; the hourly
+playlist poll remains the fallback.
 
 In production, an enrolled device whose reported release version no longer
 matches `REQUIRED_APP_VERSION` receives `maintenance` rather than advertising.

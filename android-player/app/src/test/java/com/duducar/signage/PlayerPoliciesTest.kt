@@ -27,6 +27,22 @@ class PlayerPoliciesTest {
     }
 
     @Test
+    fun managementCommandsDispatchOnlyKnownActions() {
+        assertEquals(
+            ManagementCommandPolicy.Action.ADMIN_MODE,
+            ManagementCommandPolicy.action("admin_mode"),
+        )
+        assertEquals(
+            ManagementCommandPolicy.Action.SYNC_NOW,
+            ManagementCommandPolicy.action("sync_now"),
+        )
+        assertEquals(
+            ManagementCommandPolicy.Action.IGNORE,
+            ManagementCommandPolicy.action("unknown"),
+        )
+    }
+
+    @Test
     fun locationPolicyAcceptsOnlyFreshPreciseNonMockGpsOrNetworkFixes() {
         assertTrue(LocationPolicy.acceptsFix("gps", 100f, 0, false))
         assertTrue(LocationPolicy.acceptsFix("network", 50f, 120_000, false))

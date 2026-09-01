@@ -22,6 +22,7 @@ from .models import (
     AuditEvent,
     Device,
     DeviceAccessToken,
+    DeviceCommand,
     DeviceCredential,
     DeviceManagementCredential,
     EnrollmentCode,
@@ -808,6 +809,25 @@ def publish_playlist(playlist, actor, urgent=False):
             {"replacement": str(locked.id)},
         )
     audit(actor, "playlist.publish", locked, {"urgent": urgent})
+    pending_sync_devices = DeviceCommand.objects.filter(
+        device__status=Device.Status.ACTIVE,
+        kind=DeviceCommand.Kind.SYNC_NOW,
+        acknowledged_at__isnull=True,
+        expires_at__gt=now,
+    ).values_list("device_id", flat=True)
+    devices = Device.objects.filter(
+        status=Device.Status.ACTIVE,
+        management_credential__isnull=False,
+    ).exclude(pk__in=pending_sync_devices)
+    DeviceCommand.objects.bulk_create(
+        DeviceCommand(
+            device=device,
+            kind=DeviceCommand.Kind.SYNC_NOW,
+            requested_by=actor,
+            expires_at=now + timedelta(minutes=10),
+        )
+        for device in devices
+    )
     return locked
 
 

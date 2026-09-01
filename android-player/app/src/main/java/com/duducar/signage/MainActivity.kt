@@ -1420,14 +1420,21 @@ class MainActivity : Activity() {
             try {
                 if (!credentials.hasManagementToken() && !api.bootstrapManagement()) return@requestCoalesced
                 val command = api.managementCommand() ?: return@requestCoalesced
-                if (command.getString("kind") != "admin_mode") return@requestCoalesced
                 val commandId = command.getString("id")
-                runOnUiThread {
-                    if (startAdminSession(System.currentTimeMillis())) {
-                        controlExecutor.execute {
-                            api.acknowledgeManagementCommand(commandId)
+                when (ManagementCommandPolicy.action(command.getString("kind"))) {
+                    ManagementCommandPolicy.Action.ADMIN_MODE -> runOnUiThread {
+                        if (startAdminSession(System.currentTimeMillis())) {
+                            controlExecutor.execute {
+                                api.acknowledgeManagementCommand(commandId)
+                            }
                         }
                     }
+                    ManagementCommandPolicy.Action.SYNC_NOW -> {
+                        if (api.acknowledgeManagementCommand(commandId)) {
+                            synchronizeAndPlay()
+                        }
+                    }
+                    ManagementCommandPolicy.Action.IGNORE -> return@requestCoalesced
                 }
             } catch (_: Exception) {
                 // The next bounded management poll retries delivery.

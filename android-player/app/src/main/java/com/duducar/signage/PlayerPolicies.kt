@@ -389,3 +389,13 @@ object PlaylistSyncPolicy {
     fun delayUntil(now: Instant, transition: Instant): Long =
         Duration.between(now, transition).toMillis().coerceAtLeast(0)
 }
+
+object ManagementCommandPolicy {
+    enum class Action { ADMIN_MODE, SYNC_NOW, IGNORE }
+
+    fun action(kind: String): Action = when (kind) {
+        "admin_mode" -> Action.ADMIN_MODE
+        "sync_now" -> Action.SYNC_NOW
+        else -> Action.IGNORE
+    }
+}
