@@ -125,8 +125,8 @@ the decisions above, reconcile it in the wave that owns the affected source.
 | 6 | Current launch authorization packet | Wave 5 | Complete | `wave-6-remediation-20260831`; exact package, account, communications, cost, privacy, rollback, UAT media, support, and window are current |
 | 7 | Production upgrade | Wave 6 | Complete | Operation `3a1ab36fe4848b6bb1e1f7e6ec1d56d8`; exact backend active, migration `0016` applied, readiness/backups/OTA-disablement verified, no tablet action |
 | 8 | Current isolated recovery proof | Wave 7 | Complete | Operation `f13686cb03cbad501abbb9d9270ba1f2`; DLM and logical paths recovered migration `0016`, exact media, owner access, reports, and CSV within 24 hours; teardown independently clean |
-| 9 | Focused rehearsal and one-device canary start | Wave 8 | In progress | Code 8 and backend `sha256:8ae7…b02d` are deployed; triggered sync and a new one-hour canary require physical replay |
-| 10 | Canary acceptance and controlled fleet expansion | Wave 9 | Blocked | No expansion until the new one-hour canary passes |
+| 9 | Focused rehearsal and one-device canary start | Wave 8 | Complete | Code 8 and backend `sha256:8ae7…b02d` passed focused production replay; canary baseline recorded at 2026-09-01 12:48:44 MYT |
+| 10 | Canary acceptance and controlled fleet expansion | Wave 9 | In progress | One-hour canary runs from 2026-09-01 12:48:44 through 13:48:44 MYT; no expansion before acceptance |
 
 ## Wave 2 — Freeze the remediated server candidate
 
@@ -360,12 +360,14 @@ it to the replacement release.
 - Defective canary evidence:
   `/home/czeyik/.local/share/Cryptomator/mnt/dspvault/duducar-signing/wave-9-replay-20260830/`.
 
-Current state: Waves 1–3 and 5–8 are `Complete`; Wave 9 is `In progress`; Wave 4 is
-removed by final owner decision; Wave 10 is `Blocked`.
+Current state: Waves 1–3 and 5–9 are `Complete`; Wave 4 is removed by final
+owner decision; Wave 10 is `In progress`.
 Production runs backend digest `sha256:8ae7…b02d` with migration `0018`; OTA
 remains disabled. The enrolled tablet runs 4.1.0/code 8 and remains device
-owner. Triggered-sync physical proof and the new one-hour canary remain open.
-No fleet expansion is recorded.
+owner. Triggered sync and the exact scheduled boundary reached the tablet; the
+existing urgent playlist correctly retained playback precedence. The one-hour
+canary began at 2026-09-01 12:48:44 MYT and is due at 13:48:44 MYT if
+uninterrupted. No fleet expansion is recorded.
 
 | Timestamp (MYT) | Wave(s) | Status | Summary |
 |---|---|---|---|
@@ -384,3 +386,4 @@ No fleet expansion is recorded.
 | 2026-09-01 04:08 | 9 | In progress | Commit `4e314b6` implements immediate Resume DUDU, arbitrary overlapping schedules with exact start/end transitions, and 15-second images via migration `0017`; local backend and Android checks passed, but no production deployment or code 7 artifact has occurred. |
 | 2026-09-01 11:29 | 9 | In progress | Operation `0c7707aa5db9a4bd31143e4f6565c6cf` activated clean commit `158bcb3` on scanned backend `sha256:a4a8…747f0`, applied migration `0017`, passed readiness and backup assertions, and installed signed 4.1.0/code 7 (`aeeaf8cd…c0b4d`) over ADB while preserving device-owner state. Physical acceptance replay remains open. |
 | 2026-09-01 12:10 | 9 | In progress | Commit `c2618ac` and signed 4.1.0/code 8 (`87d83b0a…c1d6`) add deduplicated dashboard-triggered `sync_now`; operation `c4a7b6f5f93f23261d523b54525b8d15` activated scanned backend `sha256:8ae7…b02d`, applied migration `0018`, and passed readiness, backup, alarm, and device-owner assertions. A real publication-to-tablet transition remains to be observed. |
+| 2026-09-01 12:48:44 | 9–10 | Complete / In progress | Physical replay proved command delivery and the exact scheduled transition; the active urgent playlist correctly retained precedence. Public live/readiness checks were green, no CloudWatch alarm was active, Lenovo `HA259E36` remained device owner with 4.1.0/code 8 in the foreground, and the one-hour canary began. Target completion is 13:48:44 MYT if uninterrupted. |
