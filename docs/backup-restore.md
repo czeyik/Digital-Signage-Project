@@ -44,6 +44,11 @@ all timers, and workers remain off. After the archive, sidecar, KMS/checksum,
 version, and remote receipt checks pass, the broker and database are stopped
 and the host verifies that no DUDU container or public port is running.
 
+Before the refresh, the runtime renderer must leave the backend bearer-token
+file as exactly 64 lowercase hexadecimal bytes with no line ending. It may
+normalize the known legacy 64-hex-plus-LF value without changing the token;
+all other existing forms are rejected.
+
 The host receipt records the 32-hex activation operation ID. Repeating the same
 preflight reuses that fresh verified receipt; a failed refresh cleans up and
 can be retried with the same operation. The recovery authorization is consumed

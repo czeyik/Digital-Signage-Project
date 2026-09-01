@@ -10,11 +10,11 @@ RUN git clone --depth 1 --branch v2.11.4 https://github.com/caddyserver/caddy.gi
     && test "$(git -C /src rev-parse HEAD)" = "$CADDY_SOURCE_COMMIT"
 
 WORKDIR /src
-RUN go get golang.org/x/net@v0.56.0 golang.org/x/text@v0.39.0 google.golang.org/grpc@v1.82.1 \
+RUN go get golang.org/x/crypto@v0.55.0 golang.org/x/net@v0.57.0 golang.org/x/text@v0.41.0 google.golang.org/grpc@v1.82.1 \
     && go mod tidy \
     && go mod verify \
-    && test "$(sha256sum go.mod | cut -d ' ' -f 1)" = 86be144f8127f9bf6a173b26195ce10208dba3b716240cda945828cac029e9a1 \
-    && test "$(sha256sum go.sum | cut -d ' ' -f 1)" = 9a1e280c35131c1add8098db896e53761d316e3fdaf02f16536123c4ef3f523e
+    && test "$(sha256sum go.mod | cut -d ' ' -f 1)" = a092f0a81444e26ecdea87d58858b3511737929cbeed4ab4d675153a8d3db51d \
+    && test "$(sha256sum go.sum | cut -d ' ' -f 1)" = 5c04f692e2acc5bba059e6dfda5305d10acc087196c080ab2a006f364298cb24
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -trimpath -buildvcs=false -mod=readonly -tags=nobadger,nomysql,nopgx \
       -ldflags='-s -w -X github.com/caddyserver/caddy/v2.CustomVersion=v2.11.4-dudu.1' \

@@ -82,7 +82,11 @@ class KioskPolicyManager(private val context: Context) {
             // session temporarily restores USB transfer for staff recovery.
             manager.clearUserRestriction(admin, usbFileTransferRestriction)
             manager.setStatusBarDisabled(admin, false)
+            manager.clearPackagePersistentPreferredActivities(admin, context.packageName)
+            true
         } catch (_: SecurityException) {
+            false
+        } catch (_: IllegalArgumentException) {
             false
         }
     }

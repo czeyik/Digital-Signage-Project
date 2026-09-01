@@ -54,6 +54,8 @@ class MainActivity : Activity() {
     private val heartbeatPending = AtomicBoolean(false)
     private val uploadInFlight = AtomicBoolean(false)
     private val uploadPending = AtomicBoolean(false)
+    private val managementInFlight = AtomicBoolean(false)
+    private val managementPending = AtomicBoolean(false)
     private val manifestGeneration = AtomicLong(0)
     private val manifestPreparationLock = Any()
     private var pendingManifestPreparation: ManifestPreparation? = null
@@ -61,6 +63,7 @@ class MainActivity : Activity() {
     private val playbackHandler = Handler(Looper.getMainLooper())
     private val operationsHandler = Handler(Looper.getMainLooper())
     private val adminHandler = Handler(Looper.getMainLooper())
+    private val managementHandler = Handler(Looper.getMainLooper())
     private var activeManifest: JSONObject? = null
     private var stagedManifestIdentity: ManifestIdentity? = null
     private var stagedManifestGeneration: Long? = null
@@ -170,51 +173,20 @@ class MainActivity : Activity() {
     }
 
     private fun configureAdminControls() {
-        binding.root.setOnLongClickListener {
-            val mode = store.state("device_mode")
-            if (
-                (mode == "maintenance" || mode == "fallback") &&
-                credentials.hasKioskPinVerifier()
-            ) {
-                showAdminUnlock()
-            }
-            true
-        }
-        binding.adminUnlockButton.setOnClickListener {
-            val now = System.currentTimeMillis()
-            val remaining = credentials.pinLockoutRemainingMs(now)
-            if (remaining > 0) {
-                showPinLockout(remaining)
-                return@setOnClickListener
-            }
-            val pin = binding.adminPin.text.toString()
-            if (pin.length == 6 && credentials.verifyKioskPin(pin)) {
-                credentials.clearPinFailures()
-                startAdminSession(now)
-            } else {
-                binding.adminPin.text?.clear()
-                val lockout = credentials.recordFailedPinAttempt(now)
-                if (lockout > 0) {
-                    showPinLockout(lockout)
-                } else {
-                    binding.adminError.text = "Invalid administrator PIN."
-                }
-            }
-        }
-        binding.openSettingsButton.setOnClickListener {
+        binding.exitDuduButton.setOnClickListener {
             if (hasActiveAdminSession()) {
-                startActivity(Intent(Settings.ACTION_SETTINGS))
+                startActivity(
+                    Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+                finishAndRemoveTask()
             }
         }
-        binding.relockButton.setOnClickListener {
-            endAdminSession(bringToFront = false)
+        binding.adminPrepareShutdownButton.setOnClickListener {
+            if (hasActiveAdminSession()) requestShutdownPreparation()
         }
     }
 
     private fun configureShutdownControls() {
-        binding.prepareShutdownButton.setOnClickListener {
-            requestShutdownPreparation()
-        }
         binding.resumeDuduButton.setOnClickListener {
             requestResumeAfterShutdown()
         }
@@ -232,7 +204,7 @@ class MainActivity : Activity() {
     }
 
     private fun requestShutdownPreparation() {
-        if (isShutdownPrepared() || hasActiveAdminSession()) return
+        if (isShutdownPrepared()) return
         AlertDialog.Builder(this)
             .setTitle(R.string.prepare_shutdown_title)
             .setMessage(R.string.prepare_shutdown_message)
@@ -299,6 +271,12 @@ class MainActivity : Activity() {
     private fun resumeAfterPreparedShutdown() {
         store.clearPlannedShutdownMarker()
         shutdownPrepared = false
+        // Explicit resume also closes the session that authorized shutdown;
+        // otherwise synchronization is blocked until its relock timer expires.
+        adminHandler.removeCallbacks(adminRelock)
+        adminRelockScheduler.cancel()
+        credentials.endAdminSession()
+        locationTracker.endAdminSession()
         locationTracker.resumeAfterShutdown()
         binding.shutdownReady.visibility = View.GONE
         if (!enterLockedKiosk()) {
@@ -329,6 +307,7 @@ class MainActivity : Activity() {
         }
         if (!credentials.hasRefreshToken()) {
             showEnrollment()
+            scheduleManagementChecks()
             return
         }
         when (store.state("device_mode")) {
@@ -344,6 +323,7 @@ class MainActivity : Activity() {
         playbackHandler.removeCallbacksAndMessages(null)
         operationsHandler.removeCallbacksAndMessages(null)
         adminHandler.removeCallbacksAndMessages(null)
+        managementHandler.removeCallbacksAndMessages(null)
         controlExecutor.shutdownNow()
         downloadExecutor.shutdownNow()
         uploadExecutor.shutdownNow()
@@ -356,6 +336,11 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (!::credentials.isInitialized) return
+        if (intent.action == OperationsScheduler.ACTION_MANAGEMENT) {
+            operationsScheduler.scheduleManagement()
+            requestManagementCheck()
+            return
+        }
         if (isShutdownPrepared()) {
             operationsScheduler.cancel()
             showShutdownReady()
@@ -370,6 +355,7 @@ class MainActivity : Activity() {
                 operationsScheduler.scheduleSync()
                 synchronizeAndPlay()
             }
+            OperationsScheduler.ACTION_PLAYLIST_TRANSITION -> synchronizeAndPlay()
         }
     }
 
@@ -421,43 +407,30 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun showAdminUnlock() {
-        val remaining = credentials.pinLockoutRemainingMs(System.currentTimeMillis())
-        binding.adminPin.text?.clear()
-        binding.adminError.text = ""
-        binding.adminUnlock.visibility = View.VISIBLE
-        if (remaining > 0) showPinLockout(remaining)
-    }
-
-    private fun showPinLockout(remainingMs: Long) {
-        val seconds = ((remainingMs + 999) / 1000).coerceAtLeast(1)
-        binding.adminError.text = "Too many attempts. Try again in $seconds seconds."
-    }
-
-    private fun startAdminSession(nowEpochMs: Long) {
-        if (isShutdownPrepared()) return
+    private fun startAdminSession(nowEpochMs: Long): Boolean {
+        if (isShutdownPrepared()) return false
         if (!adminRelockScheduler.mayScheduleExactAlarm()) {
-            binding.adminError.text = getString(R.string.exact_alarm_required)
-            return
+            return false
         }
         credentials.beginAdminSession(nowEpochMs, SystemClock.elapsedRealtime())
         locationTracker.beginPlannedGap()
         if (!adminRelockScheduler.schedule(KioskAdminPolicy.SESSION_DURATION_MS)) {
             credentials.endAdminSession()
             locationTracker.endAdminSession()
-            binding.adminError.text = getString(R.string.exact_alarm_required)
-            return
+            return false
         }
-        operationsHandler.removeCallbacksAndMessages(null)
-        interruptCurrent("administrator_session")
-        stopPlayback()
         if (!kioskPolicies.relaxForAdminSession()) {
             adminRelockScheduler.cancel()
             credentials.endAdminSession()
             locationTracker.endAdminSession()
             showStatus(getString(R.string.kiosk_policy_failed))
-            return
+            return false
         }
+        operationsHandler.removeCallbacksAndMessages(null)
+        managementHandler.removeCallbacksAndMessages(null)
+        operationsScheduler.cancel()
+        interruptCurrent("administrator_session")
+        stopPlayback()
         try {
             stopLockTask()
         } catch (_: IllegalStateException) {
@@ -466,6 +439,7 @@ class MainActivity : Activity() {
             // The activity was not in lock-task mode.
         }
         showAdminSessionControls()
+        return true
     }
 
     private fun showAdminSessionControls() {
@@ -480,10 +454,8 @@ class MainActivity : Activity() {
         }
         stopPlayback()
         window.insetsController?.show(WindowInsets.Type.systemBars())
-        binding.adminUnlock.visibility = View.GONE
         binding.enrollment.visibility = View.GONE
         binding.status.visibility = View.GONE
-        binding.prepareShutdown.visibility = View.GONE
         binding.shutdownReady.visibility = View.GONE
         binding.adminControls.visibility = View.VISIBLE
         adminHandler.removeCallbacks(adminRelock)
@@ -495,7 +467,6 @@ class MainActivity : Activity() {
         adminRelockScheduler.cancel()
         credentials.endAdminSession()
         locationTracker.endAdminSession()
-        binding.adminUnlock.visibility = View.GONE
         binding.adminControls.visibility = View.GONE
         if (!activityResumed && bringToFront) {
             if (!kioskPolicies.applyLockedPolicies(
@@ -549,8 +520,9 @@ class MainActivity : Activity() {
         }
         binding.status.visibility = View.GONE
         binding.shutdownReady.visibility = View.GONE
-        showPrepareShutdownControl()
         binding.enrollment.visibility = View.VISIBLE
+        binding.enrollButton.isEnabled = true
+        binding.enrollmentError.text = ""
         binding.enrollButton.setOnClickListener {
             if (!EnrollmentPolicy.mayEnroll(BuildConfig.IS_PRODUCTION, kioskPolicies.isDeviceOwner())) {
                 binding.enrollment.visibility = View.GONE
@@ -645,6 +617,8 @@ class MainActivity : Activity() {
         try {
             val response = api.manifest()
             serverClock.update(response.getString("server_time"))
+            schedulePlaylistTransition(response.optString("next_playlist_transition_at"))
+            if (!credentials.hasManagementToken()) api.bootstrapManagement()
             // A shutdown prepared before this first trusted anchor is durable
             // locally, but must receive this trusted timestamp before upload.
             store.rebaseUnanchoredPlannedShutdownEvents(serverClock.now().toString())
@@ -802,14 +776,21 @@ class MainActivity : Activity() {
             PlaybackTransitionPolicy.shouldActivateImmediately(
                 hasActiveManifest = activeManifest != null,
                 sameManifest = sameManifest,
-                urgent = manifest.getBoolean("urgent"),
             )
         ) {
             val (attempted, activated) = synchronized(manifestPreparationLock) {
                 if (generation != manifestGeneration.get()) {
                     false to null
                 } else {
-                    if (activeManifest != null) interruptCurrent("urgent_playlist_replacement")
+                    if (activeManifest != null) {
+                        interruptCurrent(
+                            if (manifest.getBoolean("urgent")) {
+                                "urgent_playlist_replacement"
+                            } else {
+                                "scheduled_playlist_replacement"
+                            },
+                        )
+                    }
                     true to cache.activateStaged(identity)
                 }
             }
@@ -870,7 +851,7 @@ class MainActivity : Activity() {
                 return@runOnUiThread
             }
             operationsHandler.removeCallbacksAndMessages(null)
-            operationsScheduler.cancel()
+            operationsScheduler.cancelPlayback()
             api.clearAccessToken()
             uploadApi.clearAccessToken()
             locationTracker.onForegroundChanged(activityResumed)
@@ -881,6 +862,7 @@ class MainActivity : Activity() {
             stagedManifestGeneration = null
             interruptCurrent("credential_rejected")
             showEnrollment()
+            scheduleManagementChecks()
         }
     }
 
@@ -1049,12 +1031,10 @@ class MainActivity : Activity() {
                 .put("item_index", currentIndex)
                 .toString(),
         )
-        binding.adminUnlock.visibility = View.GONE
         binding.adminControls.visibility = View.GONE
         binding.enrollment.visibility = View.GONE
         binding.status.visibility = View.GONE
         binding.shutdownReady.visibility = View.GONE
-        showPrepareShutdownControl()
         return playbackId
     }
 
@@ -1428,11 +1408,69 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun requestManagementCheck() {
+        if (!credentials.hasManagementToken()) {
+            if (!credentials.hasRefreshToken()) return
+        }
+        requestCoalesced(
+            executor = controlExecutor,
+            inFlight = managementInFlight,
+            pending = managementPending,
+        ) {
+            try {
+                if (!credentials.hasManagementToken() && !api.bootstrapManagement()) return@requestCoalesced
+                val command = api.managementCommand() ?: return@requestCoalesced
+                val commandId = command.getString("id")
+                when (ManagementCommandPolicy.action(command.getString("kind"))) {
+                    ManagementCommandPolicy.Action.ADMIN_MODE -> runOnUiThread {
+                        if (startAdminSession(System.currentTimeMillis())) {
+                            controlExecutor.execute {
+                                api.acknowledgeManagementCommand(commandId)
+                            }
+                        }
+                    }
+                    ManagementCommandPolicy.Action.SYNC_NOW -> {
+                        if (api.acknowledgeManagementCommand(commandId)) {
+                            synchronizeAndPlay()
+                        }
+                    }
+                    ManagementCommandPolicy.Action.IGNORE -> return@requestCoalesced
+                }
+            } catch (_: Exception) {
+                // The next bounded management poll retries delivery.
+            }
+        }
+    }
+
+    private fun scheduleManagementChecks() {
+        managementHandler.removeCallbacksAndMessages(null)
+        if (!credentials.hasManagementToken() && !credentials.hasRefreshToken()) return
+        operationsScheduler.scheduleManagement()
+        val management = object : Runnable {
+            override fun run() {
+                if (hasActiveAdminSession() || isShutdownPrepared()) return
+                requestManagementCheck()
+                managementHandler.postDelayed(this, OperationsScheduler.MANAGEMENT_INTERVAL_MS)
+            }
+        }
+        managementHandler.post(management)
+    }
+
+    private fun schedulePlaylistTransition(value: String) {
+        operationsScheduler.cancelPlaylistTransition()
+        if (value.isBlank()) return
+        val transition = runCatching { Instant.parse(value) }.getOrNull() ?: return
+        operationsScheduler.schedulePlaylistTransition(
+            PlaylistSyncPolicy.delayUntil(serverClock.now(), transition),
+        )
+    }
+
     private fun scheduleOperations() {
         operationsHandler.removeCallbacksAndMessages(null)
         if (isShutdownPrepared()) return
         operationsScheduler.scheduleHeartbeat()
         operationsScheduler.scheduleSync()
+        scheduleManagementChecks()
         val heartbeat = object : Runnable {
             override fun run() {
                 if (isShutdownPrepared()) return
@@ -1494,7 +1532,6 @@ class MainActivity : Activity() {
         binding.shutdownReady.visibility = View.GONE
         binding.status.text = message
         binding.status.visibility = View.VISIBLE
-        showPrepareShutdownControl()
     }
 
     private fun showFallback() {
@@ -1505,7 +1542,6 @@ class MainActivity : Activity() {
         binding.image.setImageResource(R.drawable.dudu_fallback)
         binding.image.visibility = View.VISIBLE
         updateKeepScreenOn()
-        showPrepareShutdownControl()
     }
 
     private fun showShutdownReady() {
@@ -1514,18 +1550,11 @@ class MainActivity : Activity() {
         if (::locationTracker.isInitialized) locationTracker.markShutdown()
         operationsScheduler.cancel()
         stopPlayback()
-        binding.adminUnlock.visibility = View.GONE
         binding.adminControls.visibility = View.GONE
         binding.enrollment.visibility = View.GONE
         binding.status.visibility = View.GONE
-        binding.prepareShutdown.visibility = View.GONE
         binding.shutdownReady.visibility = View.VISIBLE
         hideSystemUi()
-    }
-
-    private fun showPrepareShutdownControl() {
-        binding.prepareShutdown.visibility =
-            if (!isShutdownPrepared() && !hasActiveAdminSession()) View.VISIBLE else View.GONE
     }
 
     private fun isShutdownPrepared(): Boolean =

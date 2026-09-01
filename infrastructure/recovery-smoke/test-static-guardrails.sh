@@ -112,6 +112,15 @@ require_literal '"data-root"' "$root_dir/runtime/duducar-recovery-stack"
 require_literal 'docker network create --internal' "$root_dir/runtime/duducar-recovery-stack"
 require_literal '--restart no' "$root_dir/runtime/duducar-recovery-stack"
 require_literal 'start_existing_container_if_stopped' "$root_dir/runtime/duducar-recovery-stack"
+database_start_definition=$(awk '
+  /^start_database\(\) \{/ { in_database = 1 }
+  in_database { print }
+  in_database && /^}/ { exit }
+' "$root_dir/runtime/duducar-recovery-stack")
+if ! printf '%s\n' "$database_start_definition" | grep -Fq -- '/docker-entrypoint-initdb.d/010-roles.sh'; then
+  echo "Recovery database start must initialize clone-local roles before callers run grants." >&2
+  exit 1
+fi
 require_literal 'assert_caddy_isolation' "$root_dir/runtime/duducar-recovery-stack"
 require_literal 'loopback_proxy_listener_present' "$root_dir/runtime/duducar-recovery-stack"
 require_literal 'loopback_proxy_listener_present_any' "$root_dir/runtime/duducar-recovery-stack"

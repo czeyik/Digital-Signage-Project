@@ -4,6 +4,8 @@ import android.app.ApplicationExitInfo
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import java.time.Duration
+import java.time.Instant
 import java.util.zip.GZIPOutputStream
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
@@ -369,8 +371,7 @@ object PlaybackTransitionPolicy {
     fun shouldActivateImmediately(
         hasActiveManifest: Boolean,
         sameManifest: Boolean,
-        urgent: Boolean,
-    ): Boolean = !hasActiveManifest || (urgent && !sameManifest)
+    ): Boolean = !hasActiveManifest || !sameManifest
 
     fun shouldStart(
         mode: String?,
@@ -382,4 +383,19 @@ object PlaybackTransitionPolicy {
             hasActiveManifest &&
             !playbackActive &&
             !adminSessionActive
+}
+
+object PlaylistSyncPolicy {
+    fun delayUntil(now: Instant, transition: Instant): Long =
+        Duration.between(now, transition).toMillis().coerceAtLeast(0)
+}
+
+object ManagementCommandPolicy {
+    enum class Action { ADMIN_MODE, SYNC_NOW, IGNORE }
+
+    fun action(kind: String): Action = when (kind) {
+        "admin_mode" -> Action.ADMIN_MODE
+        "sync_now" -> Action.SYNC_NOW
+        else -> Action.IGNORE
+    }
 }

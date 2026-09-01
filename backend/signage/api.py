@@ -27,15 +27,20 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import exception_handler as drf_exception_handler
 
-from .authentication import DeviceAccessTokenAuthentication
+from .authentication import (
+    DeviceAccessTokenAuthentication,
+    DeviceManagementTokenAuthentication,
+)
 from .integrity import verify_integrity_token
 from .models import (
     Alert,
     Device,
     DeviceAccessToken,
+    DeviceCommand,
     DeviceCredential,
     DeviceHeartbeat,
     DeviceLocationPoint,
+    DeviceManagementCredential,
     DeviceOperationalEvent,
     EnrollmentChallenge,
     EnrollmentCode,
@@ -47,6 +52,7 @@ from .models import (
 from .services import (
     active_playlist,
     enforce_api_throttle,
+    next_playlist_transition_at,
     open_alert,
     open_or_escalate_alert,
     throttle_wait,
@@ -94,6 +100,7 @@ PLAYBACK_FAILURE_REASONS_BY_STATUS = {
             "loop_interrupted_before_entry",
             "planned_shutdown",
             "server_forbidden",
+            "scheduled_playlist_replacement",
             "urgent_playlist_replacement",
         }
     ),
@@ -558,7 +565,8 @@ def _issue_device_credentials(
     )
     credential, refresh_token = DeviceCredential.issue(device)
     access, access_token = DeviceAccessToken.issue(credential)
-    return device, refresh_token, access, access_token
+    management_token = DeviceManagementCredential.issue(device)
+    return device, refresh_token, access, access_token, management_token
 
 
 @api_view(["POST"])
@@ -601,7 +609,13 @@ def enroll(request):
                 )
             challenge.used_at = timezone.now()
             challenge.save(update_fields=["used_at"])
-            device, refresh_token, access, access_token = _issue_device_credentials(
+            (
+                device,
+                refresh_token,
+                access,
+                access_token,
+                management_token,
+            ) = _issue_device_credentials(
                 enrollment,
                 challenge.android_id_hash,
                 challenge.android_version,
@@ -643,7 +657,13 @@ def enroll(request):
                 raise exceptions.AuthenticationFailed(
                     "Invalid or expired enrollment code."
                 )
-            device, refresh_token, access, access_token = _issue_device_credentials(
+            (
+                device,
+                refresh_token,
+                access,
+                access_token,
+                management_token,
+            ) = _issue_device_credentials(
                 enrollment,
                 token_hash(android_id),
                 android_version,
@@ -665,9 +685,79 @@ def enroll(request):
             "access_token_expires_at": access.expires_at,
             "server_time": timezone.now(),
             "kiosk_pin_verifier": device.kiosk_pin_hash,
+            "management_token": management_token,
         },
         status=status.HTTP_201_CREATED,
     )
+
+
+@api_view(["POST"])
+def management_bootstrap(request):
+    """Rotate the narrow management credential for an authenticated player."""
+
+    return Response(
+        {
+            "management_token": DeviceManagementCredential.issue(device_for(request)),
+            "server_time": timezone.now(),
+        }
+    )
+
+
+@api_view(["GET", "POST"])
+@authentication_classes([DeviceManagementTokenAuthentication])
+@permission_classes([AllowAny])
+def management_commands(request):
+    device = device_for(request)
+    now = timezone.now()
+    if request.method == "POST":
+        try:
+            command_id = uuid.UUID(str(request.data.get("command_id", "")))
+        except (TypeError, ValueError) as exc:
+            raise serializers.ValidationError("Invalid command ID.") from exc
+        with transaction.atomic():
+            command = (
+                DeviceCommand.objects.select_for_update()
+                .filter(
+                    pk=command_id,
+                    device=device,
+                    delivered_at__isnull=False,
+                    acknowledged_at__isnull=True,
+                    expires_at__gt=now,
+                )
+                .first()
+            )
+            if command is None:
+                raise serializers.ValidationError("Command is unavailable.")
+            command.acknowledged_at = now
+            command.save(update_fields=["acknowledged_at", "updated_at"])
+        return Response({"acknowledged": True, "server_time": now})
+
+    with transaction.atomic():
+        command = (
+            DeviceCommand.objects.select_for_update()
+            .filter(
+                device=device,
+                acknowledged_at__isnull=True,
+                expires_at__gt=now,
+            )
+            .order_by("created_at")
+            .first()
+        )
+        if command is None:
+            return Response({"command": None, "server_time": now})
+        if command.delivered_at is None:
+            command.delivered_at = now
+            command.save(update_fields=["delivered_at", "updated_at"])
+        return Response(
+            {
+                "server_time": now,
+                "command": {
+                    "id": str(command.id),
+                    "kind": command.kind,
+                    "expires_at": command.expires_at,
+                },
+            }
+        )
 
 
 @api_view(["POST"])
@@ -713,6 +803,7 @@ def token_refresh(request):
 @api_view(["GET"])
 def sync_manifest(request):
     device = device_for(request)
+    next_transition = next_playlist_transition_at()
 
     def mark_successful_sync():
         device.last_sync_at = timezone.now()
@@ -750,6 +841,7 @@ def sync_manifest(request):
                 "message": "This display is temporarily unavailable.",
                 "kiosk_pin_verifier": device.kiosk_pin_hash,
                 "app_update": app_update,
+                "next_playlist_transition_at": next_transition,
             }
         )
     playlist = active_playlist()
@@ -762,6 +854,7 @@ def sync_manifest(request):
                 "playlist": None,
                 "kiosk_pin_verifier": device.kiosk_pin_hash,
                 "app_update": app_update,
+                "next_playlist_transition_at": next_transition,
             }
         )
     items = playlist.items.select_related("media").all()
@@ -795,6 +888,7 @@ def sync_manifest(request):
             "server_time": timezone.now(),
             "kiosk_pin_verifier": device.kiosk_pin_hash,
             "app_update": app_update,
+            "next_playlist_transition_at": next_transition,
             "playlist": {
                 "id": str(playlist.id),
                 "name": playlist.name,

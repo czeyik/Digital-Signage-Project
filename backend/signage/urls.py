@@ -62,6 +62,11 @@ urlpatterns = [
         name="device-reactivate",
     ),
     path(
+        "devices/<uuid:device_id>/admin-mode/",
+        views.device_admin_mode,
+        name="device-admin-mode",
+    ),
+    path(
         "devices/<uuid:device_id>/credentials/revoke/",
         views.device_credentials_revoke,
         name="device-credentials-revoke",

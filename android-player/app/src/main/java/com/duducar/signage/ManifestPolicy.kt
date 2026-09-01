@@ -19,7 +19,7 @@ object ManifestPolicy {
     const val MAX_EVENT_QUEUE_BYTES = 500L * 1024 * 1024
     private const val MAX_MINIMUM_FREE_BYTES = 4L * 1024 * 1024 * 1024
     private const val MAX_PLAYLIST_ITEMS = 100
-    private const val IMAGE_DURATION_MS = 10_000L
+    private const val IMAGE_DURATION_MS = 15_000L
     private const val MAX_VIDEO_DURATION_MS = 15_000L
     private const val MAX_PLAYLIST_DURATION_MS = 30L * 60 * 1000
     private const val REQUIRED_TIME_ZONE = "Asia/Kuala_Lumpur"

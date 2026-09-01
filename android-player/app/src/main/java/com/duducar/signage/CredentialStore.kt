@@ -17,23 +17,46 @@ class CredentialStore(context: Context) {
 
     fun hasRefreshToken(): Boolean = refreshToken() != null
 
-    fun saveEnrollmentCredentials(refreshToken: String, kioskPinVerifier: String): Boolean {
-        if (refreshToken.isBlank() || kioskPinVerifier.isBlank()) return false
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+    fun saveEnrollmentCredentials(
+        refreshToken: String,
+        kioskPinVerifier: String,
+        managementToken: String,
+    ): Boolean {
+        if (refreshToken.isBlank() || kioskPinVerifier.isBlank() || managementToken.isBlank()) {
+            return false
+        }
+        val refresh = encrypt(refreshToken)
+        val management = encrypt(managementToken)
         val committed = preferences.edit()
             .putString(
                 "refresh_ciphertext",
-                Base64.encodeToString(
-                    cipher.doFinal(refreshToken.toByteArray(Charsets.UTF_8)),
-                    Base64.NO_WRAP,
-                ),
+                refresh.first,
             )
-            .putString("refresh_iv", Base64.encodeToString(cipher.iv, Base64.NO_WRAP))
+            .putString("refresh_iv", refresh.second)
+            .putString("management_ciphertext", management.first)
+            .putString("management_iv", management.second)
             .putString("kiosk_pin_verifier", kioskPinVerifier)
             .commit()
         if (!committed) clearEnrollment()
         return committed
+    }
+
+    fun saveManagementToken(token: String): Boolean {
+        if (token.isBlank()) return false
+        val encrypted = encrypt(token)
+        return preferences.edit()
+            .putString("management_ciphertext", encrypted.first)
+            .putString("management_iv", encrypted.second)
+            .commit()
+    }
+
+    fun hasManagementToken(): Boolean = managementToken() != null
+
+    fun clearManagementToken() {
+        preferences.edit()
+            .remove("management_ciphertext")
+            .remove("management_iv")
+            .commit()
     }
 
     fun saveKioskPinVerifier(verifier: String) {
@@ -121,6 +144,29 @@ class CredentialStore(context: Context) {
         clearEnrollment()
         null
     }
+
+    fun managementToken(): String? = decrypt("management_ciphertext", "management_iv")
+
+    private fun encrypt(value: String): Pair<String, String> {
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
+        return Base64.encodeToString(
+            cipher.doFinal(value.toByteArray(Charsets.UTF_8)),
+            Base64.NO_WRAP,
+        ) to Base64.encodeToString(cipher.iv, Base64.NO_WRAP)
+    }
+
+    private fun decrypt(ciphertextKey: String, ivKey: String): String? = runCatching {
+        val ciphertext = preferences.getString(ciphertextKey, null) ?: return null
+        val iv = preferences.getString(ivKey, null) ?: return null
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            getOrCreateKey(),
+            GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)),
+        )
+        String(cipher.doFinal(Base64.decode(ciphertext, Base64.NO_WRAP)), Charsets.UTF_8)
+    }.getOrNull()
 
     private fun getOrCreateKey(): SecretKey {
         val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

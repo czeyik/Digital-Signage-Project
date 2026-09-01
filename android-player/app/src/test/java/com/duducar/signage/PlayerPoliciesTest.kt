@@ -2,6 +2,7 @@ package com.duducar.signage
 
 import android.app.ApplicationExitInfo
 import java.io.ByteArrayInputStream
+import java.time.Instant
 import java.util.zip.GZIPInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -12,6 +13,35 @@ import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.PBEKeySpec
 
 class PlayerPoliciesTest {
+    @Test
+    fun playlistTransitionUsesTheServerClockAndNeverSchedulesNegativeDelay() {
+        val now = Instant.parse("2026-08-31T03:59:30Z")
+        assertEquals(
+            30_000L,
+            PlaylistSyncPolicy.delayUntil(now, Instant.parse("2026-08-31T04:00:00Z")),
+        )
+        assertEquals(
+            0L,
+            PlaylistSyncPolicy.delayUntil(now, Instant.parse("2026-08-31T03:59:00Z")),
+        )
+    }
+
+    @Test
+    fun managementCommandsDispatchOnlyKnownActions() {
+        assertEquals(
+            ManagementCommandPolicy.Action.ADMIN_MODE,
+            ManagementCommandPolicy.action("admin_mode"),
+        )
+        assertEquals(
+            ManagementCommandPolicy.Action.SYNC_NOW,
+            ManagementCommandPolicy.action("sync_now"),
+        )
+        assertEquals(
+            ManagementCommandPolicy.Action.IGNORE,
+            ManagementCommandPolicy.action("unknown"),
+        )
+    }
+
     @Test
     fun locationPolicyAcceptsOnlyFreshPreciseNonMockGpsOrNetworkFixes() {
         assertTrue(LocationPolicy.acceptsFix("gps", 100f, 0, false))
@@ -268,26 +298,23 @@ class PlayerPoliciesTest {
     }
 
     @Test
-    fun onlyFirstOrChangedUrgentManifestActivatesImmediately() {
+    fun everyChangedManifestActivatesImmediatelyAtItsServerSelectedBoundary() {
         assertTrue(
             PlaybackTransitionPolicy.shouldActivateImmediately(
                 hasActiveManifest = false,
                 sameManifest = false,
-                urgent = false,
             ),
         )
         assertTrue(
             PlaybackTransitionPolicy.shouldActivateImmediately(
                 hasActiveManifest = true,
                 sameManifest = false,
-                urgent = true,
             ),
         )
         assertFalse(
             PlaybackTransitionPolicy.shouldActivateImmediately(
                 hasActiveManifest = true,
                 sameManifest = true,
-                urgent = true,
             ),
         )
     }

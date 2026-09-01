@@ -22,7 +22,9 @@ from .models import (
     AuditEvent,
     Device,
     DeviceAccessToken,
+    DeviceCommand,
     DeviceCredential,
+    DeviceManagementCredential,
     EnrollmentCode,
     MediaAsset,
     MediaDeletion,
@@ -475,6 +477,42 @@ def validate_normalized_image(path, expected_mime):
             raise ValidationError("Normalized image must use RGB pixels.")
 
 
+def copy_stored_media(storage, name, destination):
+    with storage.open(name, "rb") as source, destination.open("wb") as output:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            output.write(chunk)
+
+
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_ready_media_delivery(asset):
+    """Validate the stored bytes used by device manifests, not a local precursor."""
+
+    if asset.status != MediaAsset.Status.READY or not asset.normalized_file:
+        raise ValidationError("Media is not ready for delivery.")
+    with tempfile.TemporaryDirectory() as temporary:
+        suffix = Path(asset.normalized_file.name).suffix
+        delivered = Path(temporary) / f"delivered-media{suffix}"
+        copy_stored_media(
+            asset.normalized_file.storage,
+            asset.normalized_file.name,
+            delivered,
+        )
+        if (
+            delivered.stat().st_size != asset.file_size
+            or file_sha256(delivered) != asset.sha256
+        ):
+            raise ValidationError("Stored media does not match its validated metadata.")
+        if asset.kind == MediaAsset.Kind.IMAGE:
+            validate_normalized_image(delivered, asset.mime_type)
+
+
 def copy_source_to_temporary_file(asset, directory):
     source_name = Path(asset.source_file.name).name
     suffix = Path(source_name).suffix.lower()
@@ -612,7 +650,7 @@ def inspect_media(asset, require_malware_scanner=True):
                 output = normalize_image(source, detected)
                 asset.width = settings.MEDIA_NORMALIZED_IMAGE_WIDTH
                 asset.height = settings.MEDIA_NORMALIZED_IMAGE_HEIGHT
-                asset.duration_ms = 10_000
+                asset.duration_ms = 15_000
             else:
                 detected = sniff_video_mime(source)
                 details = run_ffprobe(source)
@@ -658,21 +696,21 @@ def inspect_media(asset, require_malware_scanner=True):
                 except subprocess.TimeoutExpired as exc:
                     raise ValidationError("Video normalization timed out.") from exc
                 asset.duration_ms = validate_normalized_video(output)
-            digest = hashlib.sha256()
-            with output.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
             with output.open("rb") as handle:
                 generated_name = asset.normalized_file.field.generate_filename(
                     asset,
                     normalized_media_name(asset, source, processing_token),
                 )
                 staged_name = storage.save(generated_name, File(handle))
-            asset.sha256 = digest.hexdigest()
-            asset.file_size = output.stat().st_size
             asset.mime_type = (
                 "video/mp4" if asset.kind == MediaAsset.Kind.VIDEO else detected
             )
+            delivered = Path(temporary) / f"delivered-media{output.suffix}"
+            copy_stored_media(storage, staged_name, delivered)
+            if asset.kind == MediaAsset.Kind.IMAGE:
+                validate_normalized_image(delivered, asset.mime_type)
+            asset.sha256 = file_sha256(delivered)
+            asset.file_size = delivered.stat().st_size
             asset.status = MediaAsset.Status.READY
             asset.rejection_reason = ""
     except (
@@ -682,6 +720,9 @@ def inspect_media(asset, require_malware_scanner=True):
         ValueError,
         StopIteration,
     ) as exc:
+        if staged_name:
+            storage.delete(staged_name)
+            staged_name = ""
         asset.status = MediaAsset.Status.REJECTED
         asset.rejection_reason = str(exc)[:255]
     finalized = _finalize_media_processing(asset, processing_token, staged_name)
@@ -709,6 +750,14 @@ def publish_playlist(playlist, actor, urgent=False):
         raise ValidationError("Playlist exceeds the configured entry limit.")
     if any(item.media.status != MediaAsset.Status.READY for item in items):
         raise ValidationError("Every media item must be validated before publishing.")
+    verified_images = set()
+    for item in items:
+        if (
+            item.media.kind == MediaAsset.Kind.IMAGE
+            and item.media_id not in verified_images
+        ):
+            validate_ready_media_delivery(item.media)
+            verified_images.add(item.media_id)
     duration = sum(item.media.duration_ms for item in items) / 1000
     if duration > limits.playlist_max_duration_seconds:
         raise ValidationError("Playlist exceeds the configured duration limit.")
@@ -716,7 +765,7 @@ def publish_playlist(playlist, actor, urgent=False):
     now = timezone.now()
     if urgent and not (locked.starts_at <= now < locked.ends_at):
         raise ValidationError(
-            "An urgent replacement must cover the current weekly window."
+            "An urgent replacement must cover the current time."
         )
 
     overlapping = (
@@ -737,18 +786,12 @@ def publish_playlist(playlist, actor, urgent=False):
             is_urgent=urgent,
         )
     )
-    conflicts = overlapping.filter(is_urgent=urgent).exclude(
+    if urgent and overlapping.filter(is_urgent=True).exclude(
         pk__in=[previous.pk for previous in superseded]
-    )
-    if conflicts.exists():
-        if urgent:
-            raise ValidationError(
-                "An urgent replacement is already published for this weekly window; "
-                "create its next version to correct it."
-            )
+    ).exists():
         raise ValidationError(
-            "A published scheduled playlist already overlaps this weekly window; "
-            "create its next version to correct it."
+            "An urgent replacement already overlaps this schedule; create its "
+            "next version to correct it."
         )
 
     locked.status = Playlist.Status.PUBLISHED
@@ -766,6 +809,25 @@ def publish_playlist(playlist, actor, urgent=False):
             {"replacement": str(locked.id)},
         )
     audit(actor, "playlist.publish", locked, {"urgent": urgent})
+    pending_sync_devices = DeviceCommand.objects.filter(
+        device__status=Device.Status.ACTIVE,
+        kind=DeviceCommand.Kind.SYNC_NOW,
+        acknowledged_at__isnull=True,
+        expires_at__gt=now,
+    ).values_list("device_id", flat=True)
+    devices = Device.objects.filter(
+        status=Device.Status.ACTIVE,
+        management_credential__isnull=False,
+    ).exclude(pk__in=pending_sync_devices)
+    DeviceCommand.objects.bulk_create(
+        DeviceCommand(
+            device=device,
+            kind=DeviceCommand.Kind.SYNC_NOW,
+            requested_by=actor,
+            expires_at=now + timedelta(minutes=10),
+        )
+        for device in devices
+    )
     return locked
 
 
@@ -792,7 +854,7 @@ def active_playlist():
             starts_at__lte=now,
             ends_at__gt=now,
         )
-        .order_by("-starts_at", "-version")
+        .order_by("-starts_at", "-published_at", "-id")
         .first()
     )
     if scheduled:
@@ -806,6 +868,26 @@ def active_playlist():
         .order_by("-published_at")
         .first()
     )
+
+
+def next_playlist_transition_at():
+    """Return the next time the effective playlist can change without a publish."""
+
+    now = timezone.now()
+    current = active_playlist()
+    next_start = (
+        Playlist.objects.filter(
+            status=Playlist.Status.PUBLISHED,
+            starts_at__gt=now,
+        )
+        .order_by("starts_at")
+        .values_list("starts_at", flat=True)
+        .first()
+    )
+    candidates = [next_start] if next_start else []
+    if current and current.ends_at > now:
+        candidates.append(current.ends_at)
+    return min(candidates, default=None)
 
 
 def _revoke_active_device_credentials(device):
@@ -833,10 +915,13 @@ def _expire_unused_enrollment_codes(device):
 
 @transaction.atomic
 def revoke_device_credentials(device, actor):
-    """Invalidate all active refresh and access tokens for a lost device."""
+    """Invalidate playback and management credentials for a lost device."""
 
     locked = Device.objects.select_for_update().get(pk=device.pk)
     credential_count = _revoke_active_device_credentials(locked)
+    management_count, _ = DeviceManagementCredential.objects.filter(
+        device=locked
+    ).delete()
     enrollment_count = _expire_unused_enrollment_codes(locked)
     audit(
         actor,
@@ -844,6 +929,7 @@ def revoke_device_credentials(device, actor):
         locked,
         {
             "credentials_revoked": credential_count,
+            "management_credentials_revoked": management_count,
             "enrollment_codes_expired": enrollment_count,
         },
     )
@@ -863,7 +949,7 @@ def disable_device(device, actor):
         "device.disable",
         locked,
         {
-            "credentials_revoked": credential_count,
+            "playback_credentials_revoked": credential_count,
             "enrollment_codes_expired": enrollment_count,
         },
     )

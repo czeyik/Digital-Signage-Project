@@ -50,11 +50,15 @@ case "${1:-} ${2:-}" in
         ;;
       *RestartPolicy*) printf 'no\n' ;;
       *NetworkSettings*)
-        case "$name" in
-          duducar-postgres) printf '172.30.0.11\n' ;;
-          duducar-web) printf '172.30.0.10\n' ;;
-          duducar-caddy) printf '172.30.0.12\n' ;;
-        esac
+        if [ "${DUDUCAR_STOPPED_NETWORK:-0}" = 1 ] && [[ "$format" != *IPAMConfig* ]]; then
+          printf '\n'
+        else
+          case "$name" in
+            duducar-postgres) printf '172.30.0.11\n' ;;
+            duducar-web) printf '172.30.0.10\n' ;;
+            duducar-caddy) printf '172.30.0.12\n' ;;
+          esac
+        fi
         ;;
       *State.Running*) printf 'true\n' ;;
       *State.Health.Status*) printf 'healthy\n' ;;
@@ -126,5 +130,10 @@ grep -Fq -- 'stop --time 30 duducar-postgres' "$DUDUCAR_DOCKER_LOG"
 unset DUDUCAR_EXPECT_UNPUBLISHED
 bash "$runtime_dir/duducar-stack" start
 grep -Fq -- '--publish 5432:5432' "$DUDUCAR_DOCKER_LOG"
+
+: > "$DUDUCAR_DOCKER_LOG"
+export DUDUCAR_STOPPED_NETWORK=1
+bash "$runtime_dir/duducar-stack" start
+! grep -Fq 'start duducar-postgres' "$DUDUCAR_DOCKER_LOG"
 
 echo "Post-deploy and stopped-state database lifecycle boundaries passed."

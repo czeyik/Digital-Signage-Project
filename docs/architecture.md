@@ -29,13 +29,17 @@ system.
 ## Trust Boundaries
 
 - Dashboard users authenticate with secure server sessions and CSRF protection.
-- Devices enroll once with a 15-minute code and receive an individual refresh
-  credential. They exchange it for one-hour bearer access tokens.
-- Refresh credentials and access tokens are stored only as hashes by the
-  server. Revoking a device invalidates all credentials for that device.
+- Devices enroll with a 15-minute code and receive separate playback-refresh
+  and management credentials. Playback refresh credentials are exchanged for
+  one-hour bearer access tokens.
+- Persistent credentials and access tokens are stored only as hashes by the
+  server. Playback disablement revokes playback credentials but retains the
+  management credential, whose only authority is polling and acknowledging a
+  short-lived remote Admin mode command. Re-enrollment rotates both.
 - Device endpoints never trust a device-supplied assignment, duration, media
   identity, or playlist identity without matching it to server records.
-- Media remains quarantined until scanning and normalization succeeds.
+- Media remains quarantined until scanning and normalization succeeds; the
+  stored delivery object is re-read and verified before it can be published.
 - Object storage is private; clients receive expiring URLs for authorized
   objects.
 

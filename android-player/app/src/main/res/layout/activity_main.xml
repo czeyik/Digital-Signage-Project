@@ -31,22 +31,6 @@
         android:textStyle="bold" />
 
     <LinearLayout
-        android:id="@+id/prepareShutdown"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_gravity="bottom|end"
-        android:layout_margin="24dp"
-        android:background="#F7F8F4"
-        android:padding="8dp">
-
-        <Button
-            android:id="@+id/prepareShutdownButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="@string/prepare_shutdown" />
-    </LinearLayout>
-
-    <LinearLayout
         android:id="@+id/shutdownReady"
         android:layout_width="620dp"
         android:layout_height="wrap_content"
@@ -124,46 +108,6 @@
     </LinearLayout>
 
     <LinearLayout
-        android:id="@+id/adminUnlock"
-        android:layout_width="420dp"
-        android:layout_height="wrap_content"
-        android:layout_gravity="center"
-        android:background="#F7F8F4"
-        android:orientation="vertical"
-        android:padding="32dp"
-        android:visibility="gone">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Administrator unlock"
-            android:textColor="#10271E"
-            android:textSize="24sp"
-            android:textStyle="bold" />
-
-        <EditText
-            android:id="@+id/adminPin"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:digits="0123456789"
-            android:hint="6-digit PIN"
-            android:inputType="numberPassword"
-            android:maxLength="6" />
-
-        <Button
-            android:id="@+id/adminUnlockButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Unlock kiosk" />
-
-        <TextView
-            android:id="@+id/adminError"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textColor="#A42A2A" />
-    </LinearLayout>
-
-    <LinearLayout
         android:id="@+id/adminControls"
         android:layout_width="520dp"
         android:layout_height="wrap_content"
@@ -183,17 +127,17 @@
             android:textStyle="bold" />
 
         <Button
-            android:id="@+id/openSettingsButton"
+            android:id="@+id/exitDuduButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="@string/open_android_settings" />
+            android:text="@string/exit_dudu" />
 
         <Button
-            android:id="@+id/relockButton"
+            android:id="@+id/adminPrepareShutdownButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="@string/relock_now" />
+            android:text="@string/prepare_shutdown" />
     </LinearLayout>
 </FrameLayout>

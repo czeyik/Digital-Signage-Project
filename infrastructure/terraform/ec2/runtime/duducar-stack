@@ -262,7 +262,7 @@ container_config_matches() {
   expected_ip=$3
   current_image=$(docker inspect --format '{{.Config.Image}}' "$name")
   restart_policy=$(docker inspect --format '{{.HostConfig.RestartPolicy.Name}}' "$name")
-  current_ip=$(docker inspect --format '{{(index .NetworkSettings.Networks "duducar").IPAddress}}' "$name")
+  current_ip=$(docker inspect --format '{{with index .NetworkSettings.Networks "duducar"}}{{if .IPAddress}}{{.IPAddress}}{{else}}{{with .IPAMConfig}}{{.IPv4Address}}{{end}}{{end}}{{end}}' "$name")
   [ "$current_image" = "$expected_image" ] && \
     { [ -z "$restart_policy" ] || [ "$restart_policy" = no ]; } && \
     [ "$current_ip" = "$expected_ip" ]

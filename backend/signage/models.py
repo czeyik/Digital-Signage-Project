@@ -438,20 +438,6 @@ class Playlist(TimeStampedModel):
         return "Ended"
 
     def clean(self):
-        local_start = timezone.localtime(self.starts_at)
-        if (
-            local_start.weekday() != 0
-            or local_start.hour != 12
-            or local_start.minute != 0
-            or local_start.second != 0
-        ):
-            raise ValidationError(
-                {"starts_at": "Weekly playlists must begin Monday at 12:00 PM."}
-            )
-        if self.ends_at - self.starts_at != timedelta(days=7):
-            raise ValidationError(
-                {"ends_at": "Weekly playlists must cover exactly seven days."}
-            )
         if self.pk:
             original = Playlist.objects.filter(pk=self.pk).first()
             if original:
@@ -566,7 +552,7 @@ class MediaAsset(TimeStampedModel):
     sha256 = models.CharField(max_length=64, blank=True)
     mime_type = models.CharField(max_length=100, blank=True)
     file_size = models.PositiveBigIntegerField(default=0)
-    duration_ms = models.PositiveIntegerField(default=10_000)
+    duration_ms = models.PositiveIntegerField(default=15_000)
     width = models.PositiveIntegerField(null=True, blank=True)
     height = models.PositiveIntegerField(null=True, blank=True)
     rejection_reason = models.CharField(max_length=255, blank=True)
@@ -582,9 +568,9 @@ class MediaAsset(TimeStampedModel):
     processing_finished_at = models.DateTimeField(null=True, blank=True)
 
     def clean(self):
-        if self.kind == self.Kind.IMAGE and self.duration_ms != 10_000:
+        if self.kind == self.Kind.IMAGE and self.duration_ms != 15_000:
             raise ValidationError(
-                {"duration_ms": "Images must display for 10 seconds."}
+                {"duration_ms": "Images must display for 15 seconds."}
             )
         if self.kind == self.Kind.VIDEO and self.duration_ms > 15_000:
             raise ValidationError({"duration_ms": "Videos cannot exceed 15 seconds."})
@@ -797,6 +783,47 @@ class DeviceCredential(TimeStampedModel):
         raw = secrets.token_urlsafe(48)
         credential = cls.objects.create(device=device, refresh_hash=token_hash(raw))
         return credential, raw
+
+
+class DeviceManagementCredential(TimeStampedModel):
+    device = models.OneToOneField(
+        Device, on_delete=models.CASCADE, related_name="management_credential"
+    )
+    token_hash = models.CharField(max_length=64, unique=True)
+
+    @classmethod
+    def issue(cls, device):
+        raw = secrets.token_urlsafe(48)
+        cls.objects.update_or_create(
+            device=device,
+            defaults={"token_hash": token_hash(raw)},
+        )
+        return raw
+
+
+class DeviceCommand(TimeStampedModel):
+    class Kind(models.TextChoices):
+        ADMIN_MODE = "admin_mode", "Admin mode"
+        SYNC_NOW = "sync_now", "Sync now"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    device = models.ForeignKey(
+        Device, on_delete=models.CASCADE, related_name="commands"
+    )
+    kind = models.CharField(max_length=32, choices=Kind)
+    requested_by = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT)
+    expires_at = models.DateTimeField()
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["created_at"]
+        indexes = [
+            models.Index(
+                fields=["device", "acknowledged_at", "expires_at"],
+                name="signage_cmd_pending_idx",
+            )
+        ]
 
 
 class DeviceAccessToken(models.Model):

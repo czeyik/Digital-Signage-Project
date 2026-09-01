@@ -16,18 +16,20 @@ expected_backend_image=${9:-}
 expected_required_app_version=${10:-}
 expected_postgres_image=${11:-}
 expected_caddy_image=${12:-}
-app_update_version_code=${13:-0}
-app_update_version_name=${14:-}
-app_update_storage_name=${15:-}
-app_update_sha256=${16:-}
-app_update_size_bytes=${17:-0}
-app_update_rollout_percent=${18:-0}
-expected_app_update_version_code=${19:-0}
-expected_app_update_version_name=${20:-}
-expected_app_update_storage_name=${21:-}
-expected_app_update_sha256=${22:-}
-expected_app_update_size_bytes=${23:-0}
-expected_app_update_rollout_percent=${24:-0}
+play_integrity_project=${13:-}
+expected_play_integrity_project=${14:-}
+app_update_version_code=${15:-0}
+app_update_version_name=${16:-}
+app_update_storage_name=${17:-}
+app_update_sha256=${18:-}
+app_update_size_bytes=${19:-0}
+app_update_rollout_percent=${20:-0}
+expected_app_update_version_code=${21:-0}
+expected_app_update_version_name=${22:-}
+expected_app_update_storage_name=${23:-}
+expected_app_update_sha256=${24:-}
+expected_app_update_size_bytes=${25:-0}
+expected_app_update_rollout_percent=${26:-0}
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Release configuration operations must run as root." >&2
@@ -55,7 +57,9 @@ for value in \
   "$expected_backend_image" \
   "$expected_required_app_version" \
   "$expected_postgres_image" \
-  "$expected_caddy_image"; do
+  "$expected_caddy_image" \
+  "$play_integrity_project" \
+  "$expected_play_integrity_project"; do
   case "$value" in
     ''|*$'\n'*|*$'\r'*)
       echo "Release configuration inputs must be non-empty single-line values." >&2
@@ -91,6 +95,14 @@ done
 }
 [[ "$expected_required_app_version" =~ ^[0-9]+[.][0-9]+[.][0-9]+([-+][0-9A-Za-z.-]+)?$ ]] || {
   echo "The reviewed required app version must be an explicit semantic version." >&2
+  exit 2
+}
+[[ "$play_integrity_project" =~ ^[0-9]+$ ]] || {
+  echo "PlayIntegrityProjectNumber must be numeric." >&2
+  exit 2
+}
+[[ "$expected_play_integrity_project" =~ ^[0-9]+$ ]] || {
+  echo "The reviewed Play Integrity project number must be numeric." >&2
   exit 2
 }
 validate_app_update_config() {
@@ -136,6 +148,7 @@ if [ "$backend_image" != "$expected_backend_image" ] || \
   [ "$required_app_version" != "$expected_required_app_version" ] || \
   [ "$postgres_image" != "$expected_postgres_image" ] || \
   [ "$caddy_image" != "$expected_caddy_image" ] || \
+  [ "$play_integrity_project" != "$expected_play_integrity_project" ] || \
   [ "$app_update_version_code" != "$expected_app_update_version_code" ] || \
   [ "$app_update_version_name" != "$expected_app_update_version_name" ] || \
   [ "$app_update_storage_name" != "$expected_app_update_storage_name" ] || \
@@ -334,6 +347,7 @@ unrelated_sha256() {
   awk '$0 !~ /^BACKEND_IMAGE=/ && $0 !~ /^REQUIRED_APP_VERSION=/ && \
        $0 !~ /^POSTGRES_IMAGE=/ && $0 !~ /^CADDY_IMAGE=/ && \
        $0 !~ /^CADDY_CONFIG=/ && $0 !~ /^APP_UPDATE_VERSION_CODE=/ && \
+       $0 !~ /^PLAY_INTEGRITY_PROJECT_NUMBER=/ && \
        $0 !~ /^APP_UPDATE_VERSION_NAME=/ && $0 !~ /^APP_UPDATE_STORAGE_NAME=/ && \
        $0 !~ /^APP_UPDATE_SHA256=/ && $0 !~ /^APP_UPDATE_SIZE_BYTES=/ && \
        $0 !~ /^APP_UPDATE_ROLLOUT_PERCENT=/' \
@@ -341,7 +355,7 @@ unrelated_sha256() {
 }
 
 request_sha256() {
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+  printf '%s\n' \
     "$commit" \
     "$operation_id" \
     "$backend_image" \
@@ -353,6 +367,8 @@ request_sha256() {
     "$expected_required_app_version" \
     "$expected_postgres_image" \
     "$expected_caddy_image" \
+    "$play_integrity_project" \
+    "$expected_play_integrity_project" \
     "$app_update_version_code" \
     "$app_update_version_name" \
     "$app_update_storage_name" \
@@ -366,6 +382,7 @@ build_candidate() {
   destination=$2
   awk -v backend="$backend_image" -v version="$required_app_version" \
       -v postgres="$postgres_image" -v caddy="$caddy_image" \
+      -v project="$play_integrity_project" \
       -v update_code="$app_update_version_code" \
       -v update_name="$app_update_version_name" \
       -v update_storage="$app_update_storage_name" \
@@ -400,6 +417,12 @@ build_candidate() {
       config_count++
       if (config_count > 1) invalid = 1
       print "CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover"
+      next
+    }
+    /^PLAY_INTEGRITY_PROJECT_NUMBER=/ {
+      project_count++
+      if (project_count > 1) invalid = 1
+      print "PLAY_INTEGRITY_PROJECT_NUMBER=" project
       next
     }
     /^APP_UPDATE_VERSION_CODE=/ {
@@ -443,6 +466,7 @@ build_candidate() {
       if (backend_count != 1 || postgres_count != 1 || caddy_count != 1 || \
           config_count != 1 || invalid) exit 1
       if (version_count == 0) print "REQUIRED_APP_VERSION=" version
+      if (project_count == 0) print "PLAY_INTEGRITY_PROJECT_NUMBER=" project
       if (update_code_count == 0) print "APP_UPDATE_VERSION_CODE=" update_code
       if (update_name_count == 0) print "APP_UPDATE_VERSION_NAME=" update_name
       if (update_storage_count == 0) print "APP_UPDATE_STORAGE_NAME=" update_storage
@@ -461,6 +485,7 @@ validate_candidate() {
   test "$(key_count POSTGRES_IMAGE "$candidate")" = 1 || return 1
   test "$(key_count CADDY_IMAGE "$candidate")" = 1 || return 1
   test "$(key_count CADDY_CONFIG "$candidate")" = 1 || return 1
+  test "$(key_count PLAY_INTEGRITY_PROJECT_NUMBER "$candidate")" = 1 || return 1
   test "$(key_count APP_UPDATE_VERSION_CODE "$candidate")" = 1 || return 1
   test "$(key_count APP_UPDATE_VERSION_NAME "$candidate")" = 1 || return 1
   test "$(key_count APP_UPDATE_STORAGE_NAME "$candidate")" = 1 || return 1
@@ -472,6 +497,7 @@ validate_candidate() {
   test "$(assignment_value POSTGRES_IMAGE "$candidate")" = "$postgres_image" || return 1
   test "$(assignment_value CADDY_IMAGE "$candidate")" = "$caddy_image" || return 1
   test "$(assignment_value CADDY_CONFIG "$candidate")" = /etc/duducar/Caddyfile.post-cutover || return 1
+  test "$(assignment_value PLAY_INTEGRITY_PROJECT_NUMBER "$candidate")" = "$play_integrity_project" || return 1
   test "$(assignment_value APP_UPDATE_VERSION_CODE "$candidate")" = "$app_update_version_code" || return 1
   test "$(assignment_value APP_UPDATE_VERSION_NAME "$candidate")" = "$app_update_version_name" || return 1
   test "$(assignment_value APP_UPDATE_STORAGE_NAME "$candidate")" = "$app_update_storage_name" || return 1
@@ -545,6 +571,7 @@ config_matches_installed_values() {
   test "$(key_count POSTGRES_IMAGE "$release_config")" = 1 || return 1
   test "$(key_count CADDY_IMAGE "$release_config")" = 1 || return 1
   test "$(key_count CADDY_CONFIG "$release_config")" = 1 || return 1
+  test "$(key_count PLAY_INTEGRITY_PROJECT_NUMBER "$release_config")" = 1 || return 1
   test "$(key_count APP_UPDATE_VERSION_CODE "$release_config")" = 1 || return 1
   test "$(key_count APP_UPDATE_VERSION_NAME "$release_config")" = 1 || return 1
   test "$(key_count APP_UPDATE_STORAGE_NAME "$release_config")" = 1 || return 1
@@ -556,6 +583,7 @@ config_matches_installed_values() {
   test "$(assignment_value POSTGRES_IMAGE "$release_config")" = "$postgres_image" || return 1
   test "$(assignment_value CADDY_IMAGE "$release_config")" = "$caddy_image" || return 1
   test "$(assignment_value CADDY_CONFIG "$release_config")" = /etc/duducar/Caddyfile.post-cutover || return 1
+  test "$(assignment_value PLAY_INTEGRITY_PROJECT_NUMBER "$release_config")" = "$play_integrity_project" || return 1
   test "$(assignment_value APP_UPDATE_VERSION_CODE "$release_config")" = "$app_update_version_code" || return 1
   test "$(assignment_value APP_UPDATE_VERSION_NAME "$release_config")" = "$app_update_version_name" || return 1
   test "$(assignment_value APP_UPDATE_STORAGE_NAME "$release_config")" = "$app_update_storage_name" || return 1

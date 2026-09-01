@@ -22,6 +22,7 @@ postgres_image=postgres@sha256:ddddddddddddddddddddddddddddddddddddddddddddddddd
 caddy_image=caddy@sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 other_postgres_image=postgres@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 other_caddy_image=caddy@sha256:1111111111111111111111111111111111111111111111111111111111111111
+project_number=552923442234
 disabled_update_args=(0 "" "" "" 0 0 0 "" "" "" 0 0)
 test_root=$(mktemp -d /tmp/duducar-release-config-test.XXXXXX)
 
@@ -63,6 +64,7 @@ BACKEND_IMAGE=$old_image
 POSTGRES_IMAGE=$postgres_image
 CADDY_IMAGE=$caddy_image
 CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover
+PLAY_INTEGRITY_PROJECT_NUMBER=132918389760
 EOF
 chown root:root "$test_root/etc/duducar/release.env"
 chmod 0640 "$test_root/etc/duducar/release.env"
@@ -74,6 +76,7 @@ run_manager() {
   DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
     "$manager" "$@" "$postgres_image" "$caddy_image" \
       "$requested_image" "$requested_version" "$postgres_image" "$caddy_image" \
+      "$project_number" "$project_number" \
       "${disabled_update_args[@]}"
 }
 
@@ -86,6 +89,7 @@ if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$postgres_image" "$caddy_image" \
   "$other_image" 1.0.0 "$postgres_image" "$caddy_image" \
+  "$project_number" "$project_number" \
   "${disabled_update_args[@]}"; then
   echo "Manager accepted a value different from the Terraform-reviewed image." >&2
   exit 1
@@ -94,6 +98,7 @@ if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$postgres_image" "$caddy_image" \
   "$new_image" 1.0.1 "$postgres_image" "$caddy_image" \
+  "$project_number" "$project_number" \
   "${disabled_update_args[@]}"; then
   echo "Manager accepted a version different from the Terraform-reviewed value." >&2
   exit 1
@@ -102,6 +107,7 @@ if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$other_postgres_image" "$caddy_image" \
   "$new_image" 1.0.0 "$postgres_image" "$caddy_image" \
+  "$project_number" "$project_number" \
   "${disabled_update_args[@]}"; then
   echo "Manager accepted a PostgreSQL image different from the reviewed value." >&2
   exit 1
@@ -110,6 +116,7 @@ if DUDUCAR_RELEASE_CONFIG_TEST_ROOT="$test_root" \
   "$manager" validate "$commit" "$operation_id" "$new_image" 1.0.0 \
   "$repository" "$postgres_image" "$other_caddy_image" \
   "$new_image" 1.0.0 "$postgres_image" "$caddy_image" \
+  "$project_number" "$project_number" \
   "${disabled_update_args[@]}"; then
   echo "Manager accepted a Caddy image different from the reviewed value." >&2
   exit 1
@@ -127,6 +134,7 @@ test "$(awk -F= '/^BACKEND_IMAGE=/{print $2}' "$test_root/etc/duducar/release.en
 test "$(awk -F= '/^REQUIRED_APP_VERSION=/{print $2}' "$test_root/etc/duducar/release.env")" = 1.0.0
 test "$(grep -c '^BACKEND_IMAGE=' "$test_root/etc/duducar/release.env")" = 1
 test "$(grep -c '^REQUIRED_APP_VERSION=' "$test_root/etc/duducar/release.env")" = 1
+test "$(awk -F= '/^PLAY_INTEGRITY_PROJECT_NUMBER=/{print $2}' "$test_root/etc/duducar/release.env")" = "$project_number"
 grep -qx 'POSTGRES_IMAGE=postgres@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' \
   "$test_root/etc/duducar/release.env"
 grep -qx 'CADDY_CONFIG=/etc/duducar/Caddyfile.post-cutover' \

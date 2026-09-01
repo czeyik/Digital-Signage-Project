@@ -42,22 +42,20 @@ The checked-in local Compose backend is explicitly development-only and binds
 to `127.0.0.1:8000`; start it under a fresh Compose project name for each
 qualification run.
 
-The checked JVM tests cover enrollment, manifest activation/restart,
+The checked JVM tests cover enrollment, scheduled manifest activation/restart,
 battery-powered playback with no external-power gate, planned-shutdown state,
-storage, queue loss, PIN verification, PIN throttling, the bounded
-administrator session, monotonic server-corrected time, proof recovery,
+storage, queue loss, the bounded remote administrator session, monotonic
+server-corrected time, proof recovery,
 abnormal-exit diagnostic mapping/idempotency, and gzip proof-batch encoding.
 Instrumentation sources currently verify merged-manifest backup configuration,
 absence of static boot/power receivers, administrator-relock receiver exposure,
 the date/time device-owner restriction, atomic checkpoint/batch persistence,
-and planned-shutdown marker/event durability. They do not exercise
-`MainActivity`'s visible non-PIN shutdown confirmation, neutral stopped screen,
-no-automatic-resume behavior, or the visible non-PIN **Resume DUDU**
-confirmation after launch. Those flows
-should be executed on an Android 12+ emulator and, when practical, on the
-selected display model. Physical battery behavior, physical shutdown/recovery,
-and Android-13 exit-reason behavior are optional operator observations under
-the simplified hardware-registration policy.
+planned-shutdown marker/event durability, and management-credential survival
+when playback credentials are cleared. They do not exercise `MainActivity`'s
+remote command delivery, kiosk exit, admin-only shutdown confirmation, neutral
+stopped screen, or explicit **Resume DUDU** flow. By final owner decision, the
+first physical execution of those flows occurs in the Wave 9 production
+rehearsal.
 
 CI additionally generates a disposable test-only keystore, builds and lints the
 configured minified `productionRelease`, and verifies its APK signature. This

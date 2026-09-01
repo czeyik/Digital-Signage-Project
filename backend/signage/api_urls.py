@@ -10,6 +10,16 @@ urlpatterns = [
     ),
     path("devices/enroll/", api.enroll, name="device-enroll"),
     path("devices/token/", api.token_refresh, name="device-token"),
+    path(
+        "devices/management/bootstrap/",
+        api.management_bootstrap,
+        name="device-management-bootstrap",
+    ),
+    path(
+        "devices/management/commands/",
+        api.management_commands,
+        name="device-management-commands",
+    ),
     path("devices/sync/", api.sync_manifest, name="device-sync"),
     path("devices/heartbeat/", api.heartbeat, name="device-heartbeat"),
     path("devices/location-batches/", api.location_batch, name="device-location-batch"),

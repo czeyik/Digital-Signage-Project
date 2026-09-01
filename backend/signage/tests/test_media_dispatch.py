@@ -9,6 +9,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import CommandError, call_command
 from django.db import transaction
 from django.test import override_settings
+from django.urls import reverse
 from django.utils import timezone
 from PIL import Image
 
@@ -98,6 +99,7 @@ def test_dispatch_runs_one_task_for_exact_asset_uuid(monkeypatch):
         "--asset-id",
         str(asset.id),
     ]
+    assert calls[0]["startedBy"] == str(asset.id)
     assert calls[0]["propagateTags"] == "TASK_DEFINITION"
     assert (
         calls[0]["networkConfiguration"]["awsvpcConfiguration"]["assignPublicIp"]
@@ -203,6 +205,9 @@ def test_dispatch_combines_visible_and_recent_capacity_signals(monkeypatch):
         def list_tasks(self, **kwargs):
             return {"taskArns": ["older-active-task"]}
 
+        def describe_tasks(self, **kwargs):
+            return {"tasks": [{"taskArn": "older-active-task"}]}
+
         def run_task(self, **kwargs):
             pytest.fail("combined capacity must defer the third task")
 
@@ -216,6 +221,62 @@ def test_dispatch_combines_visible_and_recent_capacity_signals(monkeypatch):
     asset.refresh_from_db()
     assert asset.dispatch_attempts == 0
     assert asset.dispatched_at is None
+
+
+@pytest.mark.django_db
+@override_settings(
+    **ECS_DISPATCH_SETTINGS,
+    MEDIA_DISPATCH_MAX_CONCURRENT_TASKS=2,
+)
+def test_dispatch_deduplicates_visible_task_and_recent_reservation(monkeypatch):
+    asset = create_asset()
+    recent = create_asset(
+        title="Visible recent dispatch",
+        dispatched_at=timezone.now(),
+    )
+    calls = []
+
+    class EcsClient:
+        def list_tasks(self, **kwargs):
+            return {"taskArns": ["visible-recent-task"]}
+
+        def describe_tasks(self, **kwargs):
+            assert kwargs == {
+                "cluster": "production-cluster",
+                "tasks": ["visible-recent-task"],
+            }
+            return {
+                "tasks": [
+                    {
+                        "taskArn": "visible-recent-task",
+                        "startedBy": str(recent.id),
+                    }
+                ]
+            }
+
+        def run_task(self, **kwargs):
+            calls.append(kwargs)
+            return {"tasks": [{"taskArn": "second-task"}], "failures": []}
+
+    monkeypatch.setattr(
+        "signage.media_dispatch.boto3.client",
+        lambda service, region_name=None, config=None: EcsClient(),
+    )
+
+    assert dispatch_media_processing(asset.id) is True
+    assert calls[0]["startedBy"] == str(asset.id)
+
+
+@pytest.mark.django_db
+def test_media_list_labels_quarantined_assets_as_queued(client):
+    asset = create_asset()
+    client.force_login(asset.uploaded_by)
+
+    response = client.get(reverse("media-list"))
+
+    assert response.status_code == 200
+    assert b"Queued for validation" in response.content
+    assert b">Quarantined<" not in response.content
 
 
 @pytest.mark.django_db

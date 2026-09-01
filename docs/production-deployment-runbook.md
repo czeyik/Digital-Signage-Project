@@ -60,6 +60,9 @@ broad authorization never permits an unexpected plan.
    version must match the signed APK. The application secret must already have
    `WORKER_DB_PASSWORD` and comma-separated canonical lowercase 64-hex
    `PLAY_INTEGRITY_APP_CERTIFICATE_SHA256`; never record their values.
+   The runtime renderer must leave `aws-credentials-token` as exactly 64
+   lowercase hexadecimal bytes with no line ending; it normalizes only the
+   known legacy 64-hex-plus-LF value and refuses other existing forms.
 2. Generate one fresh 32-hex operation ID. Send the pinned runtime document with
    `Mode=validate`, the clean 40-hex commit, operation ID, and exact Caddy digest.
    Review its complete staged manifest, then send `Mode=install` with identical
@@ -133,9 +136,11 @@ broad authorization never permits an unexpected plan.
    delivery to a test inbox. A configured rule is not proof of notification.
 4. On exactly one assigned tablet: enroll using a 15-minute code; optionally
    exercise atomic sync/hash/playback/fallback, idempotent proof/report/CSV
-   privacy, offline and corrupt-download recovery, server time, replacement,
-   disable/reactivate, cache/queue behavior, kiosk/PIN, battery, shutdown,
-   and physical recovery.
+   privacy, offline and corrupt-download recovery, server-time schedule-boundary
+   replacement, disable/reactivate/re-enroll, cache/queue behavior, remote Admin
+   mode from playback/fallback/maintenance/enrollment, battery, admin-only
+   shutdown, app exit, and physical recovery. Confirm the normal playback UI
+   has no shutdown or local administrator gesture.
 5. Confirm only full media counts once; a battery/parked play proves neither
    vehicle operation, occupancy, external power nor audience. Run Android-13
    exit diagnostics where applicable and document platform limitations.

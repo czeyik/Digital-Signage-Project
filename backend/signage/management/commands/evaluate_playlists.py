@@ -8,7 +8,7 @@ from signage.services import open_alert
 
 
 class Command(BaseCommand):
-    help = "Warn when no published weekly replacement covers the next schedule."
+    help = "Warn when an ending scheduled playlist has no published replacement."
 
     def handle(self, *args, **options):
         now = timezone.now()
@@ -26,7 +26,6 @@ class Command(BaseCommand):
             replacement_exists = Playlist.objects.filter(
                 status=Playlist.Status.PUBLISHED,
                 starts_at__gte=active.ends_at,
-                starts_at__lt=active.ends_at + timedelta(days=7),
                 is_urgent=False,
             ).exists()
             if not replacement_exists and active.ends_at <= now + timedelta(days=2):
@@ -34,7 +33,7 @@ class Command(BaseCommand):
                     None,
                     "missing_playlist_replacement",
                     Alert.Severity.WARNING,
-                    "No published weekly replacement exists; current content "
+                    "No published scheduled replacement exists; current content "
                     "will continue.",
                 )
         self.stdout.write(self.style.SUCCESS("Playlist schedule evaluated."))

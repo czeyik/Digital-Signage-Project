@@ -6,7 +6,10 @@ from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
 from django.core.management.base import BaseCommand, CommandError
 
-from signage.integrity import configured_certificate_fingerprints
+from signage.integrity import (
+    configured_certificate_fingerprints,
+    validate_play_integrity_credentials,
+)
 
 
 class Command(BaseCommand):
@@ -224,21 +227,10 @@ class Command(BaseCommand):
             except json.JSONDecodeError:
                 errors.append("PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON is invalid JSON.")
             else:
-                if credentials.get("type") != "service_account":
-                    errors.append(
-                        "Play Integrity credentials must be a service account."
-                    )
-                required_credential_fields = {
-                    "project_id",
-                    "private_key",
-                    "client_email",
-                }
-                missing = required_credential_fields.difference(credentials)
-                if missing:
-                    errors.append(
-                        "Play Integrity credentials are missing: "
-                        + ", ".join(sorted(missing))
-                    )
+                try:
+                    validate_play_integrity_credentials(credentials)
+                except ImproperlyConfigured as exc:
+                    errors.append(str(exc))
         if settings.PLAY_INTEGRITY_PACKAGE_NAME != "com.duducar.signage":
             errors.append("PLAY_INTEGRITY_PACKAGE_NAME must match the Android package.")
         try:

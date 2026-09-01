@@ -50,28 +50,32 @@ before changing it:
 
 ## Non-negotiable product rules
 
-- Media: JPEG/PNG/MP4 only; images <=10 MB for 10 seconds, video <=50 MB,
+- Media: JPEG/PNG/MP4 only; images <=10 MB for 15 seconds, video <=50 MB,
   <=15 seconds/1080p. Quarantine until scan/type/decode/silent-H.264-normalize
   and test pass; fit without crop on black; private time-limited delivery;
   preview/reuse allowed; do not delete current/future playlist media (retain
   metadata/audit after deletion).
 - Playlist: one fleet-wide list; non-empty, configurable 100 entries/30 min;
-  immutable versions; Monday noon-to-noon Malaysia weeks. Normal activation is
-  complete valid download plus loop boundary; urgent is complete valid download
-  then immediate. Keep the prior valid list on any failure or missing change.
+  immutable versions; arbitrary start/end times with deterministic overlap
+  precedence. Scheduled activation
+  occurs at the server-defined boundary after complete valid download; any
+  changed active manifest replaces immediately after validation. Keep the prior
+  valid list on any failure or missing change.
 - Player: locked landscape, screenshots blocked where supported, awake,
   battery-backed. Never depend on/infer vehicle power, occupancy, audience, or
-  misconduct. Visible non-PIN shutdown queues interruption and shows neutral
-  stopped state; only visible non-PIN Resume restarts—never lifecycle/automatic
-  or ordinary pause/shift control.
+  misconduct. Only remotely entered Admin mode exposes Exit DUDU and Prepare
+  for shutdown; normal playback, fallback, maintenance, and enrollment expose
+  no local admin gesture, PIN flow, exit, or shutdown action. Resume from the
+  neutral prepared-shutdown state is explicit, never lifecycle-driven.
 - Restart interrupted media at its start; skip bad media without blank screen;
   fallback is not proof. Disable means maintenance until explicit reactivation;
   updates are staff sideloads. Android 13 queues idempotent abnormal-exit
   diagnostics after a successful time sync.
 - Devices: independent revocable identity, short-lived encrypted credentials,
   no shared key. Owner-confirmed one-time 15-minute, root/integrity-checked
-  enrollment; PIN displayed once then verifier only; preserve assignments.
-- Offline: 10 GiB cache, startup/hourly sync to daily midnight target,
+  enrollment; separate management authority survives playback disablement but
+  explicit credential revocation removes both channels; preserve assignments.
+- Offline: 10 GiB cache, startup/hourly sync plus exact scheduled-boundary sync,
   server-corrected time, retain old valid content until activation, delete only
   after activation. Queue cap 500 MB; evict acknowledged records first and
   record forced loss. Warn after one missed day; critical retrieve alert after

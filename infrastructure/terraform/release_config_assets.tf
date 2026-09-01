@@ -56,6 +56,12 @@ resource "aws_ssm_document" "ec2_release_config" {
         description   = "Exact Terraform-reviewed digest-pinned Caddy image."
         allowedValues = [var.caddy_image]
       }
+      PlayIntegrityProjectNumber = {
+        type           = "String"
+        description    = "Exact non-secret Terraform-reviewed Google Play Integrity project number."
+        allowedPattern = "^[0-9]+$"
+        allowedValues  = [var.play_integrity_project_number]
+      }
       AppUpdateVersionCode = {
         type           = "String"
         description    = "Exact Terraform-reviewed staged APK version code; zero disables OTA delivery."
@@ -126,13 +132,14 @@ resource "aws_ssm_document" "ec2_release_config" {
             "expected_required_app_version='${var.required_app_version}'",
             "expected_postgres_image='${var.postgres_image}'",
             "expected_caddy_image='${var.caddy_image}'",
+            "play_integrity_project='{{ PlayIntegrityProjectNumber }}'",
             "stage_dir=$(mktemp -d /var/tmp/duducar-release-config.XXXXXX)",
             "trap 'rm -rf -- \"$stage_dir\"' EXIT",
             "printf '%s' '${filebase64("${path.module}/ec2/runtime/manage-release-config")}' | base64 -d > \"$stage_dir/manage-release-config\"",
             "chmod 0500 \"$stage_dir/manage-release-config\"",
             "printf '%s  %s\\n' '${local.ec2_release_config_manager_sha256}' \"$stage_dir/manage-release-config\" | sha256sum -c -",
             "bash -n \"$stage_dir/manage-release-config\"",
-            "\"$stage_dir/manage-release-config\" \"$mode\" \"$commit\" \"$operation_id\" \"$backend_image\" \"$required_app_version\" '${split("@sha256:", var.container_image)[0]}' \"$postgres_image\" \"$caddy_image\" \"$expected_backend_image\" \"$expected_required_app_version\" \"$expected_postgres_image\" \"$expected_caddy_image\" \"$app_update_version_code\" \"$app_update_version_name\" \"$app_update_storage_name\" \"$app_update_sha256\" \"$app_update_size_bytes\" \"$app_update_rollout_percent\" '${var.app_update_version_code}' '${var.app_update_version_name}' '${var.app_update_storage_name}' '${var.app_update_sha256}' '${var.app_update_size_bytes}' '${var.app_update_rollout_percent}'",
+            "\"$stage_dir/manage-release-config\" \"$mode\" \"$commit\" \"$operation_id\" \"$backend_image\" \"$required_app_version\" '${split("@sha256:", var.container_image)[0]}' \"$postgres_image\" \"$caddy_image\" \"$expected_backend_image\" \"$expected_required_app_version\" \"$expected_postgres_image\" \"$expected_caddy_image\" \"$play_integrity_project\" '${var.play_integrity_project_number}' \"$app_update_version_code\" \"$app_update_version_name\" \"$app_update_storage_name\" \"$app_update_sha256\" \"$app_update_size_bytes\" \"$app_update_rollout_percent\" '${var.app_update_version_code}' '${var.app_update_version_name}' '${var.app_update_storage_name}' '${var.app_update_sha256}' '${var.app_update_size_bytes}' '${var.app_update_rollout_percent}'",
           ]
         }
       }

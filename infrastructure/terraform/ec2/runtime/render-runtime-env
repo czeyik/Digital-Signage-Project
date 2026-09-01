@@ -148,17 +148,40 @@ if ! [[ "$play_integrity_app_certificates" =~ ^[0-9a-f]{64}(,[0-9a-f]{64})*$ ]];
   exit 1
 fi
 existing_credential_token="$backend_secrets_dir/aws-credentials-token"
+
+credential_token_is_canonical() {
+  [ "$(wc -c < "$1")" -eq 64 ] &&
+    LC_ALL=C grep -Eq '^[0-9a-f]{64}$' "$1"
+}
+
+credential_token_is_legacy() {
+  [ "$(wc -c < "$1")" -eq 65 ] &&
+    [ "$(tail -c 1 "$1" | od -An -t x1 | tr -d '[:space:]')" = 0a ] &&
+    LC_ALL=C head -c 64 "$1" | grep -Eq '^[0-9a-f]{64}$'
+}
+
 if test -e "$existing_credential_token" || test -L "$existing_credential_token"; then
   if ! test -f "$existing_credential_token" || test -L "$existing_credential_token" || \
     [ "$(stat -c '%u:%a' "$existing_credential_token")" != 10001:400 ] || \
-    ! grep -Eq '^[0-9a-f]{64}$' "$existing_credential_token"; then
+    { ! credential_token_is_canonical "$existing_credential_token" &&
+      ! credential_token_is_legacy "$existing_credential_token"; }; then
     echo "Existing AWS credential bearer token is unsafe; refusing silent replacement." >&2
     exit 1
   fi
-  install -o 10001 -g 10001 -m 0400 \
-    "$existing_credential_token" "$staging_dir/aws-credentials-token"
+  if credential_token_is_legacy "$existing_credential_token"; then
+    # Preserve the token value while removing the LF emitted by the old renderer.
+    head -c 64 "$existing_credential_token" > "$staging_dir/aws-credentials-token"
+  else
+    install -o 10001 -g 10001 -m 0400 \
+      "$existing_credential_token" "$staging_dir/aws-credentials-token"
+  fi
 else
-  openssl rand -hex 32 > "$staging_dir/aws-credentials-token"
+  # botocore reads this file as a raw HTTP header value; OpenSSL appends LF.
+  openssl rand -hex 32 | tr -d '\n' > "$staging_dir/aws-credentials-token"
+fi
+if ! credential_token_is_canonical "$staging_dir/aws-credentials-token"; then
+  echo "AWS credential bearer token renderer did not produce a canonical value." >&2
+  exit 1
 fi
 install -o root -g root -m 0400 \
   "$staging_dir/aws-credentials-token" "$staging_dir/broker-credentials-token"

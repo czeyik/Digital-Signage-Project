@@ -139,7 +139,8 @@ artifacts. The checked-in runtime helper refuses to use them.
 
 Never hand-edit or copy `/etc/duducar/release.env`. The dedicated
 `production_release_config_document` is the only reviewed path to change
-the backend, PostgreSQL, Caddy, Caddy-config, and required-app selections.
+the backend, PostgreSQL, Caddy, Caddy-config, required-app, and Play Integrity
+project selections.
 Every image and the semantic Android version must exactly match the Terraform
 values embedded in the document. New hosts receive that exact initial file from
 reviewed bootstrap user data; later changes are atomic, root-only, backed up,
@@ -426,7 +427,10 @@ worker and must not be repurposed for arbitrary management commands. Dispatch
 is serialized through PostgreSQL, capped at two active tasks and six `RunTask`
 calls per hour (including failed or ambiguous calls), and leaves capacity-
 deferred uploads quarantined for the reconciliation timer to retry without
-consuming a failure attempt. An ambiguous `RunTask` result reuses its exact
+consuming a failure attempt. Visible tasks are matched to recent reservations
+by asset UUID so the two capacity signals do not count one worker twice; the
+two-minute reconciliation timer picks up remaining queued uploads. An ambiguous
+`RunTask` result reuses its exact
 client token and attempt for at most 15 minutes; after that, reconciliation
 consumes a new bounded attempt and token. Each media
 command has a 20-minute ceiling in addition to the ClamAV and FFmpeg/FFprobe

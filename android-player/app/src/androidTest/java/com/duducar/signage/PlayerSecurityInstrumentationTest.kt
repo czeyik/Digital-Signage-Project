@@ -21,6 +21,27 @@ import java.util.UUID
 @RunWith(AndroidJUnit4::class)
 class PlayerSecurityInstrumentationTest {
     @Test
+    fun testManagementCredentialSurvivesPlaybackCredentialClear() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val credentials = CredentialStore(context)
+        credentials.clearEnrollment()
+        credentials.clearManagementToken()
+
+        assertTrue(
+            credentials.saveEnrollmentCredentials(
+                refreshToken = "playback-secret",
+                kioskPinVerifier = "pin-verifier",
+                managementToken = "management-secret",
+            ),
+        )
+        credentials.clearEnrollment()
+
+        assertFalse(credentials.hasRefreshToken())
+        assertEquals("management-secret", credentials.managementToken())
+        credentials.clearManagementToken()
+    }
+
+    @Test
     @Suppress("DEPRECATION")
     fun testMergedApplicationDisablesBackup() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
@@ -195,12 +216,15 @@ class PlayerSecurityInstrumentationTest {
                         .put("kind", "image")
                         .put("sha256", "a".repeat(64))
                         .put("size_bytes", 1L)
-                        .put("duration_ms", 10_000L)
+                        .put("duration_ms", 15_000L)
                         .put("download_url", "https://media.example.test/validated/$mediaId"),
                 ),
             )
 
         assertEquals(ManifestIdentity(playlistId, 1), ManifestPolicy.validate(manifest, "1.0.0"))
+        manifest.getJSONArray("items").getJSONObject(0).put("duration_ms", 10_000L)
+        assertEquals(null, ManifestPolicy.validate(manifest, "1.0.0"))
+        manifest.getJSONArray("items").getJSONObject(0).put("duration_ms", 15_000L)
         manifest.getJSONArray("items").getJSONObject(0).put("download_url", "file:///data/local/tmp/a")
         assertEquals(null, ManifestPolicy.validate(manifest, "1.0.0"))
         manifest.getJSONArray("items").getJSONObject(0)
