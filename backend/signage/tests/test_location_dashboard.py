@@ -144,6 +144,18 @@ def test_openmaptiles_style_and_tile_endpoints_use_authenticated_mbtiles(
     assert style.json()["sources"]["openmaptiles"]["url"].endswith(
         "/locations/tiles.json"
     )
+    major_roads = next(
+        layer
+        for layer in style.json()["layers"]
+        if layer["id"] == "transportation-major"
+    )
+    assert major_roads["filter"] == [
+        "match",
+        ["get", "class"],
+        ["motorway", "trunk", "primary", "secondary"],
+        True,
+        False,
+    ]
 
     tilejson = client.get(reverse("location-tilejson"))
     assert tilejson.status_code == 200
