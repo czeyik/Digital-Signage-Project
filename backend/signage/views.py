@@ -434,12 +434,11 @@ def _openmaptiles_style(request):
                 "source": "openmaptiles",
                 "source-layer": "transportation",
                 "filter": [
-                    "in",
+                    "match",
                     ["get", "class"],
-                    "motorway",
-                    "trunk",
-                    "primary",
-                    "secondary",
+                    ["motorway", "trunk", "primary", "secondary"],
+                    True,
+                    False,
                 ],
                 "paint": {
                     "line-color": "#f0a35b",

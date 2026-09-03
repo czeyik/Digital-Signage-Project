@@ -158,7 +158,6 @@
       center: [101.6869, 3.139],
       zoom: 8,
       attributionControl: false,
-      validateStyle: false,
     });
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(
@@ -167,7 +166,10 @@
       }),
       "bottom-right",
     );
-    map.on("error", () => setMessage("Map tiles are temporarily unavailable."));
+    map.on("error", (event) => {
+      console.error("Fleet map error:", event.error);
+      setMessage("Map tiles are temporarily unavailable.");
+    });
     map.on("load", () => {
       map.addSource("location-history", {
         type: "geojson",
