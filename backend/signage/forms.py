@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 
 from django import forms
@@ -108,7 +109,7 @@ class DashboardUserForm(forms.ModelForm):
 
 
 class DeviceProvisioningForm(forms.Form):
-    device_label = forms.CharField(max_length=100)
+    device_label = forms.CharField(label="Device Model & Number", max_length=100)
     hardware_qualification = forms.ModelChoiceField(
         queryset=HardwareQualification.objects.none(),
         required=False,
@@ -118,9 +119,11 @@ class DeviceProvisioningForm(forms.Form):
             "9.00–12.00-inch display."
         ),
     )
-    driver_internal_id = forms.CharField(max_length=64)
-    driver_name = forms.CharField(max_length=160)
-    vehicle_registration = forms.CharField(max_length=32)
+    driver_name = forms.CharField(label="Driver Name", max_length=160)
+    vehicle_registration = forms.CharField(
+        label="Vehicle Registration Number", max_length=32
+    )
+    sim_card_number = forms.CharField(label="SIM Card Number", max_length=32)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -135,15 +138,18 @@ class DeviceProvisioningForm(forms.Form):
             .order_by("model_name", "firmware_version")
         )
 
+    def clean_device_label(self):
+        label = self.cleaned_data["device_label"]
+        if Device.objects.filter(label=label).exists():
+            raise ValidationError("A device with this model and number already exists.")
+        return label
+
     @transaction.atomic
     def save(self):
-        driver, _ = Driver.objects.get_or_create(
-            internal_id=self.cleaned_data["driver_internal_id"],
-            defaults={"name": self.cleaned_data["driver_name"]},
+        driver = Driver.objects.create(
+            internal_id=f"AUTO-{uuid.uuid4().hex}",
+            name=self.cleaned_data["driver_name"],
         )
-        if driver.name != self.cleaned_data["driver_name"] and not driver.anonymized_at:
-            driver.name = self.cleaned_data["driver_name"]
-            driver.save(update_fields=["name", "updated_at"])
         vehicle, _ = Vehicle.objects.get_or_create(
             registration=self.cleaned_data["vehicle_registration"]
         )
@@ -151,37 +157,73 @@ class DeviceProvisioningForm(forms.Form):
             label=self.cleaned_data["device_label"],
             hardware_qualification=self.cleaned_data["hardware_qualification"],
         )
-        DeviceAssignment.objects.create(device=device, driver=driver, vehicle=vehicle)
+        DeviceAssignment.objects.create(
+            device=device,
+            driver=driver,
+            vehicle=vehicle,
+            sim_card_number=self.cleaned_data["sim_card_number"],
+        )
         return device
 
 
 class DeviceReassignmentForm(forms.Form):
-    driver_internal_id = forms.CharField(max_length=64)
-    driver_name = forms.CharField(max_length=160)
-    vehicle_registration = forms.CharField(max_length=32)
+    device_label = forms.CharField(label="Device Model & Number", max_length=100)
+    driver_name = forms.CharField(label="Driver Name", max_length=160)
+    vehicle_registration = forms.CharField(
+        label="Vehicle Registration Number", max_length=32
+    )
+    sim_card_number = forms.CharField(label="SIM Card Number", max_length=32)
+
+    def __init__(self, *args, device=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.device = device
+
+    def clean_device_label(self):
+        label = self.cleaned_data["device_label"]
+        if Device.objects.exclude(pk=self.device.pk).filter(label=label).exists():
+            raise ValidationError("A device with this model and number already exists.")
+        return label
 
     @transaction.atomic
     def save(self, device):
+        device.label = self.cleaned_data["device_label"]
+        device.full_clean()
+        device.save(update_fields=["label", "updated_at"])
+
+        current_assignment = (
+            DeviceAssignment.objects.select_for_update()
+            .select_related("driver", "vehicle")
+            .filter(device=device, unassigned_at__isnull=True)
+            .first()
+        )
+        if current_assignment and (
+            current_assignment.driver.name == self.cleaned_data["driver_name"]
+            and current_assignment.vehicle.registration
+            == self.cleaned_data["vehicle_registration"]
+            and current_assignment.sim_card_number
+            == self.cleaned_data["sim_card_number"]
+        ):
+            return False
+
         now = timezone.now()
         DeviceAssignment.objects.select_for_update().filter(
             device=device, unassigned_at__isnull=True
         ).update(unassigned_at=now)
-        driver, _ = Driver.objects.get_or_create(
-            internal_id=self.cleaned_data["driver_internal_id"],
-            defaults={"name": self.cleaned_data["driver_name"]},
+        driver = Driver.objects.create(
+            internal_id=f"AUTO-{uuid.uuid4().hex}",
+            name=self.cleaned_data["driver_name"],
         )
-        if driver.name != self.cleaned_data["driver_name"] and not driver.anonymized_at:
-            driver.name = self.cleaned_data["driver_name"]
-            driver.save(update_fields=["name", "updated_at"])
         vehicle, _ = Vehicle.objects.get_or_create(
             registration=self.cleaned_data["vehicle_registration"]
         )
-        return DeviceAssignment.objects.create(
+        DeviceAssignment.objects.create(
             device=device,
             driver=driver,
             vehicle=vehicle,
+            sim_card_number=self.cleaned_data["sim_card_number"],
             assigned_at=now,
         )
+        return True
 
 
 class PlatformSettingsForm(forms.ModelForm):

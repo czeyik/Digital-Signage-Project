@@ -39,6 +39,7 @@ class Command(BaseCommand):
         location_cutoff = timezone.now() - timedelta(days=30)
         driver_count = self._anonymize_drivers(cutoff)
         vehicle_count = self._anonymize_vehicles(cutoff)
+        sim_card_count = self._anonymize_sim_card_numbers(cutoff)
         playback_counts = self._delete_expired_playback_evidence(cutoff)
         heartbeat_count = self._delete_in_batches(
             DeviceHeartbeat.objects.filter(recorded_at__lt=cutoff)
@@ -63,6 +64,7 @@ class Command(BaseCommand):
             metadata={
                 "drivers_anonymized": driver_count,
                 "vehicles_anonymized": vehicle_count,
+                "sim_card_numbers_anonymized": sim_card_count,
                 "heartbeats_deleted": heartbeat_count,
                 "location_points_deleted": location_count,
                 "operational_events_deleted": operational_count,
@@ -74,7 +76,8 @@ class Command(BaseCommand):
         )
         self.stdout.write(
             self.style.SUCCESS(
-                f"Anonymized {driver_count} drivers and {vehicle_count} vehicles; "
+                f"Anonymized {driver_count} drivers, {vehicle_count} vehicles, and "
+                f"{sim_card_count} SIM card numbers; "
                 f"removed {heartbeat_count} heartbeats, "
                 f"{location_count} location points, "
                 f"{operational_count} "
@@ -110,6 +113,11 @@ class Command(BaseCommand):
                 driver.save(update_fields=["name", "anonymized_at", "updated_at"])
                 count += 1
         return count
+
+    def _anonymize_sim_card_numbers(self, cutoff):
+        return DeviceAssignment.objects.filter(
+            unassigned_at__lt=cutoff
+        ).exclude(sim_card_number="").update(sim_card_number="")
 
     def _anonymize_vehicles(self, cutoff):
         active_assignments = DeviceAssignment.objects.filter(

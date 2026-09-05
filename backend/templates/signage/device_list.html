@@ -15,14 +15,16 @@
         <td>{{ device.label }}</td>
         <td>{{ device.get_status_display }}</td>
         <td>
-          {% for assignment in device.assignments.all %}
-            {% if not assignment.unassigned_at %}{{ assignment.vehicle.registration }} / {{ assignment.driver.internal_id }}{% endif %}
+          {% if user.is_owner %}
+          {% for assignment in device.current_assignments %}
+            {{ assignment.driver.name }} / {{ assignment.vehicle.registration }} / {{ assignment.sim_card_number|default:"Not recorded" }}
           {% empty %}Unassigned{% endfor %}
+          {% else %}Restricted{% endif %}
         </td>
         <td>{{ device.last_seen_at|default:"Never" }}</td>
         <td class="action-stack">
           {% if user.is_owner %}
-          <a class="button" href="{% url 'device-reassign' device.id %}">Reassign</a>
+          <a class="button" href="{% url 'device-reassign' device.id %}">Edit</a>
           <form method="post" action="{% url 'device-pin-reset' device.id %}">{% csrf_token %}<button>Reset kiosk PIN</button></form>
           <form method="post" action="{% url 'issue-enrollment' device.id %}">{% csrf_token %}<button>Generate one-time code</button></form>
           <form method="post" action="{% url 'device-credentials-revoke' device.id %}">{% csrf_token %}<button>Revoke credentials</button></form>

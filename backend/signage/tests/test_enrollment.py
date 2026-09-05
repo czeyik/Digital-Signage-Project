@@ -540,17 +540,18 @@ def test_dashboard_can_provision_device_with_assignment(client):
         reverse("device-create"),
         {
             "device_label": "PILOT-03",
-            "driver_internal_id": "D003",
             "driver_name": "Example Driver",
             "vehicle_registration": "WXY9012",
+            "sim_card_number": "+60123456789",
         },
     )
 
     assert response.status_code == 200
     device = Device.objects.get(label="PILOT-03")
     assignment = device.assignments.get(unassigned_at__isnull=True)
-    assert assignment.driver.internal_id == "D003"
+    assert assignment.driver.internal_id.startswith("AUTO-")
     assert assignment.vehicle.registration == "WXY9012"
+    assert assignment.sim_card_number == "+60123456789"
     assert device.kiosk_pin_hash
     assert len(response.context["pin"]) == 6
     assert "one_time_kiosk_pin" not in client.session
@@ -581,9 +582,9 @@ def test_dashboard_can_provision_device_with_attested_unapproved_hardware(client
         {
             "device_label": "PILOT-ATTESTED-03",
             "hardware_qualification": str(qualification.pk),
-            "driver_internal_id": "D004",
             "driver_name": "Example Driver",
             "vehicle_registration": "WXY9013",
+            "sim_card_number": "+60123456780",
         },
     )
 
@@ -608,6 +609,37 @@ def test_marketing_cannot_open_driver_name_device_provisioning(client):
 
 
 @pytest.mark.django_db
+def test_device_forms_use_business_labels_and_hide_driver_internal_id(client):
+    owner = User.objects.create_user(
+        "owner-labels@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    client.force_login(owner)
+
+    response = client.get(reverse("device-create"))
+
+    content = response.content.decode()
+    assert "Device Model &amp; Number" in content
+    assert "Driver Name" in content
+    assert "Vehicle Registration Number" in content
+    assert "SIM Card Number" in content
+    assert "Driver internal id" not in content
+
+    missing_sim = client.post(
+        reverse("device-create"),
+        {
+            "device_label": "MISSING-SIM",
+            "driver_name": "Example Driver",
+            "vehicle_registration": "NOSIM123",
+        },
+    )
+    assert missing_sim.status_code == 200
+    assert b"This field is required" in missing_sim.content
+    assert not Device.objects.filter(label="MISSING-SIM").exists()
+
+
+@pytest.mark.django_db
 def test_reassignment_preserves_assignment_history(client):
     owner = User.objects.create_user(
         "owner@duducar.co",
@@ -618,7 +650,56 @@ def test_reassignment_preserves_assignment_history(client):
     driver = Driver.objects.create(internal_id="D004", name="Old Driver")
     vehicle = Vehicle.objects.create(registration="OLD1234")
     old_assignment = DeviceAssignment.objects.create(
-        device=device, driver=driver, vehicle=vehicle
+        device=device,
+        driver=driver,
+        vehicle=vehicle,
+        sim_card_number="+60121111111",
+    )
+    issue_kiosk_pin(device, owner)
+    pending_enrollment, _ = EnrollmentCode.issue(device, owner)
+    credential, _ = DeviceCredential.issue(device)
+    client.force_login(owner)
+
+    response = client.post(
+        reverse("device-reassign", args=[device.id]),
+        {
+            "device_label": "PILOT-04-UPDATED",
+            "driver_name": "New Driver",
+            "vehicle_registration": "NEW1234",
+            "sim_card_number": "+60122222222",
+        },
+    )
+
+    assert response.status_code == 302
+    old_assignment.refresh_from_db()
+    device.refresh_from_db()
+    credential.refresh_from_db()
+    assert old_assignment.unassigned_at is not None
+    assert old_assignment.sim_card_number == "+60121111111"
+    assert device.label == "PILOT-04-UPDATED"
+    active_assignment = device.assignments.filter(unassigned_at__isnull=True).get()
+    assert active_assignment.driver.internal_id.startswith("AUTO-")
+    assert active_assignment.driver.name == "New Driver"
+    assert active_assignment.vehicle.registration == "NEW1234"
+    assert active_assignment.sim_card_number == "+60122222222"
+    assert credential.revoked_at is None
+    pending_enrollment.refresh_from_db()
+    assert pending_enrollment.is_usable is False
+
+
+@pytest.mark.django_db
+def test_device_label_edit_does_not_replace_unchanged_assignment(client):
+    owner = User.objects.create_user(
+        "owner-device-edit@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    device = Device.objects.create(label="MODEL-OLD")
+    assignment = DeviceAssignment.objects.create(
+        device=device,
+        driver=Driver.objects.create(internal_id="D-EDIT", name="Same Driver"),
+        vehicle=Vehicle.objects.create(registration="SAME1234"),
+        sim_card_number="+60123334444",
     )
     issue_kiosk_pin(device, owner)
     pending_enrollment, _ = EnrollmentCode.issue(device, owner)
@@ -627,19 +708,21 @@ def test_reassignment_preserves_assignment_history(client):
     response = client.post(
         reverse("device-reassign", args=[device.id]),
         {
-            "driver_internal_id": "D005",
-            "driver_name": "New Driver",
-            "vehicle_registration": "NEW1234",
+            "device_label": "MODEL-NEW",
+            "driver_name": "Same Driver",
+            "vehicle_registration": "SAME1234",
+            "sim_card_number": "+60123334444",
         },
     )
 
     assert response.status_code == 302
-    old_assignment.refresh_from_db()
-    assert old_assignment.unassigned_at is not None
-    active_assignment = device.assignments.filter(unassigned_at__isnull=True).get()
-    assert active_assignment.driver.internal_id == "D005"
+    device.refresh_from_db()
+    assignment.refresh_from_db()
     pending_enrollment.refresh_from_db()
-    assert pending_enrollment.is_usable is False
+    assert device.label == "MODEL-NEW"
+    assert assignment.unassigned_at is None
+    assert device.assignments.count() == 1
+    assert pending_enrollment.is_usable is True
 
 
 @pytest.mark.django_db
@@ -670,19 +753,20 @@ def test_reassignment_and_code_invalidation_roll_back_together(client, monkeypat
         client.post(
             reverse("device-reassign", args=[device.id]),
             {
-                "driver_internal_id": "D-ROLLBACK-NEW",
+                "device_label": "PILOT-REASSIGN-ROLLBACK-NEW",
                 "driver_name": "New Driver",
                 "vehicle_registration": "ROLL5678",
+                "sim_card_number": "+60125555555",
             },
         )
 
     old_assignment.refresh_from_db()
+    device.refresh_from_db()
     pending_enrollment.refresh_from_db()
     assert old_assignment.unassigned_at is None
+    assert device.label == "PILOT-REASSIGN-ROLLBACK"
     assert pending_enrollment.is_usable is True
-    assert not device.assignments.filter(
-        driver__internal_id="D-ROLLBACK-NEW"
-    ).exists()
+    assert device.assignments.count() == 1
 
 
 @pytest.mark.django_db

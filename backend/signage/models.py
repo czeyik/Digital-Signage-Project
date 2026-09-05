@@ -668,6 +668,7 @@ class DeviceAssignment(models.Model):
     )
     driver = models.ForeignKey(Driver, on_delete=models.PROTECT)
     vehicle = models.ForeignKey(Vehicle, on_delete=models.PROTECT)
+    sim_card_number = models.CharField(max_length=32, blank=True, default="")
     assigned_at = models.DateTimeField(default=timezone.now)
     unassigned_at = models.DateTimeField(null=True, blank=True)
 
