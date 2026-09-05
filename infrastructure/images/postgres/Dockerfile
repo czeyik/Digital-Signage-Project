@@ -20,7 +20,10 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
 
 FROM postgres:16.15-alpine3.24@sha256:738d1359df5aa0b6d50a9071e989c49fdd39152a2a805c6ff131bf5e2243e0b3
 
-RUN apk add --no-cache libcrypto3=3.5.8-r0 libssl3=3.5.8-r0
+RUN apk add --no-cache \
+    libcrypto3=3.5.8-r0 \
+    libssl3=3.5.8-r0 \
+    libuuid=2.42.3-r0
 
 COPY --from=gosu-build /out/gosu /usr/local/bin/gosu
 RUN chmod 0755 /usr/local/bin/gosu
