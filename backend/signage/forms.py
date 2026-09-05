@@ -67,6 +67,43 @@ class PlaylistForm(forms.ModelForm):
         ).order_by("business_name", "title")
 
 
+class PlaybackSummaryReportForm(forms.Form):
+    date_from = forms.DateField(
+        label="From",
+        widget=forms.DateInput(attrs={"type": "date"}),
+    )
+    date_to = forms.DateField(
+        label="To",
+        widget=forms.DateInput(attrs={"type": "date"}),
+    )
+    all_devices = forms.BooleanField(label="All devices", required=False)
+    devices = forms.ModelMultipleChoiceField(
+        queryset=Device.objects.none(),
+        required=False,
+        widget=forms.CheckboxSelectMultiple,
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["devices"].queryset = Device.objects.order_by("label")
+
+    def clean(self):
+        cleaned_data = super().clean()
+        date_from = cleaned_data.get("date_from")
+        date_to = cleaned_data.get("date_to")
+        if date_from and date_to and date_to < date_from:
+            self.add_error(
+                "date_to", "The end date must be on or after the start date."
+            )
+        elif date_from and date_to and (date_to - date_from).days >= 366:
+            self.add_error("date_to", "The date range cannot exceed 366 days.")
+        if not cleaned_data.get("all_devices") and not cleaned_data.get("devices"):
+            self.add_error(
+                "devices", "Select at least one device or choose all devices."
+            )
+        return cleaned_data
+
+
 class DashboardUserForm(forms.ModelForm):
     password = forms.CharField(
         widget=forms.PasswordInput,

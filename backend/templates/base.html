@@ -19,7 +19,7 @@
         <a href="{% url 'playlist-list' %}">Playlists</a>
         <a href="{% url 'device-list' %}">Devices</a>
         <a href="{% url 'alert-list' %}">Alerts</a>
-        <a href="{% url 'playback-csv' %}">Export CSV</a>
+        <a href="{% url 'playback-report' %}">Export CSV</a>
         {% if user.is_owner %}
           <a href="{% url 'user-list' %}">Users</a>
           <a href="{% url 'settings-edit' %}">Settings</a>

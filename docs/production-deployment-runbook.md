@@ -27,6 +27,30 @@ broad authorization never permits an unexpected plan.
 5. Review `docs/aws-cost-estimate.md`; stop if projected monthly cost exceeds
    USD 30 excluding per-tablet mobile data, unless the owner changes the target.
 
+### CI service-unavailability exception
+
+A GitHub Actions quota or service outage may replace the required hosted CI run
+for one release only when the owner explicitly approves that exception before
+the release commit is created. This does not permit disabling or changing branch
+protection. Push the clean commit to a dedicated remote release branch, record
+its full hash, and merge that same change through the normal protected path when
+hosted CI is available again and before the next production release.
+
+The operator must reproduce every applicable workflow job locally from the
+exact release commit. For a backend-only release this includes Ruff, Django
+checks and migration detection, the complete SQLite and PostgreSQL test suites,
+the worker-root and Docker-context checks, dependency auditing, an ARM64 backend
+image build and runtime check, the no-package-installer assertion, and a pinned
+Trivy scan that rejects every unresolved HIGH or CRITICAL finding. Run any
+additional workflow job affected by the diff. Retain the commands, versions,
+results, image ID, image digest, vulnerability database timestamp, reviewer,
+approval, and exception reason in the production change record.
+
+The exception replaces only unavailable hosted-CI evidence. It does not waive
+review, a clean immutable commit, registry digest pinning, backups and snapshot
+freshness, Terraform plan review, SSM validation, the operation-specific install
+and activation confirmations, post-deploy checks, or rollback controls.
+
 ## Prepare a release
 
 1. Start only from a clean reviewed release worktree. Run applicable backend,

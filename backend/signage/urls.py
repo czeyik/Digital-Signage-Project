@@ -83,5 +83,11 @@ urlpatterns = [
     path("users/", views.user_list, name="user-list"),
     path("users/new/", views.user_edit, name="user-create"),
     path("users/<int:user_id>/", views.user_edit, name="user-edit"),
+    path("reports/playback/", views.playback_report, name="playback-report"),
+    path(
+        "reports/playback/summary.csv",
+        views.playback_summary_csv,
+        name="playback-summary-csv",
+    ),
     path("reports/playback.csv", views.playback_report_csv, name="playback-csv"),
 ]

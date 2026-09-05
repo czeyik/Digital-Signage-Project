@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Playback exports | DUDU Signage{% endblock %}
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">Playback reporting</p>
+    <h1>Export CSV</h1>
+    <p class="supporting-text">Choose up to 366 days and one, multiple, or all devices to export completed playback totals by media and day.</p>
+  </div>
+</div>
+
+<section class="form-card">
+  <h2>Summary report</h2>
+  <form method="get" action="{% url 'playback-summary-csv' %}" class="stack report-filters">
+    {{ form.non_field_errors }}
+    <div class="report-date-grid">
+      <div>
+        {{ form.date_from.errors }}
+        {{ form.date_from.label_tag }}
+        {{ form.date_from }}
+      </div>
+      <div>
+        {{ form.date_to.errors }}
+        {{ form.date_to.label_tag }}
+        {{ form.date_to }}
+      </div>
+    </div>
+    <fieldset>
+      <legend>Devices</legend>
+      <label class="checkbox-option">{{ form.all_devices }} {{ form.all_devices.label }}</label>
+      {{ form.all_devices.errors }}
+      <div class="checkbox-list">{{ form.devices }}</div>
+      {{ form.devices.errors }}
+      <p class="supporting-text">When “All devices” is selected, individual device selections are ignored.</p>
+    </fieldset>
+    <button class="primary" type="submit">Export summary CSV</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Detailed proof of play</h2>
+  <p class="supporting-text">Event-level evidence includes playback state, finalization, corrections, and failure details.</p>
+  <p><a class="button" href="{% url 'playback-csv' %}">Export detailed CSV</a></p>
+  <p class="disclaimer">Proof of play is commercially useful evidence, not independently audited or tamper-proof.</p>
+</section>
+{% endblock %}

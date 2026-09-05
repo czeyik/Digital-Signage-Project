@@ -22,7 +22,7 @@ from django.contrib.auth.views import (
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import connection, transaction
 from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery
-from django.db.models.functions import TruncDate
+from django.db.models.functions import Coalesce, TruncDate
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -36,6 +36,7 @@ from .forms import (
     DeviceReassignmentForm,
     MediaUploadForm,
     PlatformSettingsForm,
+    PlaybackSummaryReportForm,
     PlaylistForm,
 )
 from .media_dispatch import queue_media_processing
@@ -70,6 +71,19 @@ from .services import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class CsvEcho:
+    def write(self, value):
+        return value
+
+
+def csv_cell(value):
+    if isinstance(value, str) and value.lstrip(" \t\r\n\v\f\x00").startswith(
+        ("=", "+", "-", "@")
+    ):
+        return f"'{value}"
+    return value
 
 
 def owner_required(user):
@@ -1206,18 +1220,124 @@ def user_edit(request, user_id=None):
 
 
 @login_required
+def playback_report(request):
+    today = timezone.localdate()
+    form = PlaybackSummaryReportForm(
+        initial={
+            "date_from": today - timedelta(days=6),
+            "date_to": today,
+            "all_devices": True,
+        }
+    )
+    return render(request, "signage/playback_report.html", {"form": form})
+
+
+@login_required
+def playback_summary_csv(request):
+    form = PlaybackSummaryReportForm(request.GET)
+    if not form.is_valid():
+        return render(
+            request,
+            "signage/playback_report.html",
+            {"form": form},
+            status=400,
+        )
+
+    date_from = form.cleaned_data["date_from"]
+    date_to = form.cleaned_data["date_to"]
+    start_at = timezone.make_aware(datetime.combine(date_from, time.min))
+    end_at = timezone.make_aware(
+        datetime.combine(date_to + timedelta(days=1), time.min)
+    )
+    selected_devices = form.cleaned_data["devices"]
+    device_ids = list(
+        Device.objects.values_list("id", flat=True)
+        if form.cleaned_data["all_devices"]
+        else selected_devices.values_list("id", flat=True)
+    )
+    latest_corrected_status = (
+        PlaybackCorrection.objects.filter(
+            event_id=OuterRef("pk"),
+            replacement_status__isnull=False,
+        )
+        .exclude(replacement_status="")
+        .order_by("-created_at", "-pk")
+        .values("replacement_status")[:1]
+    )
+    totals = (
+        PlaybackEvent.objects.filter(
+            batch__device_id__in=device_ids,
+            started_at__gte=start_at,
+            started_at__lt=end_at,
+        )
+        .annotate(
+            effective_status=Coalesce(
+                Subquery(latest_corrected_status),
+                F("status"),
+            ),
+            day=TruncDate("started_at"),
+        )
+        .filter(effective_status=PlaybackEvent.Status.COMPLETED)
+        .values(
+            "playlist_item__media_id",
+            "playlist_item__media__business_name",
+            "playlist_item__media__title",
+            "day",
+        )
+        .annotate(total=Count("id"))
+        .order_by(
+            "playlist_item__media__business_name",
+            "playlist_item__media__title",
+            "playlist_item__media_id",
+            "day",
+        )
+    )
+    media_rows = {}
+    for total in totals:
+        media_id = total["playlist_item__media_id"]
+        row = media_rows.setdefault(
+            media_id,
+            {
+                "label": (
+                    f'{total["playlist_item__media__business_name"]}: '
+                    f'{total["playlist_item__media__title"]}'
+                ),
+                "totals": {},
+            },
+        )
+        row["totals"][total["day"]] = total["total"]
+
+    AuditEvent.objects.create(
+        actor=request.user,
+        action="report.playback.summary.export",
+        target_type="playback_event",
+        target_id="csv",
+        metadata={
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "all_devices": form.cleaned_data["all_devices"],
+            "device_ids": [str(device_id) for device_id in device_ids],
+        },
+    )
+    response = HttpResponse(content_type="text/csv")
+    response["Content-Disposition"] = (
+        f'attachment; filename="playback-summary-{date_from}-to-{date_to}.csv"'
+    )
+    writer = csv.writer(response)
+    days = [
+        date_from + timedelta(days=offset)
+        for offset in range((date_to - date_from).days + 1)
+    ]
+    writer.writerow(["Media", *(day.strftime("%d/%m/%Y") for day in days)])
+    for row in media_rows.values():
+        writer.writerow(
+            [csv_cell(row["label"]), *(row["totals"].get(day, 0) for day in days)]
+        )
+    return response
+
+
+@login_required
 def playback_report_csv(request):
-    class Echo:
-        def write(self, value):
-            return value
-
-    def csv_cell(value):
-        if isinstance(value, str) and value.lstrip(" \t\r\n\v\f\x00").startswith(
-            ("=", "+", "-", "@")
-        ):
-            return f"'{value}"
-        return value
-
     events = (
         PlaybackEvent.objects.select_related(
             "batch__device",
@@ -1289,7 +1409,7 @@ def playback_report_csv(request):
     exported_at = timezone.now()
 
     def rows():
-        writer = csv.writer(Echo())
+        writer = csv.writer(CsvEcho())
         yield writer.writerow(
             [
                 "event_id",

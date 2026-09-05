@@ -84,8 +84,10 @@ before changing it:
   three days.
 - Proof: idempotent per-loop/per-entry results with assignment, immutable media
   and playlist, corrected time, state, duration/reason/offline flag. Only a
-  full image/video counts; append-only evidence, 7-day finalization; reports
-  distinguish states and say they are not audited/tamper-proof.
+  full image/video counts; append-only evidence, 7-day finalization. The default
+  CSV is a completed-playback summary by media and local day for selected dates
+  and devices; the separate detailed proof-of-play CSV distinguishes states and
+  says the evidence is not audited/tamper-proof.
 - Health: heartbeat 30 min/offline 60 min; alerts stay open until acknowledged.
   Battery <=20% warning, <=10% same alert critical; 24/48h unavailable
   warning/critical; three exits/24h, <2 GiB, three ad failures, version drift,
