@@ -98,6 +98,26 @@ def test_retention_retries_anonymized_registration_collision(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_retention_anonymizes_expired_assignment_sim_card_number():
+    old = timezone.now() - timedelta(days=400)
+    assignment = DeviceAssignment.objects.create(
+        device=Device.objects.create(label="RETENTION-SIM"),
+        driver=Driver.objects.create(internal_id="D-SIM", name="Private Name"),
+        vehicle=Vehicle.objects.create(registration="SIM1234"),
+        sim_card_number="+60129999999",
+        assigned_at=old - timedelta(days=1),
+        unassigned_at=old,
+    )
+
+    call_command("apply_retention", verbosity=0)
+
+    assignment.refresh_from_db()
+    assert assignment.sim_card_number == ""
+    event = AuditEvent.objects.filter(action="retention.apply").latest("pk")
+    assert event.metadata["sim_card_numbers_anonymized"] == 1
+
+
+@pytest.mark.django_db
 @override_settings(AUTH_ARTIFACT_RETENTION_DAYS=30)
 def test_retention_deletes_expired_auth_artifacts():
     old = timezone.now() - timedelta(days=31)

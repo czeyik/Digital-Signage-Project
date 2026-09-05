@@ -14,12 +14,15 @@ from django.utils import timezone
 from signage.models import (
     Alert,
     AuditEvent,
+    Device,
+    DeviceAssignment,
     Driver,
     LoginThrottle,
     MediaAsset,
     MediaDeletion,
     Playlist,
     User,
+    Vehicle,
 )
 
 
@@ -98,6 +101,46 @@ def test_marketing_user_cannot_see_driver_name_in_csv(client):
     content = b"".join(response.streaming_content).decode()
     assert "driver_internal_id" in content
     assert "driver_name" not in content
+
+
+@pytest.mark.django_db
+def test_device_list_limits_assignment_personal_data_to_owner(client):
+    owner = User.objects.create_user(
+        "owner-devices@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.OWNER,
+    )
+    marketing = User.objects.create_user(
+        "marketing-devices@duducar.co",
+        "A-very-long-password-123",
+        role=User.Role.MARKETING,
+    )
+    device = Device.objects.create(label="Wave 9 Lenovo HA259E36")
+    DeviceAssignment.objects.create(
+        device=device,
+        driver=Driver.objects.create(internal_id="D-PRIVATE", name="Private Driver"),
+        vehicle=Vehicle.objects.create(registration="VKL8266"),
+        sim_card_number="+60127778888",
+    )
+
+    client.force_login(owner)
+    owner_response = client.get(reverse("device-list"))
+    assert b"Private Driver" in owner_response.content
+    assert b"VKL8266" in owner_response.content
+    assert b"+60127778888" in owner_response.content
+    assert AuditEvent.objects.filter(
+        actor=owner,
+        action="driver.personal_data.view",
+        target_id="device-list",
+    ).exists()
+
+    client.force_login(marketing)
+    marketing_response = client.get(reverse("device-list"))
+    assert b"Wave 9 Lenovo HA259E36" in marketing_response.content
+    assert b"Restricted" in marketing_response.content
+    assert b"Private Driver" not in marketing_response.content
+    assert b"VKL8266" not in marketing_response.content
+    assert b"+60127778888" not in marketing_response.content
 
 
 @pytest.mark.django_db

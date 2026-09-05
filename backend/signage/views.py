@@ -21,7 +21,7 @@ from django.contrib.auth.views import (
 )
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import connection, transaction
-from django.db.models import Count, F, OuterRef, Q, Subquery
+from django.db.models import Count, F, OuterRef, Prefetch, Q, Subquery
 from django.db.models.functions import TruncDate
 from django.http import HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -43,6 +43,7 @@ from .models import (
     Alert,
     AuditEvent,
     Device,
+    DeviceAssignment,
     DeviceCommand,
     DeviceLocationPoint,
     EnrollmentCode,
@@ -846,10 +847,27 @@ def playlist_clone(request, playlist_id):
 
 @login_required
 def device_list(request):
+    devices = Device.objects.prefetch_related(
+        Prefetch(
+            "assignments",
+            queryset=DeviceAssignment.objects.filter(
+                unassigned_at__isnull=True
+            ).select_related("driver", "vehicle"),
+            to_attr="current_assignments",
+        )
+    ).order_by("label")
+    if request.user.is_owner:
+        AuditEvent.objects.create(
+            actor=request.user,
+            action="driver.personal_data.view",
+            target_type="signage.driver",
+            target_id="device-list",
+            metadata={"surface": "device_list"},
+        )
     return render(
         request,
         "signage/device_list.html",
-        {"devices": Device.objects.prefetch_related("assignments").order_by("label")},
+        {"devices": devices},
     )
 
 
@@ -886,22 +904,57 @@ def device_reassign(request, device_id):
         else Device.objects
     )
     device = get_object_or_404(devices, pk=device_id)
-    form = DeviceReassignmentForm(request.POST or None)
-    if request.method == "POST" and form.is_valid():
-        form.save(device)
-        EnrollmentCode.objects.filter(device=device, used_at__isnull=True).update(
-            expires_at=timezone.now()
+    current_assignment = (
+        device.assignments.select_related("driver", "vehicle")
+        .filter(unassigned_at__isnull=True)
+        .first()
+    )
+    if request.method == "GET" and current_assignment:
+        AuditEvent.objects.create(
+            actor=request.user,
+            action="driver.personal_data.view",
+            target_type=current_assignment.driver._meta.label_lower,
+            target_id=str(current_assignment.driver_id),
+            metadata={"surface": "device_assignment_edit"},
         )
-        audit(request.user, "device.reassign", device)
+    form = DeviceReassignmentForm(
+        request.POST or None,
+        device=device,
+        initial={
+            "device_label": device.label,
+            "driver_name": current_assignment.driver.name
+            if current_assignment
+            else "",
+            "vehicle_registration": current_assignment.vehicle.registration
+            if current_assignment
+            else "",
+            "sim_card_number": current_assignment.sim_card_number
+            if current_assignment
+            else "",
+        },
+    )
+    if request.method == "POST" and form.is_valid():
+        assignment_changed = form.save(device)
+        if assignment_changed:
+            EnrollmentCode.objects.filter(device=device, used_at__isnull=True).update(
+                expires_at=timezone.now()
+            )
+        audit(
+            request.user,
+            "device.reassign" if assignment_changed else "device.edit",
+            device,
+        )
         messages.success(
             request,
-            "Device reassigned. Assignment history was preserved.",
+            "Device and assignment updated."
+            if assignment_changed
+            else "Device updated.",
         )
         return redirect("device-list")
     return render(
         request,
         "signage/form.html",
-        {"form": form, "title": f"Reassign {device.label}"},
+        {"form": form, "title": f"Edit {device.label}"},
     )
 
 

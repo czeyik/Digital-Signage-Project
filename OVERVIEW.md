@@ -44,9 +44,11 @@ before changing it:
   audio/camera/mic, PDF/GIF/APNG, advertiser/approval workflows, remote
   updates, advanced fleet/shifts, MFA, independently audited evidence.
 - Collect no passenger data/unneeded permissions. Store only driver name,
-  internal ID, registration; reports use IDs only. Never log PII, secrets,
-  tokens, or raw media URLs. Anonymize name/registration one year after final
-  unassignment; retain/anonymize event records after one year as appropriate.
+  system-generated internal ID, registration, and assignment SIM telephone
+  number; reports use IDs only. Never log PII, secrets, tokens, or raw media
+  URLs. Only owners may view assignment telephone numbers. Anonymize name,
+  registration, and SIM telephone number one year after final unassignment;
+  retain/anonymize event records after one year as appropriate.
 
 ## Non-negotiable product rules
 
